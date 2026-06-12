@@ -335,15 +335,21 @@ export function generateLevel(seed, biomeConfig) {
   const standableEnemy = standableAll.filter((s) => s.runLen >= MIN_ENEMY_PLATFORM_TILES)
 
   const enemyCount = clampInt(randInt(rng, biomeConfig.minEnemies, biomeConfig.maxEnemies), 0, standableEnemy.length)
-  const enemies = pickSpawns(rng, standableEnemy, enemyCount).map((cell) => ({
-    ...worldFromStandable(cell),
-    // Patrol bounds = the OWNING platform run's world span (Decision 41) — the generator KNOWS the
-    // run each enemy stands on (collectStandable recorded it), so the scene doesn't have to map a
-    // world coord back to a platform. Inset by half a body so the enemy never clamps into a wall.
-    patrolMinX: (cell.runCol + 0.5) * TILE_SIZE + ENEMY_PATROL_INSET,
-    patrolMaxX: (cell.runCol + cell.runLen - 0.5) * TILE_SIZE - ENEMY_PATROL_INSET,
-    spec: 'brute',
-  }))
+  const enemyCells = pickSpawns(rng, standableEnemy, enemyCount)
+  const enemies = enemyCells.map(enemySpawnFromCell)
+
+  // ── spawnCandidates[] (design §6.4, Decision 45 / review MAJOR — enemyCountBonus source) ── the
+  // SURPLUS standable-enemy cells NOT already used by `enemies`, mapped to the SAME enemy-spawn shape
+  // (DRY via enemySpawnFromCell). Phase 4's depth-scaled `enemyCountBonus` draws extra spawns from
+  // THIS list (up to the biome's maxEnemies) so "more enemies at depth" is IMPLEMENTABLE without the
+  // scene re-deriving standable cells (a DRY violation the review flagged) and without silently
+  // no-op'ing. Derived AFTER the RNG pick (a pure set-difference) so it consumes NO extra RNG draws —
+  // the enemies/pickups output + the regression pin are UNCHANGED. Order is deterministic (the
+  // collectStandable scan order), so a given seed yields the same candidate sequence (AC47).
+  const chosenKeys = new Set(enemyCells.map((c) => `${c.col},${c.row}`))
+  const spawnCandidates = standableEnemy
+    .filter((c) => !chosenKeys.has(`${c.col},${c.row}`))
+    .map(enemySpawnFromCell)
 
   const pickupCount = clampInt(randInt(rng, biomeConfig.minPickups, biomeConfig.maxPickups), 0, standableAll.length)
   const pickups = pickSpawns(rng, standableAll, pickupCount).map((cell) => ({
@@ -368,6 +374,7 @@ export function generateLevel(seed, biomeConfig) {
     exit,
     platforms, // merged SOLID + ONEWAY runs (Decision 37).
     enemies, // standable world spawn points + patrol bounds + spec.
+    spawnCandidates, // SURPLUS enemy spawns for the depth-scaled enemyCountBonus (Decision 45).
     pickups, // standable world spawn points + kind.
     seed,
     biomeId: biomeConfig.id,
@@ -410,6 +417,20 @@ function worldFromStandable(cell) {
     row: cell.row,
     x: (cell.col + 0.5) * TILE_SIZE,
     y: (cell.row + 0.5) * TILE_SIZE,
+  }
+}
+
+// Convert a standable-ENEMY cell record to a full enemy SPAWN (world point + patrol bounds + spec).
+// Shared by the chosen `enemies` list AND the `spawnCandidates` surplus (Decision 45 — DRY, ONE shape
+// so the scene treats a depth-bonus spawn identically to a base spawn). Patrol bounds = the OWNING
+// platform run's world span (Decision 41); the generator KNOWS the run each enemy stands on
+// (collectStandable recorded runCol/runLen), so the scene never maps a world coord back to a platform.
+function enemySpawnFromCell(cell) {
+  return {
+    ...worldFromStandable(cell),
+    patrolMinX: (cell.runCol + 0.5) * TILE_SIZE + ENEMY_PATROL_INSET,
+    patrolMaxX: (cell.runCol + cell.runLen - 0.5) * TILE_SIZE - ENEMY_PATROL_INSET,
+    spec: 'brute',
   }
 }
 

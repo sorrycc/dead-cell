@@ -22,3 +22,11 @@ export const DESIGN_HEIGHT = 720
 // scenes (Title/Hub/HUD/GameOver/Victory) have no bodies and must not run a gravity-
 // enabled Arcade world (YAGNI/SOLID). Tuned in Phase 1 alongside jump/run feel.
 export const GRAVITY = 1500
+
+// ── Player max HP (Decision 44 / §6.4 — review fix: avoid the magic-100 drift) ──
+// The carried-HP run state (core/RunState.js, PURE, no Phaser) and the Phaser-coupled Player both
+// need the SAME starting/maximum HP. Hoisting it to this PURE constant owner means RunState can
+// import it WITHOUT importing Player (which pulls in Phaser and would break the headless-import
+// convention), and Player imports the same number — ONE source, no drift (DRY). The HUD reads the
+// live value off the player each frame, so it stays consistent automatically.
+export const PLAYER_MAX_HP = 100

@@ -87,6 +87,10 @@ export class Enemy {
     this.facing = -1 // start facing left (toward the room interior from a right-ish spawn).
     this.state = STATE.IDLE
     this.dead = false
+    // Optional scene hook fired ONCE when this enemy dies (Decision 47/AC46): GameScene sets it to
+    // bump runState.kills for the run summary. Kept null by default so the Enemy stays self-contained
+    // (the Cells economy is Phase 5 — only the free KILL COUNT is wired this phase).
+    this.onDeath = null
 
     this.patrolMinX = patrolMinX
     this.patrolMaxX = patrolMaxX
@@ -97,6 +101,7 @@ export class Enemy {
     this.contactCooldownTimer = 0
     this.telegraphTimer = 0 // > 0 during the attack wind-up (the dodge window).
     this.strikeTimer = 0 // > 0 during the strike's active+recovery (after the telegraph).
+    this.strikeRect = null // the pooled hitbox rect of OUR live strike (so we release only ours).
     this.hitstunTimer = 0
     this.hurtIframeTimer = 0
     this.loseTimer = 0 // counts time the player has been out of range during chase.
@@ -124,12 +129,11 @@ export class Enemy {
     this.body.setVelocity(result.knockbackX * this.spec.knockbackTakeMult, result.knockbackY)
     this.hurtIframeTimer = this.spec.hurtIframe
 
-    // Cancel any in-progress attack (interrupt): release the live strike hitbox, clear its timers.
-    // NOTE (Phase 4 seam): releaseAll() clears the WHOLE shared enemy pool. With ONE enemy (YAGNI,
-    // Decision 22) that's exactly "release MY strike". When Phase 4 ships multiple enemies, give
-    // each enemy its OWN pool (or have acquire() return the rect so we can release only ours) so one
-    // enemy's interrupt doesn't cancel another's live strike.
-    this.hitboxPool.releaseAll()
+    // Cancel any in-progress attack (interrupt): release ONLY this enemy's live strike hitbox, clear
+    // its timers. Phase 4 ships MULTIPLE enemies sharing one pool, so releaseAll() (the old code)
+    // would cancel a different enemy's live strike — the resolved review MAJOR. _releaseStrike()
+    // targets the rect acquire() returned for OUR swing (stored in _fireStrike), nobody else's.
+    this._releaseStrike()
     this.telegraphTimer = 0
     this.strikeTimer = 0
 
@@ -254,6 +258,8 @@ export class Enemy {
     if (this.strikeTimer <= 0) {
       this.attackCooldownTimer = this.spec.attackCooldown
       this.state = STATE.CHASE
+      this.strikeRect = null // strike fully resolved — drop our handle (defensive; the ownerId guard
+      //                        in _releaseStrike already prevents releasing a re-acquired rect).
     }
   }
 
@@ -269,10 +275,27 @@ export class Enemy {
     if (this.deathTimer <= 0) this._despawn()
   }
 
-  // Acquire the strike hitbox from this enemy's pool, placed in front by facing (Decision 30).
+  // Acquire the strike hitbox from the SHARED enemy pool, placed in front by facing (Decision 30).
+  // STORE the returned rect (review MAJOR / Phase-4 seam): with multiple enemies sharing one pool we
+  // must release only OUR live strike on an interrupt/death — never releaseAll() the whole pool (that
+  // would cancel a DIFFERENT enemy's live strike mid-swing). acquire() already returns the rect, so
+  // _releaseStrike() targets exactly ours. (Cleaner than a per-enemy pool — DRY, no pool proliferation.)
   _fireStrike() {
     const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
-    this.hitboxPool.acquire(attacker, this.spec.swing, this.id)
+    this.strikeRect = this.hitboxPool.acquire(attacker, this.spec.swing, this.id)
+  }
+
+  // Release ONLY this enemy's live strike hitbox (review MAJOR — never the whole shared pool). Guard
+  // against a STALE handle: the pool may have already released our hitbox (after swing.active) and
+  // RE-acquired that same rect for ANOTHER enemy — so we release it only if it is STILL active AND
+  // still tagged as OURS (hb.ownerId === this.id). Otherwise we'd cancel a different enemy's live
+  // strike via a dangling reference (the exact shared-pool bug, reintroduced through staleness).
+  _releaseStrike() {
+    const rect = this.strikeRect
+    if (rect && rect.hb.active && rect.hb.ownerId === this.id) {
+      this.hitboxPool.release(rect)
+    }
+    this.strikeRect = null
   }
 
   // Detect the player: within detectRange horizontally AND within the vertical band (so it doesn't
@@ -290,10 +313,11 @@ export class Enemy {
     this.state = STATE.DEAD
     this.body.enable = false // stop colliding/overlapping immediately (no post-death contact dmg).
     this.body.setVelocity(0, 0)
-    this.hitboxPool.releaseAll()
+    this._releaseStrike() // release only OUR live strike (not the shared pool — review MAJOR).
     this.deathTimer = 0.35 // s — how long the pop plays before despawn.
     this._kickScale(1.5, 1.5)
     this.dropCells()
+    if (this.onDeath) this.onDeath() // fire the scene's kill-count hook ONCE (Decision 47/AC46).
   }
 
   // HOOK (Decision 22): Phase 4 spawns real Cell pickups here. Now it just reports the count so the
@@ -322,7 +346,7 @@ export class Enemy {
     this.dead = true
     this.state = STATE.DEAD
     if (this.body) this.body.enable = false
-    if (this.hitboxPool) this.hitboxPool.releaseAll()
+    this._releaseStrike() // release only OUR live strike (not the shared pool — review MAJOR).
     this._despawn()
   }
 

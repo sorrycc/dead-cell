@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import { SWINGS, COMBO_LEN } from '../combat/hitbox.js'
+import { PLAYER_MAX_HP } from '../config/constants.js'
 
 // ── Player controller (design §6.1 + §6.3, Decisions 10/11/12/13/14 + 18/25/31/32, AC11–AC18 + AC20/AC23) ──
 // A plain class (Decision 10) that HOLDS a Phaser.GameObjects.Rectangle + its Arcade body
@@ -83,7 +84,9 @@ const HURT_COLOR = 0xe74c3c // tint while hurt-iframed (red flash — distinct f
 const ATTACK_COLOR = 0xaed6f1 // brief swing color pop (light blue) so the swing reads.
 
 // ── Combat (design §6.3, Decisions 18/25/31/32, AC20/AC23) ──
-const MAX_HP = 100 // player hit points (shown on the HUD).
+// player hit points (shown on the HUD). Imported from constants.js (the PURE cross-site owner) so
+// core/RunState.js shares the EXACT number without importing Phaser-coupled Player (Decision 44).
+const MAX_HP = PLAYER_MAX_HP
 const ATTACK_MOVE_SCALE = 0.45 // accel + top-speed scale while attacking (committed but mobile).
 const HURT_KNOCKBACK_LOCKOUT = 0.16 // s — how long onHit's knockback overrides control (Decision 32).
 const HURT_IFRAME = 0.6 // s — invulnerability after taking a hit (no second hit during it, AC23).

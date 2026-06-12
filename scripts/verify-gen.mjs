@@ -11,17 +11,23 @@
 // Sections:
 //   1. rng determinism + regression pin (AC7 — the foundation; unchanged from Phase 0).
 //   2. Combat-phase pure-module contracts (AC20–22 — unchanged; proves hitbox.js/damage.js purity).
-//   3. Procedural-level sweep over N=200 seeds (AC19/AC27/AC28):
+//   3. Procedural-level sweep over N=200 seeds × EVERY biome in BIOME_ORDER (AC19/AC27/AC28):
 //        a. Determinism — generateLevel(seed) twice → DEEP-EQUAL (element-wise over the int grid).
 //        b. Regression pin — ONE fixed seed → a FULL reference description (deep-equal, like the rng
 //           pin: the COMPUTED output of the real function, never hand-invented). The tiles are
 //           pinned via a SPECIFIED row-major string serialization (review MAJOR — no vague "hash").
+//           (The pin is PRISON-shaped; adding name/tier/levels/endsInBoss to PRISON does NOT change
+//           generateLevel output — the generator ignores them — and the pin's field allowlist excludes
+//           the new `spawnCandidates`, so the pin is UNAFFECTED, re-run to confirm — review MINOR.)
 //        c. Bounds (AC28) — cols/rows within [MIN,MAX]; exit non-zero, in-bounds, ≠ entrance;
 //           entrance/exit cells EMPTY; enemy count within the biome band.
 //        d. No spawn in a wall (AC28) — every enemy/pickup maps to an EMPTY cell with a SOLID/ONEWAY
 //           directly below (RE-derived from `tiles`, independent of the generator's intent).
 //        e. Traversable (AC27) — build the platform reachability graph from `platforms` via the
 //           SHARED canReachPlatform predicate, BFS entrance→exit, assert the exit is reached.
+//   4. Run-structure (§6.4, AC42/AC43/AC47): curve monotonicity + scaled-stat rise; biome-tier
+//      monotonicity + per-biome bounds; WHOLE-RUN effectiveDifficulty non-decreasing across the exact
+//      RunState.advance() chain the game walks; seed-chain + biome-sequence determinism.
 // Exits non-zero on ANY failure so `npm run verify` gates CI.
 
 import { mulberry32 } from '../src/util/rng.js'
@@ -30,7 +36,14 @@ import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
 import { generateLevel, TILE, canReachPlatform } from '../src/world/LevelGenerator.js'
-import { PRISON, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
+import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
+// Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
+// SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
+// modules satisfy. (BRUTE_SPEC lives in the Phaser-coupled Enemy.js, so we DON'T import it; the
+// scaleSpec monotonicity proof uses a minimal PURE base stub below — scaleSpec only multiplies
+// numeric fields, so any base with those fields proves the "scaled stat rises" property.)
+import { scaleAtDepth, scaleSpec, effectiveDifficulty } from '../src/config/difficulty.js'
+import { createRunState } from '../src/core/RunState.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -219,18 +232,22 @@ function checkDescription(desc, biome) {
 }
 
 // ── 3a) Determinism (AC19): generateLevel twice → DEEP-EQUAL (element-wise over the int grid). ──
-// ── 3c/3d/3e) Per-seed bounds + spawn-validity + traversability over N seeds. ──
+// ── 3c/3d/3e) Per-seed bounds + spawn-validity + traversability over N seeds, for EVERY biome. ──
+// §6.4 extends the sweep to the WHOLE BIOME_ORDER (not just PRISON) so AC28 (bounds / no-wall-spawn /
+// traversable) holds for every biome the run can walk, not only the opener.
 const N = 200
-for (let i = 0; i < N; i++) {
-  // Spread the seeds (a Knuth multiplicative hash) so the sweep isn't a near-identical run of
-  // adjacent integers — exercises a wide range of seeded layouts deterministically.
-  const seed = (i * 2654435761) >>> 0
-  const d1 = generateLevel(seed, PRISON)
-  const d2 = generateLevel(seed, PRISON)
-  if (!deepEqual(d1, d2)) fail(`determinism: seed ${seed} produced two different descriptions`)
+for (const biome of BIOME_ORDER) {
+  for (let i = 0; i < N; i++) {
+    // Spread the seeds (a Knuth multiplicative hash) so the sweep isn't a near-identical run of
+    // adjacent integers — exercises a wide range of seeded layouts deterministically.
+    const seed = (i * 2654435761) >>> 0
+    const d1 = generateLevel(seed, biome)
+    const d2 = generateLevel(seed, biome)
+    if (!deepEqual(d1, d2)) fail(`determinism: biome ${biome.id} seed ${seed} produced two descriptions`)
 
-  const reason = checkDescription(d1, PRISON)
-  if (reason) fail(`seed ${seed}: ${reason}`)
+    const reason = checkDescription(d1, biome)
+    if (reason) fail(`biome ${biome.id} seed ${seed}: ${reason}`)
+  }
 }
 
 // ── 3b) Regression pin (AC19): ONE fixed seed → a FULL reference description (deep-equal). ──
@@ -314,8 +331,108 @@ const PIN_EXPECTED = {
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 4) Run-structure: difficulty curve + biome tiers + whole-run monotonicity + seed determinism
+//    (design §6.4, Decision 49, AC42/AC43/AC47). An INDEPENDENT proof (not self-certification): the
+//    verifier walks the EXACT advance() chain the game walks and re-derives every property.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+
+// A minimal PURE base spec for the scaleSpec monotonicity proof (BRUTE_SPEC lives in Phaser-coupled
+// Enemy.js — see the import note). scaleSpec only MULTIPLIES these numeric fields, so any base with
+// them proves "the scaled stat rises with depth"; the exact base values don't matter to the property.
+const BASE_SPEC_STUB = {
+  maxHp: 60,
+  contactDamage: 6,
+  patrolSpeed: 70,
+  chaseSpeed: 160,
+  swing: { reach: 56, damage: 12, knockback: 320 },
+}
+
+// ── 4a) Curve monotonicity (AC42): each scaleAtDepth scalar is non-decreasing in depth, AND the
+// scaled stat (scaleSpec(...).maxHp) actually rises — the scaling is real, not just the multiplier. ──
+const MAXD = 60 // a generous run length the curve must stay monotone over (far past real runs).
+{
+  let prev = scaleAtDepth(0)
+  let prevHp = scaleSpec(BASE_SPEC_STUB, prev).maxHp
+  for (let depth = 1; depth <= MAXD; depth++) {
+    const s = scaleAtDepth(depth)
+    if (s.enemyHpMult < prev.enemyHpMult) fail(`curve: enemyHpMult dipped at depth ${depth}`)
+    if (s.enemyDamageMult < prev.enemyDamageMult) fail(`curve: enemyDamageMult dipped at depth ${depth}`)
+    if (s.enemySpeedMult < prev.enemySpeedMult) fail(`curve: enemySpeedMult dipped at depth ${depth}`)
+    if (s.enemyCountBonus < prev.enemyCountBonus) fail(`curve: enemyCountBonus dipped at depth ${depth}`)
+    const hp = scaleSpec(BASE_SPEC_STUB, s).maxHp
+    if (hp < prevHp) fail(`curve: scaled maxHp dipped at depth ${depth} (${hp} < ${prevHp})`)
+    // scaleSpec must NOT mutate the base (Decision 45) — re-read a field after scaling.
+    if (BASE_SPEC_STUB.maxHp !== 60) fail('scaleSpec mutated the base spec (aliasing bug)')
+    prev = s
+    prevHp = hp
+  }
+}
+
+// ── 4b) Biome-tier monotonicity (AC43): difficultyTier is non-decreasing along BIOME_ORDER, and
+// every biome's cols/rows are within the size bounds (so AC28 holds for the whole list). ──
+{
+  if (BIOME_ORDER.length < 3) fail(`BIOME_ORDER has ${BIOME_ORDER.length} biomes, expected ≥3 (AC43)`)
+  for (let i = 1; i < BIOME_ORDER.length; i++) {
+    if (BIOME_ORDER[i].difficultyTier < BIOME_ORDER[i - 1].difficultyTier) {
+      fail(`biome tier dipped: ${BIOME_ORDER[i].id} tier ${BIOME_ORDER[i].difficultyTier} < prior`)
+    }
+  }
+  for (const b of BIOME_ORDER) {
+    if (b.cols < COLS_MIN || b.cols > COLS_MAX) fail(`biome ${b.id} cols ${b.cols} out of bounds`)
+    if (b.rows < ROWS_MIN || b.rows > ROWS_MAX) fail(`biome ${b.id} rows ${b.rows} out of bounds`)
+    if (!(b.levels >= 1)) fail(`biome ${b.id} levels ${b.levels} must be ≥1 (BLOCKER 1 model)`)
+  }
+}
+
+// ── 4c) Whole-run monotonicity (AC42/AC49): drive a fresh RunState through advance() for the FULL run
+// (every biome's every level) and assert effectiveDifficulty(depth, biome) is non-decreasing across
+// the ENTIRE run — the load-bearing "visibly rising difficulty" proof. Walks the EXACT chain the game
+// walks (Decision 49), so a curve/biome/levels re-tune that breaks the AC fails LOUDLY here. ──
+const RUN_SEED = 0xc0ffee
+const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
+{
+  const rs = createRunState(RUN_SEED)
+  let prevEff = effectiveDifficulty(rs.depth, rs.biome())
+  // Step through every level of the run via advance() until the last biome's last level is cleared.
+  let steps = 0
+  while (!rs.isRunComplete()) {
+    rs.advance()
+    steps++
+    const eff = effectiveDifficulty(rs.depth, rs.biome())
+    if (eff < prevEff) {
+      fail(`whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+    }
+    prevEff = eff
+    if (steps > totalLevels + 5) fail('whole-run walk did not terminate (isRunComplete never true)')
+  }
+  // The run length = sum of per-biome levels; depth at completion = totalLevels − 1 (0-based start).
+  if (rs.depth !== totalLevels - 1) {
+    fail(`run length mismatch: depth ${rs.depth} at completion, expected ${totalLevels - 1}`)
+  }
+  // And we must have ended on the LAST biome (BLOCKER 1 — not looping/short-circuiting).
+  if (!rs.isLastBiome()) fail('run completed but not on the last biome (BLOCKER 1 regression)')
+}
+
+// ── 4d) Seed-chain + biome-sequence determinism (AC47): two fresh RunStates from the SAME start seed
+// advance in lockstep to the SAME (biomeIndex, levelInBiome, seed) sequence — the run replays. ──
+{
+  const a = createRunState(RUN_SEED)
+  const b = createRunState(RUN_SEED)
+  for (let step = 0; step < totalLevels; step++) {
+    if (a.seed !== b.seed) fail(`seed chain diverged at step ${step}: ${a.seed} !== ${b.seed}`)
+    if (a.biomeIndex !== b.biomeIndex) fail(`biome index diverged at step ${step}`)
+    if (a.levelInBiome !== b.levelInBiome) fail(`levelInBiome diverged at step ${step}`)
+    if (a.depth !== b.depth) fail(`depth diverged at step ${step}`)
+    a.advance()
+    b.advance()
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
-    `${N} seeds → deterministic + bounds(AC28) + no-wall-spawn(AC28) + traversable(AC27); level pin OK`,
+    `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
+    `traversable(AC27); level pin OK; curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
+    `levels; seed chain deterministic (AC47)`,
 )
 process.exit(0)

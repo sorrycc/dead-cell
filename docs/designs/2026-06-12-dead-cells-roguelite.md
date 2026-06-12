@@ -209,15 +209,66 @@ saves; level editor.
 > are now reserved for the Combat phase ONLY; future phases will renumber their letters to the next
 > free integers when they are fully specified.
 
-**Phase 4 — Enemies:**
+**Phase 4 — Run structure (THIS PHASE — fully specified):**
 
-- **AC-P4.** Enemies run a state-machine AI, damage the player on contact/attack, take damage and
-  die, and drop **Cells**.
+> NOTE ON PHASE ORDER + SCOPE. The build orchestrator schedules **"Phase 4 · Run structure"** to
+> ASSEMBLE THE RUN on top of the live procedural-levels + combat phases — an ordered, scaling
+> sequence of biomes carried by a single `RunState`, ending each run in a real **GameOver** summary.
+> This is the run-FLOW half of the doc's original §6.5 "Run economy + biome flow" block (the run-only
+> gold/scrolls **economy** + the Cells-to-meta bank are deferred to a later phase — YAGNI here). The
+> doc keeps its section numbering: this phase fills **§6.4** (the next empty per-phase slot) and the
+> §6.5 stub is retitled to the deferred economy. AC NUMBERING (continuing the §3 convention): the
+> numbered fully-specified ACs reuse the next free integers **42–47** — never colliding with Combat's
+> 20–26 or Levels' 19/27–30 (the lettered `AC-P5`…`AC-P7` for un-implemented phases are unchanged).
 
-**Phase 5 — Run economy + biome flow:**
+42. **Pure scaling curve by depth, monotonic, shared by game + verifier.** `config/difficulty.js` is a
+    PURE module (NO Phaser import) exporting `scaleAtDepth(depth)` → a plain `{ enemyHpMult,
+    enemyDamageMult, enemyCountBonus, … }` scalar set that RISES with `depth` (mirrors crowd-runner's
+    `config/difficulty.js` role: ONE source of "how hard is depth N", imported by BOTH GameScene and
+    `verify-gen.mjs`). Across the full ordered biome sequence the effective difficulty is
+    **non-decreasing** with depth (review fix — the intended property is NON-DECREASING, allowing the
+    speed-cap plateau / intra-tier flat; NOT "strictly increasing"); `npm run verify` asserts this over
+    every depth in the run.
 
-- **AC-P5.** Rooms/biomes chain into a run via doors; **gold/scrolls** are run-only boosts;
-  **Cells** are banked toward meta; the run is traversable end-to-end.
+43. **Ordered multi-biome list with rising tiers.** `config/biomes.js` exports an ORDERED `BIOME_ORDER`
+    (≥3 biomes, e.g. Prison → Sewers → Ramparts) — each a PURE config with its own theme colors, enemy
+    pool, length (`cols`), a `levels` count (how many GENERATED rooms the biome spans before the run
+    rolls to the next — BLOCKER 1 / Decision 50), `difficultyTier` (a monotonic-non-decreasing integer
+    index), and a `endsInBoss` flag (false for now — bosses are Phase 6). Later biomes are visibly
+    harder (higher tier → the curve plus the per-biome base produce more/tankier enemies). The ordering
+    + tiers are the single source the run walks and the verifier checks.
+
+44. **`RunState` carries the active run.** `core/RunState.js` is a PURE class/factory holding the run's
+    `seed`, `biomeIndex`, `depth`, the player's carried `hp`/`maxHp` (persisted between levels — HP is
+    NOT refilled on transition), currency PLACEHOLDERS (`cells`, `gold` — fields present, spending is a
+    later phase), an `inventory` placeholder, and run stats (`kills`, `startedAt`). It exposes
+    `advance()` (next biome/depth + next seed) and `isLastBiome()`. GameScene OWNS one `RunState` for the
+    active run; it is the single source of truth the scene reads to build each level.
+
+45. **GameScene builds the current biome, scaled by depth.** GameScene reads the current biome from
+    `RunState` (`BIOME_ORDER[biomeIndex]`), generates THAT biome's level (`generateLevel(runState.seed,
+    biome)`), and **scales enemy stats by depth** at spawn: each enemy's `maxHp`/`contactDamage`/swing
+    damage is multiplied by `scaleAtDepth(runState.depth)` (a per-spawn derived spec, not a mutated
+    shared `BRUTE_SPEC`). Reaching the Door **advances** the run (`runState.advance()`) and regenerates
+    the next biome's level in place; the player's HP is carried, not reset. Multiple biomes play in
+    sequence with VISIBLY rising difficulty.
+
+46. **Player death → GameOver run summary.** When the player's HP reaches 0, GameScene hands off to a
+    real **GameOverScene** (no longer the placeholder Title bounce) carrying a RUN SUMMARY: depth
+    reached, biome name, run time, and kills. GameOverScene displays the summary and routes back to
+    **Title/Hub**. The death edge fires exactly once (the existing `gameOver` guard).
+
+47. **Run completion is reachable + deterministic.** Advancing past the LAST biome ends the run cleanly
+    (for now: a run-complete handoff to GameOver/Victory carrying the summary — boss-gated victory is
+    Phase 6). The whole seed chain (start seed → per-biome seeds) is deterministic, so a given start seed
+    replays the same biome sequence + layouts; `npm run verify` re-proves the seed-chain + curve
+    determinism headlessly.
+
+**Phase 5 — Run economy (gold/scrolls + Cells bank) *(deferred from §6.5; filled when implemented)*:**
+
+- **AC-P5.** Within a run, **gold/scrolls** are run-only boosts (lost on death) and in-run upgrade
+  choices appear; killed enemies' **Cells** are banked toward meta. (The run FLOW + multi-biome
+  chaining is delivered in Phase 4 above; this phase adds the two ECONOMIES on top of it.)
 
 **Phase 6 — Bosses:**
 
@@ -710,6 +761,180 @@ phases plug in without re-architecting.
   GameScene passes them straight to `_spawnEnemy` and the live Decision-29 pit-safety (patrol +
   chase clamp to bounds) holds for GENERATED geometry. The full-width floor band keeps wide runs
   plentiful, so requiring 5 never starves spawns (verified: every swept seed still has enemies).
+
+> Decisions 42–49 are the **Run structure** phase (§6.4 — the orchestrator's "Phase 4"). They are
+> final for this phase; later phases append their own.
+
+**42. Difficulty curve = a PURE `config/difficulty.js` keyed on DEPTH, shared game + verifier (mirrors crowd-runner)**
+- Options: A) inline per-biome hardness numbers in `biomes.js` and bump enemy stats ad hoc in
+  GameScene · B) a separate PURE `config/difficulty.js` exporting `scaleAtDepth(depth)` → a scalar set
+  (`enemyHpMult/enemyDamageMult/enemyCountBonus/enemySpeedMult`), imported by BOTH GameScene (to scale
+  spawns) AND `verify-gen.mjs` (to assert monotonicity).
+- Decision: **B)** — this is the crowd-runner pattern verbatim (its `config/difficulty.js` is the
+  single source of "what depth N means", imported by the game and the headless verifier). Separating
+  the CURVE (a pure function of depth) from the BIOME (theme + pool + length) is SOLID + DRY: a biome
+  says *which* enemies and *how long*; the curve says *how hard at this depth*. The curve is a simple
+  monotone ramp — `enemyHpMult = 1 + HP_PER_DEPTH·depth` etc., each scalar non-decreasing in `depth` —
+  so monotonicity is true BY CONSTRUCTION and the verifier's check is a proof, not a filter (same
+  philosophy as the level generator's reach envelope). PURE (no Phaser) so a node import re-proves the
+  convention. YAGNI: linear/clamped ramps, no per-biome curve overrides yet.
+
+**43. Biomes become an ORDERED LIST with tiers; the generator signature is UNCHANGED**
+- Options: A) keep the single `PRISON` + branch on an id in the scene · B) `config/biomes.js` exports an
+  ordered `BIOME_ORDER` array (≥3 entries) plus the existing `BIOMES` map; each entry gains
+  `difficultyTier` (monotone integer), `endsInBoss` (false now), `name` (for the summary), and a
+  distinct `colors`/length — but the `generateLevel(seed, biomeConfig)` contract is UNTOUCHED (a biome
+  is still just a config the pure generator reads).
+- Decision: **B)** — the generator was already built multi-biome-ready (Decision 39); this phase just
+  POPULATES the list it was waiting for, so no generator rewrite. `BIOME_ORDER` is THE ordering the run
+  walks (RunState indexes into it) and the verifier sweeps; `difficultyTier` lets a later biome be
+  intrinsically denser WITHOUT touching the depth curve (the two stack: `effectiveDifficulty(depth) =
+  tier(biome)·K + curveScalar(depth)`, monotone because depth and tier both rise along the run). New
+  biomes reuse `PRISON`'s field shape (DRY) with different colors/counts/length — primitives only, no
+  new art. KISS: 3 biomes ship (Prison/Sewers/Ramparts); the array is trivially extendable.
+
+**44. `core/RunState.js` = a PURE plain object/factory, OWNED by GameScene (not a global singleton)**
+- Options: A) a module-level singleton mutated from anywhere · B) a PURE `createRunState(startSeed)`
+  factory returning a plain object with `advance()`/`isLastBiome()`/`summary()` that GameScene
+  constructs and owns; death/Hub transitions read it off the scene (or take a snapshot).
+- Decision: **B)** — a singleton invites spooky-action mutation + breaks determinism reasoning + can't
+  be unit-tested headlessly. A pure factory (no Phaser import) is node-importable so the verifier can
+  drive the SAME `advance()` chain the game does and assert the seed sequence + depth progression are
+  deterministic + monotone (the convention: pure modules are headlessly verifiable). RunState owns ONLY
+  run-scoped state (seed/biomeIndex/depth/hp/currencies-placeholder/inventory/stats); META (banked Cells
+  across runs) is `util/save.js`'s job in a later phase — kept separate so permadeath = "drop the
+  RunState, keep the save" is a clean seam. GameScene constructs it in `create()` (from a fixed start
+  seed for now — a Hub-chosen seed is Phase 7) and is the single writer.
+
+**45. Enemy scaling = a PER-SPAWN DERIVED spec, NOT a mutated shared `BRUTE_SPEC`**
+- Options: A) multiply fields on the shared `BRUTE_SPEC` object before spawning · B) at spawn, build a
+  shallow-cloned spec via `scaleSpec(BRUTE_SPEC, scaleAtDepth(depth))` (maxHp×hpMult,
+  contactDamage×dmgMult, swing.damage×dmgMult, speeds×speedMult) and pass THAT to `new Enemy(...)`.
+- Decision: **B)** — mutating the shared spec is a classic aliasing bug (every later spawn inherits the
+  multiplied values; a regenerate compounds it). A pure `scaleSpec` that returns a NEW object per spawn
+  is DRY, side-effect-free, and keeps `BRUTE_SPEC` the immutable base. The generator already emits
+  `spec:'brute'` per enemy (a string tag), so GameScene maps tag→base spec then scales by the CURRENT
+  `runState.depth` — the scaling lives entirely in the scene's spawn path, the Enemy class is untouched
+  (it just receives a spec). This is the minimal change that makes "enemy stats scale by depth" true.
+  `scaleSpec` lives in `config/difficulty.js` (PURE) so the verifier can sanity-check a scaled spec too.
+
+**46. Door advance drives RunState; HP carries, the seed chain is RunState-owned**
+- Options: A) keep GameScene's local `this.seed`/`nextSeed` + add biome tracking alongside · B) MOVE the
+  seed chain + biome index into `RunState.advance()` (next seed = deterministic advance of the current;
+  next biome = `min(biomeIndex+1, lastIndex)`; `depth++`); GameScene's `_nextLevel()` calls
+  `runState.advance()` then rebuilds from `runState`.
+- Decision: **B)** — the level→level edge already exists (Decision 40); this phase RE-POINTS its source
+  of truth from a scene-local `this.seed` to `RunState` so the run is one coherent advancing object. HP
+  is CARRIED because the Player persists across rebuilds already (the scene only rebuilds the world, not
+  the Player) — we simply DON'T refill `player.hp` on `_buildLevel` (and we sync `runState.hp` ↔
+  `player.hp` so a summary/Hub sees the carried value). The deterministic advance (Knuth multiplicative,
+  already in the scene) moves verbatim into `RunState` so the chain is reproducible from the start seed.
+  Reaching the Door past the last biome ends the run (Decision 48) instead of looping.
+
+**47. Player death → a REAL GameOverScene carrying a run-summary SNAPSHOT via scene-start data**
+- Options: A) keep the placeholder Title bounce · B) on death, `this.scene.start('GameOver', summary)`
+  where `summary = runState.summary()` (`{ depthReached, biomeName, timeMs, kills, completed:false }`);
+  GameOverScene reads it from `this.scene.settings.data` and renders it, then routes to Title.
+- Decision: **B)** — the task is "Player death → GameOverScene showing a run summary". Passing the
+  summary as scene-START DATA (Phaser's first-class mechanism) keeps GameOver DECOUPLED from GameScene
+  (it never reaches into the live scene — same SOLID rule as the HUD/registry split, Decision 2) and
+  avoids a global. The summary is a plain SNAPSHOT computed once at death (RunState may be torn down
+  after). `kills` is incremented by GameScene on each enemy death (a tiny hook in the death path —
+  the Cells economy is still a later phase, but the KILL COUNT is free and the summary needs it). Run
+  time = `now − runState.startedAt`. GameOver → Title (Hub wiring is Phase 7). The death edge still
+  fires exactly once (the existing `this.gameOver` guard), just re-pointed off the Title placeholder.
+
+**48. Run completion (past the last biome) = a clean GameOver “run complete” handoff (boss victory is Phase 6)**
+- Options: A) loop the last biome forever · B) when `runState.isLastBiome()` and the Door is reached,
+  end the run — for now route to GameOver with the summary tagged `completed:true` (a "RUN COMPLETE"
+  header instead of "GAME OVER").
+- Decision: **B)** — a run must be FINISHABLE for the loop to read as a roguelite, but the real victory
+  gate is a BOSS at the end of the last biome (Phase 6, `endsInBoss`). Until then, clearing the last
+  biome's Door is the completion edge. Reusing GameOverScene (with a `completed` flag flipping the
+  header + color) avoids a near-duplicate scene now (YAGNI) while leaving VictoryScene for the Phase-6
+  boss-kill. The seed chain still advances deterministically, so "complete the run" is reproducible.
+
+**49. Monotonicity is asserted in the VERIFIER over the WHOLE run, not self-reported**
+- Options: A) `difficulty.js` returns a `monotonic:true` it claims · B) `verify-gen.mjs` walks the
+  `BIOME_ORDER` via a fresh `RunState`, computes `effectiveDifficulty(depth, biome)` at every depth of
+  the run, and asserts each is ≥ the previous (strictly non-decreasing) — an INDEPENDENT check (same
+  philosophy as the level BFS, Decision 36).
+- Decision: **B)** — self-certification can lie; an independent sweep can't. The verifier imports the
+  PURE `scaleAtDepth`, `BIOME_ORDER`, `createRunState`, walks the exact `advance()` chain the game
+  walks, and proves: (1) each curve scalar is non-decreasing in depth; (2) the per-biome
+  `difficultyTier` is non-decreasing along `BIOME_ORDER`; (3) the combined `effectiveDifficulty` is
+  non-decreasing across the full run; (4) the seed chain is deterministic (two fresh RunStates from the
+  same start seed produce the same biome/seed sequence). Failures exit non-zero so a future curve/biome
+  re-tune that breaks the "rising difficulty" AC fails LOUDLY in CI.
+
+> Decisions 50–53 close the **Phase-4 review BLOCKERs / MAJORs / MINORs** the prior revision left
+> implementation-defined. They are final for this phase.
+
+**50. A biome spans MULTIPLE levels — `levels` per biome + a `levelInBiome` counter (review BLOCKER 1+2)**
+- Problem: the prior `advance()` rolled `biomeIndex` on EVERY Door, so a 3-biome run was only THREE
+  rooms (one per biome), it ended on the FIRST last-biome Door (Decision 48 fired immediately), and
+  `depth` never climbed past 2 — so the depth-scaling of enemies (BLOCKER 2) was invisible. The phase
+  goal + AC43/AC45 implicitly assume several levels per biome so depth-scaling reads WITHIN a biome.
+- Decision: each biome carries a `levels` field (config/biomes.js — 3 each now). RunState gains a
+  `levelInBiome` (0-based) counter. `advance()` ALWAYS increments `depth` (run-GLOBAL — it NEVER resets,
+  so the curve is sampled across the whole run) and `levelInBiome`, and rolls to the next biome ONLY
+  when `levelInBiome >= biome.levels` (and not already last). The run completes only when the LAST
+  biome's LAST level is cleared (`isRunComplete() = isLastBiome() && levelInBiome >= levels−1`), checked
+  by GameScene at the Door BEFORE advancing. The verifier walks the EXACT `advance()` chain
+  (`while(!isRunComplete())`) — it does NOT assume `depth==biomeIndex` (which would silently break the
+  moment `levels>1`), and asserts the run length = Σ `levels` ending on the last biome. Net: a real
+  multi-room descent per biome (9 levels) with depth-scaling observable within AND across biomes.
+
+**51. `enemyCountBonus` source = a generator-emitted `spawnCandidates[]` SURPLUS (review MAJOR)**
+- Problem: the depth-scaled `enemyCountBonus` had no implementable spawn source. The generator emitted
+  only the fixed `desc.enemies` (already clamped to the band); the scene had no access to the internal
+  `standableEnemy` pool, so "draw extra spawns from the same standable points" was either a silent
+  no-op (AC45 "more enemies" unmet) or invited re-deriving standable cells in the scene (a DRY
+  violation — the scene has no pure standable-scan).
+- Decision: the PURE generator now ALSO emits `spawnCandidates[]` — the standable-ENEMY cells it
+  scanned but did NOT use for `desc.enemies` (a set-difference over the same `standableEnemy` list,
+  mapped to the identical enemy-spawn shape via a shared `enemySpawnFromCell`). It is derived AFTER the
+  RNG pick (a pure filter) so it consumes NO extra RNG draws — the `enemies`/`pickups` output + the
+  regression pin are UNCHANGED. GameScene's `enemyCountBonus` draws extra spawns from this list, capped
+  to `biome.maxEnemies` and bounded by the surplus. So "more enemies at depth" is real + verifiable, the
+  scene never re-derives geometry (DRY), and a level with no surplus simply adds fewer (never a false
+  claim). `spawnCandidates` is standability-checked by the verifier's existing per-spawn assertion path
+  is N/A (it's surplus, not placed), but each candidate is a `standableEnemy` cell by construction.
+
+**52. Per-enemy strike release — never `releaseAll()` the shared enemy pool (review MAJOR / Phase-4 seam)**
+- Problem: `Enemy.onHit`/`_die()`/`forceDespawn()` called `this.hitboxPool.releaseAll()` on the SHARED
+  enemy pool. With ONE enemy that was "release MY strike"; Phase 4 spawns MANY enemies sharing one
+  pool, so one enemy's interrupt/death would cancel a DIFFERENT enemy's live strike mid-swing. The
+  as-built code's own TODO named this phase.
+- Decision: `_fireStrike()` STORES the rect `acquire()` returns (`this.strikeRect`); a new
+  `_releaseStrike()` releases ONLY that rect, and ONLY if it is STILL `active` AND still tagged
+  `hb.ownerId === this.id` (guarding the stale-handle case where the pool already released our hitbox
+  after `swing.active` and re-acquired that rect for another enemy). `strikeRect` is cleared when the
+  strike fully resolves. This is cleaner + DRY-er than a per-enemy pool (no pool proliferation) and is
+  the minimal correct fix. `HitboxPool.acquire()` already returned the rect, so no pool change is needed.
+
+**53. Speed scaling applies to patrol+chase; ranges/telegraph are NOT scaled; HP-sync sites pinned (review MINOR)**
+- Decision (stated, not omitted): `enemySpeedMult` scales BOTH `patrolSpeed` and `chaseSpeed` — a
+  deeper biome's enemy patrols + chases faster (uniform pressure), clamped by `SPEED_CAP` so even a deep
+  chaser can't outrun the player's dodge/run and patrol stays a readable cruise. `detectRange`/
+  `attackRange`/`telegraph` are deliberately NOT scaled: a faster enemy with the SAME telegraph window
+  stays dodgeable — readability is preserved at depth (the genre's contract). HP-CARRY SYNC SITES are
+  pinned to avoid a stale-HP / full-heal bug: `player.hp ← runState.hp` happens EXACTLY ONCE in
+  `create()`; `_buildLevel` touches NEITHER `player.hp` NOR `runState.hp`; `_nextLevel` writes
+  `runState.hp = player.hp` exactly once BEFORE teardown. `_onPlayerDeath` sets `runState.hp = 0` for
+  consistency (the summary doesn't read hp — a harmless keep, not a dead write that signals confusion).
+  Registry `depth`/`biomeName`/HP defaults are seeded in `create()` so a replayed run never flashes the
+  previous run's values before the first `_emitHud()` (scene.start fully re-creates GameScene per run,
+  so `startedAt`/`timeMs` are per-run, never cumulative).
+
+**TIER_WEIGHT lower-bound derivation (review MAJOR — supersedes the "large enough" hand-wave in §6.4):**
+`config/difficulty.js` derives `TIER_WEIGHT` from a stated bound — one tier step (+1) must dominate the
+maximum the curve term (`enemyHpMult+enemyDamageMult`) could fall at a biome boundary, bounded by the
+curve term at a generous max depth — and a MODULE-LOAD assertion throws if a re-tune drops below it
+(mirroring the LevelGenerator reach-envelope assertions). In THIS phase `depth` is run-global (never
+resets), so the curve term is itself non-decreasing across a boundary and the tier only adds —
+monotonicity is structural even at `TIER_WEIGHT=0` — but the derived bound keeps the property ROBUST to
+a future per-biome curve reset.
 
 ---
 
@@ -1228,10 +1453,11 @@ Exits non-zero on any failure so `npm run verify` gates CI. (It does NOT import 
 are Phaser-coupled; importing them would throw under node, which is the convention's whole point.)
 
 **Why this is the minimum that satisfies AC19 + AC27–AC30 without over-reaching (YAGNI):** ONE biome ships
-(the config signature is multi-biome-ready, Phase 5 adds more); hazards render but don't damage yet
-(Phase 5); pickups are placeholder markers (Phase 4/5 owns the economy); the next-seed chain is a
-simple deterministic advance (a real RunState + biome progression is Phase 5); the layout is the
-reach-bounded staircase (a cave/branching generator is a later biome behind the same signature).
+(the config signature is multi-biome-ready; the **ordered multi-biome list `BIOME_ORDER` arrives in
+Phase 4** — §6.4); hazards render but don't damage yet (Phase 5); pickups are placeholder markers (the
+gold/scrolls + Cells economy is Phase 5); the next-seed chain is a simple deterministic advance (a real
+**`RunState` + biome progression is Phase 4** — §6.4); the layout is the reach-bounded staircase (a
+cave/branching generator is a later biome behind the same signature).
 Each deferral is a clean seam — the pure `generateLevel(seed, biomeConfig)` contract + the
 description shape are exactly what later phases extend, not rewrite.
 
@@ -1429,8 +1655,241 @@ Cells drop is a HOOK (Phase 4 owns pickups + the economy); death is a placeholde
 owns real GameOver + permadeath). Each deferral is a clean seam, not a stub that needs rewriting.
 
 
-### 6.4 Phase 4 — Enemies *(filled when Phase 4 is designed)*
-### 6.5 Phase 5 — Run economy + biome flow *(filled when Phase 5 is designed)*
+### 6.4 Phase 4 — Run structure (THIS PHASE — the orchestrator's "Phase 4 · Run structure")
+
+**Goal.** ASSEMBLE THE RUN. The procedural-levels phase (§6.2) already chains level→level on a single
+biome via a scene-local seed; combat (§6.3) already fights/kills/dies. This phase makes those into a
+real **run**: an ORDERED, depth-SCALING sequence of multiple biomes carried by one `RunState`, with
+**enemy stats rising with depth**, the player's **HP carried** between levels, and a real
+**GameOverScene** that shows a **run summary** (depth reached, biome, time, kills) on death — then
+back to Title. The verifier is grown to assert the **difficulty curve is monotonic across biomes**.
+This satisfies **AC42–AC47**. Pure modules stay Phaser-free (node-importable); nothing new allocates
+per-frame; the whole run is deterministic from a start seed.
+
+**What this phase deliberately does NOT do (YAGNI — deferred to later phases):** the run-only
+**gold/scrolls** economy + in-run upgrade choices + the Cells-to-meta BANK (the §6.5 economy block);
+a **boss** at the end of the last biome (`endsInBoss` ships `false`; Phase 6); the **Hub** spend
+screen + localStorage META persistence (Phase 7 — `RunState` is intentionally separate from `save.js`
+so that seam is clean). Each is a populated field / a clean handoff, not a stub to rewrite.
+
+**New / changed modules this phase** (only what the run needs — YAGNI):
+
+```
+src/config/difficulty.js — NEW, **100% PURE** (no Phaser; Decision 42). The depth→hardness CURVE,
+                           mirroring crowd-runner/config/difficulty.js. Exports:
+                           · scaleAtDepth(depth) → { enemyHpMult, enemyDamageMult, enemySpeedMult,
+                             enemyCountBonus } — each a monotone-non-decreasing ramp in `depth`.
+                           · scaleSpec(baseSpec, scale) → a NEW scaled enemy spec (Decision 45).
+                           · effectiveDifficulty(depth, biome) → a single scalar combining the depth
+                             curve + the biome's tier (used by the verifier's monotonicity proof).
+                           Named ramp constants (HP_PER_DEPTH, DMG_PER_DEPTH, …) at the top; clamped
+                           so multipliers stay sane on a long run. Node-importable by verify-gen.mjs.
+src/config/biomes.js     — EXTEND. Add an ORDERED `BIOME_ORDER` array (≥3 PURE biome configs:
+                           PRISON → SEWERS → RAMPARTS) — each with `name`, `difficultyTier` (monotone
+                           int), `endsInBoss:false`, distinct `colors`/`cols`/enemy bands, reusing
+                           PRISON's field shape (Decision 43). Keep `PRISON` + the size bounds. The
+                           `generateLevel(seed, biomeConfig)` contract is UNCHANGED.
+src/core/RunState.js     — NEW, **PURE** (no Phaser; Decision 44). createRunState(startSeed) → a plain
+                           object { seed, biomeIndex, depth, hp, maxHp, cells, gold, inventory, kills,
+                           startedAt } with methods advance() (next seed/biome/depth), isLastBiome(),
+                           biome() (BIOME_ORDER[biomeIndex]), and summary() (the GameOver snapshot).
+                           Owns the deterministic seed chain (moved out of GameScene). Node-importable.
+src/scenes/GameScene.js  — EXTEND. Construct ONE RunState in create() (fixed start seed for now);
+                           _buildLevel reads the CURRENT biome from RunState + scales each enemy spawn
+                           by scaleAtDepth(depth) (Decision 45); _nextLevel calls runState.advance()
+                           (HP carried, NOT refilled — Decision 46); past the last biome → run-complete
+                           handoff (Decision 48); player death → scene.start('GameOver', summary)
+                           (Decision 47); bump runState.kills on each enemy death; sync runState.hp.
+src/scenes/GameOverScene.js — REWRITE the stub (Decision 47/48). Read the run-summary from
+                           this.scene.settings.data and render it (depth, biome, time, kills); a
+                           `completed` flag flips the header ("GAME OVER" red ↔ "RUN COMPLETE" gold).
+                           → Title on key/click. Stays DECOUPLED (never touches the live GameScene).
+src/scenes/HUDScene.js   — EXTEND (small). Also read depth/biome name from the registry and show a
+                           "DEPTH n — BIOME" readout next to the HP bar (so rising difficulty reads
+                           live). Stays decoupled (registry only, Decision 2).
+scripts/verify-gen.mjs   — GROW (Decision 49). Import scaleAtDepth/effectiveDifficulty/scaleSpec +
+                           BIOME_ORDER + createRunState; assert the curve scalars + biome tiers +
+                           combined effectiveDifficulty are monotonic across the WHOLE run, and the
+                           RunState seed chain is deterministic. Keeps every existing pin.
+```
+
+**`config/difficulty.js` (the curve — Decision 42, mirrors crowd-runner).** PURE. The CURVE is keyed
+on `depth` (0-based levels cleared); the BIOME provides theme/pool/length. Shape:
+
+- `scaleAtDepth(depth)` returns a fresh scalar set, each a simple monotone ramp:
+  `enemyHpMult = 1 + HP_PER_DEPTH·depth`, `enemyDamageMult = 1 + DMG_PER_DEPTH·depth`,
+  `enemySpeedMult = min(SPEED_CAP, 1 + SPEED_PER_DEPTH·depth)`, `enemyCountBonus = floor(depth /
+  COUNT_EVERY)`. Each is non-decreasing in `depth` BY CONSTRUCTION (positive slopes; the speed cap is
+  a non-decreasing clamp), so AC42's "rises with depth" is structural, not asserted-by-luck.
+- `scaleSpec(baseSpec, scale)` → a NEW object: `{ ...baseSpec, maxHp: round(baseSpec.maxHp·hpMult),
+  contactDamage: round(baseSpec.contactDamage·dmgMult), patrolSpeed/chaseSpeed: ·speedMult, swing: {
+  ...baseSpec.swing, damage: round(baseSpec.swing.damage·dmgMult) } }`. No mutation of `baseSpec`
+  (Decision 45). Lives here so the verifier can sanity-check a scaled spec is ≥ the base.
+- `effectiveDifficulty(depth, biome)` = `biome.difficultyTier · TIER_WEIGHT + (enemyHpMult +
+  enemyDamageMult)` — ONE scalar that stacks the biome tier and the depth curve, the quantity the
+  verifier proves non-decreasing across the run (Decision 49). `TIER_WEIGHT` is NOT a "large enough"
+  magic constant: it is DERIVED from a stated lower bound (one tier step must dominate the max the
+  curve term could fall at a boundary, bounded by the curve term at a generous max depth) and a
+  MODULE-LOAD assertion throws if a re-tune drops below it (review MAJOR — see the TIER_WEIGHT note in
+  Decision 53). Because `depth` is run-global (never resets) the tier term is actually redundant for
+  monotonicity THIS phase; the derived bound keeps the property robust to a future per-biome reset.
+- All ramp constants are NAMED + commented at the top with the design intent (KISS, tunable, clamped).
+  `enemySpeedMult` scales BOTH patrol + chase (capped); ranges/telegraph are intentionally NOT scaled
+  (Decision 53 — a faster enemy with an unchanged telegraph stays dodgeable).
+
+**`config/biomes.js` (ordered list — Decision 43).** Keep `PRISON`, `BIOMES`, and the size bounds.
+ADD:
+
+- `SEWERS` and `RAMPARTS` — same field shape as `PRISON` (DRY), distinct `name`, `colors` (green-
+  tinted sewer, grey-stone rampart), slightly longer `cols`, and rising enemy bands. `difficultyTier`
+  is `0 / 1 / 2` (monotone). `endsInBoss:false` on all (Phase 6 flips the last). Each carries
+  `levels: 3` (BLOCKER 1 / Decision 50 — the biome spans 3 generated rooms before rolling on, so the
+  run is 9 levels, not 3 rooms). All within the existing `COLS_MIN/MAX`, `ROWS_MIN/MAX` bounds the
+  verifier enforces (AC28 holds for every biome, not just Prison — the level sweep is extended to each
+  biome). PRISON also gains `name`/`difficultyTier`/`endsInBoss`/`levels` — the generator IGNORES these
+  new fields, so the PRISON regression pin is UNAFFECTED (review MINOR — re-run confirms, it passes).
+- `export const BIOME_ORDER = [PRISON, SEWERS, RAMPARTS]` — THE ordering the run walks + the verifier
+  sweeps. `BIOMES` becomes `{ prison: PRISON, sewers: SEWERS, ramparts: RAMPARTS }`.
+
+**`core/RunState.js` (the active run — Decision 44/46/50).** PURE plain-object factory (no Phaser, no
+`Date`-dependent purity issue: `startedAt` is passed IN by the caller — GameScene passes
+`this.time.now`; the verifier passes `0` — so the module itself stays deterministic + headless):
+
+> **REVIEW BLOCKER 1 FIX (Decision 50, below).** The original `advance()` rolled `biomeIndex` on EVERY
+> Door, making a 3-biome run only THREE rooms (Prison/Sewers/Ramparts, one room each) and ending on the
+> FIRST last-biome Door — so `depth` never climbed far enough for enemy scaling to read (BLOCKER 2 was a
+> consequence). THE FIX: each biome carries `levels` (config/biomes.js); RunState tracks `levelInBiome`;
+> `advance()` ALWAYS increments `depth` (run-global, never resets) + `levelInBiome`, and rolls to the
+> next biome ONLY when the current biome's levels are exhausted. The run completes only when the LAST
+> biome's LAST level is cleared (`isRunComplete()`). The verifier's monotonicity walk uses the EXACT
+> `advance()` chain (so it does NOT assume `depth==biomeIndex` — it walks `while(!isRunComplete())`).
+
+```
+createRunState(startSeed, startedAt = 0) → {
+  seed: startSeed >>> 0,
+  biomeIndex: 0,
+  levelInBiome: 0,          // 0-based level WITHIN the current biome (BLOCKER 1 — Decision 50).
+  depth: 0,                 // run-GLOBAL levels cleared (0 at the first level). NEVER resets → the
+                            //   difficulty curve climbs across the whole run.
+  hp: PLAYER_MAX_HP,        // carried HP (seeded full; imported max so HUD/Player agree — see note).
+  maxHp: PLAYER_MAX_HP,
+  cells: 0, gold: 0,        // currency PLACEHOLDERS (fields present; spending is a later phase).
+  inventory: [],            // placeholder.
+  kills: 0,
+  startedAt,
+  biome() { return BIOME_ORDER[this.biomeIndex] },
+  isLastBiome() { return this.biomeIndex >= BIOME_ORDER.length - 1 },
+  // True when the LAST biome's LAST level was just cleared — the run is finished (Decision 48/50).
+  isRunComplete() { return this.isLastBiome() && this.levelInBiome >= this.biome().levels - 1 },
+  advance() {               // Decision 46/50 — deterministic next seed + next level/biome/depth.
+    this.seed = nextSeed(this.seed)
+    this.depth += 1
+    this.levelInBiome += 1
+    if (this.levelInBiome >= this.biome().levels && !this.isLastBiome()) {
+      this.biomeIndex += 1
+      this.levelInBiome = 0  // roll to the next biome only when this biome's levels are exhausted.
+    }
+    return this
+  },
+  summary(now, completed) { return {
+    depthReached: this.depth, biomeName: this.biome().name,
+    timeMs: now - this.startedAt, kills: this.kills, completed: !!completed,
+  } },
+}
+```
+
+- `nextSeed` (the Knuth multiplicative advance) MOVES verbatim from GameScene into RunState so the seed
+  chain is one owner (DRY). The same `startSeed` always replays the same biome/seed sequence (AC47).
+- **PLAYER_MAX_HP source (avoid the magic-100 drift):** `Player.js` already owns `MAX_HP = 100`.
+  RunState needs the same number but must stay PURE (no Phaser-coupled `Player` import). FIX: hoist the
+  number to a PURE constant both share — add `PLAYER_MAX_HP` to `config/constants.js` (already the
+  cross-site constant owner) and have BOTH `Player.js` and `RunState.js` import it (DRY; one source).
+  This is the only change to `Player.js`/`constants.js` this phase.
+
+**GameScene changes (extend §6.2/§6.3 — Decisions 45/46/47/48).**
+- `create()`: replace the scene-local `this.seed = START_SEED` + `nextSeed` with
+  `this.runState = createRunState(START_SEED, this.time.now)`. `this.biome` is no longer a fixed field
+  — each build reads `this.runState.biome()`. Construct the Player as today; AFTER construction sync
+  `this.player.hp = this.runState.hp` (carried HP). Everything else (Effects, pools, overlaps, camera)
+  is unchanged.
+- `_buildLevel()`: `const biome = this.runState.biome()`; `const desc = generateLevel(this.runState.seed,
+  biome)`. For each `desc.enemies` spawn: `const scale = scaleAtDepth(this.runState.depth)`; `const
+  spec = scaleSpec(BRUTE_SPEC, scale)`; `this._spawnEnemy(e.x, e.y, spec, {patrolMinX, patrolMaxX})` —
+  a NEW scaled spec per spawn (Decision 45). The `enemyCountBonus` then adds up to that many EXTRA
+  spawns drawn from the generator's `desc.spawnCandidates` SURPLUS list (the standable-enemy cells the
+  generator emitted but didn't use — Decision 51, review MAJOR), capped so the live count never exceeds
+  `biome.maxEnemies` and bounded by the surplus available. Colors come from `biome.colors`. The Player
+  is repositioned at the entrance as today but `player.hp` is NOT refilled — and `_buildLevel` touches
+  NEITHER `player.hp` NOR `runState.hp` (the HP sync lives ONLY in `create()` + `_nextLevel`, review
+  MAJOR / Decision 46). Wire `enemy.onDeath` to `this.runState.kills++` (see below).
+- **Enemy-death kill count:** the Enemy already has a `_die()` that fires `dropCells()`. Add a thin
+  scene hook: `_spawnEnemy` sets `enemy.onDeath = () => { this.runState.kills += 1 }` (a new optional
+  callback on Enemy, fired ONCE inside `_die()` next to `dropCells()`). The Cells economy is still a
+  later phase, but the KILL COUNT the summary needs is free. (No per-frame cost.)
+- `_nextLevel()`: **completion check first** (BLOCKER 1 / Decision 50 — using `isRunComplete()`, NOT
+  `isLastBiome()`, so the run only ends after the last biome's LAST level, not its first):
+  `if (this.runState.isRunComplete()) { this._completeRun(); return }`. Otherwise sync
+  `this.runState.hp = this.player.hp` (the carried-HP capture — the ONLY `runState.hp` write on this
+  path), `this.runState.advance()`, `_teardownLevel()`, `_buildLevel()`, `_updateHint()`, clear
+  `transitioning`. (Reaching the Door past the run's end ends the run — Decision 48 — rather than
+  advancing into a non-existent biome/level.)
+- `_completeRun()`: `this.runState.hp = this.player.hp`;
+  `this.scene.start('GameOver', this.runState.summary(this.time.now, true))` (the run-complete handoff,
+  Decision 48). Guard with `this.gameOver` so it fires once.
+- `_onPlayerDeath()` (REWRITE the AC26 placeholder): keep the short freeze/flash, then
+  `this.runState.hp = 0`; `this.scene.start('GameOver', this.runState.summary(this.time.now, false))`
+  instead of `this.scene.start('Title')` — the real GameOver summary handoff (Decision 47). Still
+  guarded by `this.gameOver` so it fires exactly once.
+- `_emitHud()`: also `registry.set('depth', this.runState.depth)` and `registry.set('biomeName',
+  this.runState.biome().name)` so the HUD shows the live depth/biome (HUD stays decoupled).
+- `_updateHint()`: include the depth + biome name in the dev label.
+
+**GameOverScene (REWRITE the stub — Decision 47/48).** Reads the summary from
+`this.scene.settings.data` (`{ depthReached, biomeName, timeMs, kills, completed }`, with safe
+defaults if launched bare). Renders, centered (primitives + text only):
+- A header: `completed ? 'RUN COMPLETE' (gold)` : `'GAME OVER' (red)`.
+- A summary block: `DEPTH REACHED  n`, `BIOME  <name>`, `TIME  m:ss`, `KILLS  k` (time formatted from
+  `timeMs`).
+- `Press SPACE / click → Title` → `this.scene.start('Title')` (Hub routing is Phase 7). It NEVER
+  reaches into the live GameScene (decoupled — same rule as the HUD). The scene is fully navigable.
+
+**HUDScene (small extend — Decision 2 preserved).** In addition to the HP bar, read `depth` +
+`biomeName` from the registry and draw a small `DEPTH n · <BIOME>` label (camera-fixed). Defaults keep
+it sane before the first GameScene write. No coupling — registry only.
+
+**`scripts/verify-gen.mjs` (GROW — Decision 49 / AC42).** Add a section 4 (keeping sections 1–3
+intact: rng pin, combat purity pins, the 200-seed level sweep):
+- Import `scaleAtDepth`, `scaleSpec`, `effectiveDifficulty` from `config/difficulty.js`, `BIOME_ORDER`
+  from `config/biomes.js`, and `createRunState` from `core/RunState.js` (all PURE — a successful node
+  import re-proves the purity convention, Decision 44/42).
+- **Curve monotonicity (AC42):** for `depth` `0..MAXD`, assert each scalar of `scaleAtDepth(depth)` is
+  ≥ the previous depth's (non-decreasing); assert `scaleSpec(BASE_SPEC_STUB, scaleAtDepth(depth)).maxHp`
+  is non-decreasing too (the SCALED stat actually rises), and that `scaleSpec` does NOT mutate the base.
+  (BRUTE_SPEC lives in Phaser-coupled `Enemy.js`, so the verifier uses a PURE minimal `BASE_SPEC_STUB`
+  with the numeric fields scaleSpec multiplies — keeping the script Phaser-free; review note.)
+- **Biome-tier monotonicity (AC43):** assert `BIOME_ORDER.length ≥ 3`, `BIOME_ORDER[i].difficultyTier`
+  is non-decreasing in `i`, and every biome's `cols/rows` are within the size bounds + `levels ≥ 1`.
+- **Whole-run monotonicity (AC42/AC49):** drive a `createRunState(SEED)` through `advance()` walking
+  `while(!isRunComplete())` (the EXACT chain the game walks — NOT assuming `depth==biomeIndex`, BLOCKER
+  1); at each step compute `effectiveDifficulty(rs.depth, rs.biome())` and assert it is non-decreasing
+  across the entire run; assert the run ends at `depth === totalLevels−1` on the LAST biome (proving the
+  run is the sum of per-biome `levels`, not three rooms — the BLOCKER 1 regression guard).
+- **Seed-chain determinism (AC47):** two fresh `createRunState(SEED)` advanced in lockstep produce the
+  same `(biomeIndex, levelInBiome, depth, seed)` sequence (the run replays from a start seed).
+- **Extend the level sweep to EVERY biome (AC28 across the list):** the existing 200-seed sweep is run
+  for EACH biome in `BIOME_ORDER` (not just PRISON), so bounds/no-wall-spawn/traversable hold for all.
+Exits non-zero on any failure so `npm run verify` gates the "rising difficulty" + determinism contracts.
+
+**Why this is the minimum that satisfies AC42–AC47 without over-reaching (YAGNI):** the run-only
+**economy** (gold/scrolls + in-run upgrades) and the **Cells bank** are NOT built (only currency +
+kill PLACEHOLDER fields on RunState); the **boss** gate is NOT built (`endsInBoss:false`, run-complete
+is the last-Door edge); the **Hub** + **localStorage meta** are NOT built (RunState is separate from
+`save.js`). The generator, Enemy, Player, combat, and level-transition code are REUSED unchanged — the
+only new surfaces are the pure curve, the ordered biome list, the pure RunState, the GameOver rewrite,
+a tiny HUD/scene wiring, and the verifier growth. Every deferral is a populated field or a clean
+handoff (the §6.5 economy + §6.6 boss + §6.7 hub plug into these seams, not rewrite them).
+
+### 6.5 Phase 5 — Run economy (gold/scrolls + Cells bank) *(filled when Phase 5 is designed)*
 ### 6.6 Phase 6 — Bosses *(filled when Phase 6 is designed)*
 ### 6.7 Phase 7 — Meta-progression + Hub *(filled when Phase 7 is designed)*
 
@@ -1563,7 +2022,54 @@ owns real GameOver + permadeath). Each deferral is a clean seam, not a stub that
   pins. Does NOT import the Phaser-coupled `TileMap`/`Door` (importing them would throw under node —
   the convention's whole point).
 
-**Phases 4–7:** files listed in each phase's `Design` section when it is implemented.
+**Phase 4 — Run structure (this phase; §6.4):**
+
+- `src/config/difficulty.js` — NEW. **100% PURE** (no Phaser; Decision 42). The depth→hardness CURVE
+  mirroring crowd-runner: `scaleAtDepth(depth)` (monotone scalar set), `scaleSpec(baseSpec, scale)`
+  (a NEW scaled enemy spec — no mutation, Decision 45), `effectiveDifficulty(depth, biome)` (the
+  stacked tier+curve scalar the verifier proves monotone). Named ramp constants; clamped; node-importable.
+- `src/config/biomes.js` — EXTEND. Add the ORDERED `BIOME_ORDER = [PRISON, SEWERS, RAMPARTS]` (≥3 PURE
+  biomes; each `name`/`difficultyTier`(monotone)/`endsInBoss:false`/`levels:3`(BLOCKER 1, Decision
+  50)/distinct colors+length, reusing PRISON's field shape — Decision 43). Keep `PRISON`, `BIOMES`, the
+  size bounds. `generateLevel` contract UNCHANGED (the new fields are ignored by the generator).
+- `src/world/LevelGenerator.js` — EXTEND (tiny, PURE). Emit `desc.spawnCandidates[]` — the SURPLUS
+  standable-enemy cells not used by `desc.enemies` (Decision 51 — the implementable `enemyCountBonus`
+  source). Derived as a pure set-difference (no extra RNG draws), via a shared `enemySpawnFromCell`.
+  `enemies`/`pickups` output + the regression pin UNCHANGED.
+- `src/core/RunState.js` — NEW. **PURE** (no Phaser; Decision 44/50). `createRunState(startSeed,
+  startedAt)` → the active run `{ seed, biomeIndex, levelInBiome, depth, hp, maxHp, cells, gold,
+  inventory, kills, startedAt }` + `advance()` (depth always rises, biome rolls only when `levels`
+  exhausted — BLOCKER 1)/`isLastBiome()`/`isRunComplete()`/`biome()`/`summary(now, completed)`. Owns the
+  deterministic seed chain (moved out of GameScene). Node-importable by the verifier.
+- `src/config/constants.js` — EXTEND (tiny). Hoist `PLAYER_MAX_HP` here (the cross-site constant owner)
+  so `Player.js` AND `RunState.js` share ONE source (DRY — avoids the magic-100 drift, §6.4 note).
+- `src/entities/Player.js` — EXTEND (tiny). Import `PLAYER_MAX_HP` from constants instead of a local
+  `MAX_HP = 100`. No other change.
+- `src/entities/Enemy.js` — EXTEND (tiny). Add an optional `onDeath` callback fired ONCE inside `_die()`
+  next to `dropCells()` (the scene bumps `runState.kills`). FIX the shared-pool interrupt bug (Decision
+  52, review MAJOR): store the rect `acquire()` returns and `_releaseStrike()` only OUR live strike
+  (guarded by `hb.ownerId === id`), never `releaseAll()` the shared enemy pool. No FSM change.
+- `src/scenes/GameScene.js` — EXTEND. Construct ONE `RunState` (fixed start seed for now); seed the HUD
+  registry defaults + sync `player.hp ← runState.hp` ONCE in `create()` (Decision 53); `_buildLevel`
+  reads the CURRENT biome from RunState + scales each enemy spawn via `scaleSpec(BRUTE_SPEC,
+  scaleAtDepth(depth))` (Decision 45) + adds the depth-scaled `enemyCountBonus` from
+  `desc.spawnCandidates` (Decision 51), touching NEITHER hp field; `_nextLevel` checks
+  `isRunComplete()` first (BLOCKER 1), else writes `runState.hp = player.hp` then `runState.advance()`
+  (HP carried, not refilled — Decision 46); `_completeRun()` routes the run's end to GameOver
+  (Decision 48); player death → `scene.start('GameOver', summary)` (Decision 47); emit depth/biome to
+  the HUD registry. The scene-local `START_SEED`/`nextSeed` move into RunState.
+- `src/scenes/GameOverScene.js` — REWRITE the stub. Read the run-summary from `scene.settings.data`
+  and render it (depth, biome, time, kills); a `completed` flag flips the header ("GAME OVER" ↔ "RUN
+  COMPLETE"). → Title on key/click. Stays DECOUPLED (Decision 47/48).
+- `src/scenes/HUDScene.js` — EXTEND (small). Read `depth`/`biomeName` from the registry and draw a
+  `DEPTH n · <BIOME>` readout next to the HP bar. Registry-only (Decision 2 — still decoupled).
+- `scripts/verify-gen.mjs` — GROW. Add section 4 (Decision 49 / AC42): import `scaleAtDepth`/
+  `scaleSpec`/`effectiveDifficulty` + `BIOME_ORDER` + `createRunState`; assert curve-scalar +
+  biome-tier + whole-run `effectiveDifficulty` monotonicity, the scaled-stat ramp, and seed-chain
+  determinism; extend the existing 200-seed level sweep to EVERY biome in `BIOME_ORDER`. Keeps all
+  prior pins. Does NOT import Phaser-coupled modules.
+
+**Phases 5–7:** files listed in each phase's `Design` section when it is implemented.
 
 ---
 
@@ -1661,4 +2167,40 @@ solvability foundation), plus `npm run dev` observation:
 6. Regression: `npm run build` exits 0; the existing Phase-0/1/Combat checks in `verify-gen.mjs`
    still pass (the rng pin + combat purity/geometry pins are untouched).
 
-**Phases 4–7:** verification steps appended per phase when implemented.
+**Phase 4 — Run structure (this phase; §6.4):** primarily the HEADLESS monotonicity + determinism
+sweep, plus `npm run dev` observation:
+
+1. [AC42] `npm run verify` exits 0. Its NEW section asserts, over `depth 0..MAXD`, that every
+   `scaleAtDepth(depth)` scalar is non-decreasing AND that the SCALED enemy stat
+   (`scaleSpec(BASE_SPEC_STUB, scaleAtDepth(depth)).maxHp`) actually rises — the difficulty curve is
+   monotonic — AND that `scaleSpec` does not mutate the base. (A PURE `BASE_SPEC_STUB` is used because
+   `BRUTE_SPEC` lives in Phaser-coupled `Enemy.js`; scaleSpec only multiplies numeric fields, so the
+   property holds for any base.) Two fresh `npm run verify` runs print identical output (deterministic).
+2. [AC43] In the same sweep, `BIOME_ORDER.length ≥ 3`, `BIOME_ORDER[i].difficultyTier` is
+   non-decreasing in `i`, every biome's `cols/rows` are within the size bounds, and `levels ≥ 1` (so
+   AC28 holds for the WHOLE list — the 200-seed level sweep now runs for EACH biome, not just PRISON).
+3. [AC44/AC47] The verifier drives a `createRunState(SEED)` through the full `advance()` chain
+   (`while(!isRunComplete())` — NOT assuming `depth==biomeIndex`, BLOCKER 1): the
+   `(biomeIndex, levelInBiome, depth, seed)` sequence from two fresh RunStates is identical
+   (deterministic seed chain), and the run ends at `depth === Σlevels−1 (= 8)` on the LAST biome —
+   proving the run is 9 levels (3 biomes × 3), NOT three rooms (the BLOCKER 1 regression guard). In
+   `npm run dev`: a given start seed replays the same biome sequence.
+4. [AC42/AC49] The verifier computes `effectiveDifficulty(rs.depth, rs.biome())` at every step of the
+   walked run and asserts it is non-decreasing across the WHOLE run (tier + curve stacked — the
+   load-bearing "visibly rising difficulty" proof).
+5. [AC45] In `npm run dev`: enemies in a LATER biome / at greater depth are visibly tankier + hit
+   harder (more swings to kill, bigger damage numbers against the player) than the first level's
+   Brutes — enemy stats scale by depth. The HUD shows the live `DEPTH n · <BIOME>` readout rising as
+   you advance through Doors.
+6. [AC46] Let the enemies kill you: the screen hands off to **GameOverScene** showing a run SUMMARY
+   (DEPTH REACHED, BIOME, TIME, KILLS) — not the old Title bounce — then SPACE/click → Title. Player
+   HP is CARRIED between levels (clearing a Door does NOT refill HP — a damaged player stays damaged
+   into the next biome).
+7. [AC47] Clear Doors through every biome to the last; each biome spans 3 rooms (depth rises within a
+   biome, visibly tankier enemies), and only clearing the LAST biome's LAST room ends the run with a
+   "RUN COMPLETE" GameOver summary (gold header) → Title — NOT the first last-biome Door (BLOCKER 1).
+   The death edge / completion edge each fire EXACTLY ONCE (the `gameOver` guard) — no double-fire.
+8. Regression: `npm run build` exits 0; every prior `verify-gen.mjs` pin (rng, combat purity/geometry,
+   the per-biome level sweep — determinism, bounds, no-wall-spawn, traversability) still passes.
+
+**Phases 5–7:** verification steps appended per phase when implemented.
