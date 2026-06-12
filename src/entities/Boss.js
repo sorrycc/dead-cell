@@ -271,6 +271,8 @@ export class Boss {
       this._fireVolley(atk, ctx)
     } else if (atk.kind === 'sweep') {
       this._fireSweep(atk) // round-3 — a true-radial 360° ring (the new dodge pattern).
+    } else if (atk.kind === 'summon') {
+      this._fireSummon(atk) // round-3 — spawn enemy adds via the scene hook (the summoner identity).
     } else if (atk.kind === 'dash') {
       // The dash body-contact damage is applied via GameScene's enemy-contact overlap (the boss body is
       // in enemyHurtboxes); we bump the spec's contactDamage for the dash window so the lunge hits hard.
@@ -317,6 +319,19 @@ export class Boss {
     }
   }
 
+  // ── 'summon' (Enrichment round 3 — the SIGNATURE-mechanic kind) ── spawn `count` enemy ADDS near the
+  // boss via a SCENE HOOK (scene.spawnBossAdds), so the fight becomes a split-attention check (clear the
+  // adds while reading the boss) — a genuinely different pressure than the four projectile/melee primitives.
+  // Unlike slam/volley/dash/sweep, the boss can't resolve this with its own pools (an add is a real Enemy in
+  // the room), so it delegates to GameScene, which reuses _spawnEnemy + the per-biome scaleSpec (DRY) and
+  // enforces atk.maxAdds (the live-add cap, scene-side) so a long fight can't snowball into an unwinnable
+  // swarm. Defensive: if the scene exposes no hook (a context that never summons), this is a harmless no-op.
+  _fireSummon(atk) {
+    if (typeof this.scene.spawnBossAdds === 'function') {
+      this.scene.spawnBossAdds(this, atk)
+    }
+  }
+
   // Show the telegraph overlay sized/placed for the chosen attack (a growing warning — AC56).
   _showTelegraph(atk, ctx) {
     this.telegraphFx.setAlpha(0.0)
@@ -351,6 +366,13 @@ export class Boss {
       // tell is "the whole area around the boss is about to spray") — distinct from the directional cues.
       w = this.spec.bodyW + 140
       h = this.spec.bodyH + 140
+      x = cx
+      y = cy
+    } else if (atk.kind === 'summon') {
+      // A WIDE, short warning band flanking the boss (the tell is "adds are about to appear beside it") —
+      // distinct from the sweep's centered square + the directional slam/dash/volley cues.
+      w = this.spec.bodyW + 220
+      h = this.spec.bodyH * 0.6
       x = cx
       y = cy
     }

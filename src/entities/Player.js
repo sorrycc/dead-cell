@@ -123,7 +123,16 @@ export class Player {
     this.scrollDodgeIframeBonus = 0 // run-only flat extra dodge i-frame seconds (Alacrity scroll).
     this.lifestealFrac = 0 // fraction of MELEE damage dealt healed back (Vampirism scroll; read at the hit site).
     this.statusDurationMult = 1 // ×applied status duration (Venom scroll; read when arming a weapon's status).
-    this.equippedWeapon = SWORD // the active weapon (its swings table + type drive attacks, Decision 61).
+    // ── TWO weapon SLOTS (Enrichment round 3, item 3 — the build-identity lever) ── the run carries up to
+    // TWO weapons (a primary + a secondary) and a SWAP key toggles which is active, so a run can hold
+    // melee+ranged or two movesets — turning a loot pickup into a BUILD decision (carry the new weapon in
+    // the free slot vs replace the active one). `weapons[activeWeaponIndex]` IS the active weapon (the
+    // `equippedWeapon` getter below reads it, so every existing hit-site read is unchanged). The SECOND slot
+    // is LOCKED until a meta upgrade unlocks it (secondSlotUnlocked) — until then the player is single-slot,
+    // EXACTLY the Phase-4/round-2 behaviour (the additive identity: weapons[1] stays null, swap is a no-op).
+    this.weapons = [SWORD, null] // [primary, secondary]; null = an empty/locked slot.
+    this.activeWeaponIndex = 0 // which slot drives attacks (0 = primary; toggled by swapWeapon).
+    this.secondSlotUnlocked = false // a meta upgrade flips this on (applyStartStats); else single-slot.
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
     // `collider` owns the Arcade body and is INVISIBLE (alpha 0). Arcade owns its position;
@@ -495,26 +504,74 @@ export class Player {
     this.rangedDamageMult = startStats.rangedDamageMult ?? 1
     this.dodgeCooldownMult = startStats.dodgeCooldownMult
     this.dodgeIframeBonus = startStats.dodgeIframeBonus ?? 0
+    // ── Second weapon slot (round-3 item 3) ── a meta upgrade UNLOCKS the secondary slot (default false →
+    // single-slot, the identity). The slot starts EMPTY (null) — the player fills it by picking up a 2nd
+    // weapon (a build decision: carry the new weapon vs replace the active one). When unlocked, the FIRST
+    // found weapon goes into the empty secondary slot rather than replacing the primary (GameScene).
+    this.secondSlotUnlocked = (startStats.weaponSlots ?? 1) >= 2
     const w = weapons[startStats.startWeaponId] || SWORD
-    this.equipWeapon(w)
+    // Equip the starting weapon to the PRIMARY slot (slot 0) + reset the secondary to empty (a fresh run).
+    this.activeWeaponIndex = 0
+    this.weapons = [w, null]
+    this.comboIndex = -1
+    this.comboWindowTimer = 0
   }
 
-  // ── equipWeapon(weapon) (Decision 61/63) ── swap the active weapon. Resets the combo so the NEW
-  // moveset starts clean at swing 0 (and so a stale index can never index a shorter table — e.g.
-  // swapping sword(3)→hammer(2) while comboIndex was 2 would otherwise read undefined). CANCELS any
-  // in-progress swing (release the live melee hitbox + clear the lock + return to RUN) so a mid-swing
-  // swap — collecting a weapon pickup while attacking — takes effect immediately and leaves no dangling
-  // hitbox or stale swing-end read. (A live projectile from a previous bow shot keeps flying — it's
-  // already independent of the equipped weapon; only the pending MELEE swing is cancelled.)
+  // ── equippedWeapon (getter) (Decision 61; round-3 item 3 — slot-backed) ── the ACTIVE weapon = the
+  // weapon in the active slot. A getter so EVERY existing read site (the hit handlers, the front-marker,
+  // _weaponLabel) is unchanged — they still read player.equippedWeapon, which now resolves to the active
+  // slot. Defensive: a degenerate null slot falls back to the sword (never reads undefined.swings).
+  get equippedWeapon() {
+    return this.weapons[this.activeWeaponIndex] || SWORD
+  }
+
+  // ── equipWeapon(weapon) (Decision 61/63; round-3 item 3 — equips to the ACTIVE slot) ── swap the active
+  // slot's weapon. Resets the combo so the NEW moveset starts clean at swing 0 (and so a stale index can
+  // never index a shorter table — e.g. swapping sword(3)→hammer(2) while comboIndex was 2 would otherwise
+  // read undefined). CANCELS any in-progress swing (release the live melee hitbox + clear the lock + return
+  // to RUN) so a mid-swing swap — collecting a weapon pickup while attacking — takes effect immediately and
+  // leaves no dangling hitbox or stale swing-end read. (A live projectile from a previous bow shot keeps
+  // flying — only the pending MELEE swing is cancelled.) Writes the ACTIVE slot so single-slot behaviour
+  // (the second slot locked) is byte-identical to before — slot 0 is the only slot in play.
   equipWeapon(weapon) {
+    this.equipToSlot(weapon, this.activeWeaponIndex)
+  }
+
+  // ── equipToSlot(weapon, slotIndex) (round-3 item 3) ── put `weapon` into a specific slot. If it's the
+  // ACTIVE slot, reset the combo + cancel a live swing (the same discipline as equipWeapon). Filling the
+  // INACTIVE slot leaves the active weapon + combo untouched (you just gained a spare moveset to swap to).
+  equipToSlot(weapon, slotIndex) {
+    this.weapons[slotIndex] = weapon
+    if (slotIndex === this.activeWeaponIndex) {
+      if (this.state === STATE.ATTACK) {
+        if (this.hitboxPool) this.hitboxPool.releaseAll()
+        this.state = STATE.RUN
+        this.attackTimer = 0
+      }
+      this.comboIndex = -1
+      this.comboWindowTimer = 0
+    }
+  }
+
+  // ── swapWeapon() (round-3 item 3 — the SWAP key) ── toggle the active slot to the OTHER slot. A no-op
+  // unless the second slot is UNLOCKED (a meta upgrade) AND actually HOLDS a weapon (you've found/started
+  // with a second one) — so on a single-slot run (the identity) the swap key does nothing. Resets the combo
+  // + cancels any live swing (the NEW moveset starts clean at swing 0). Returns true iff a swap happened
+  // (the scene pops a tell only on a real swap). DRY: it reuses the active-slot equip discipline via the
+  // combo reset below (a swap IS an active-weapon change).
+  swapWeapon() {
+    if (!this.secondSlotUnlocked) return false
+    const other = this.activeWeaponIndex === 0 ? 1 : 0
+    if (!this.weapons[other]) return false // the other slot is empty — nothing to swap to.
     if (this.state === STATE.ATTACK) {
       if (this.hitboxPool) this.hitboxPool.releaseAll()
       this.state = STATE.RUN
       this.attackTimer = 0
     }
-    this.equippedWeapon = weapon
+    this.activeWeaponIndex = other
     this.comboIndex = -1
     this.comboWindowTimer = 0
+    return true
   }
 
   // Expose a plain attacker shape for damage.js (cx + facing — the pure resolveHit input).

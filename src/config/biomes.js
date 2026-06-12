@@ -106,10 +106,18 @@ export const SEWERS = {
   endsInBoss: false,
   miniboss: 'sewersMiniboss', // round-2 (§6.6.8) — The Drowned guards this biome's last normal level (a ranged zoner set-piece).
   levels: 3,
-  // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure).
+  // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure), plus a
+  // LIGHT sprinkle of the CHARGER + FLYER (Enrichment round-3 front-loaded-variety fix). The old pool was
+  // grunt+shooter, so the first 6 of 12 rooms (half the run — the part new players see most) showed only 2
+  // of 5 archetypes, and the charger never appeared before the LAST biome. A low weight on charger/flyer
+  // here lets the 2nd biome surprise you with a dasher/swooper without overwhelming its grunt+shooter
+  // identity — the variety isn't all back-loaded into the deepest pool. Pure-config (the verifier already
+  // asserts every pool id is a known archetype) — no engine change.
   enemyPool: [
     { id: 'grunt', w: 3 },
     { id: 'shooter', w: 2 },
+    { id: 'charger', w: 1 }, // round-3 — a rare dasher debuts in the Sewers (was Ramparts-only before).
+    { id: 'flyer', w: 1 }, // round-3 — an occasional swooper (front-loads the aerial threat).
   ],
   // Layout mix (Enrichment round-2) — the Sewers tilt toward floating ISLANDS over open water/sludge (a
   // bouncier traverse that pairs with the kiting shooters), with the stair + shaft as the alternates.
@@ -153,11 +161,14 @@ export const CATACOMBS = {
   miniboss: 'catacombsMiniboss', // round-2 (§6.6.8) — The Bone Warden guards the last set-piece before the finale.
   levels: 3, // 3 generated rooms before rolling to Ramparts (extends the run by a biome).
   // Enemy pool (Decision 68/AC59) — Catacombs leans on the new SPITTER shotgunner + the FLYER over a grunt
-  // base (a ranged-spread + aerial mix — distinct from the Sewers' grunt+shooter kiting feel).
+  // base (a ranged-spread + aerial mix — distinct from the Sewers' grunt+shooter kiting feel), with a light
+  // CHARGER (round-3 front-loaded-variety fix) so the mid-run biomes COLLECTIVELY show all 5 archetypes
+  // before the finale — the charger is no longer hidden until the deepest pool.
   enemyPool: [
     { id: 'grunt', w: 2 },
     { id: 'spitter', w: 3 }, // the round-3 5th archetype debuts here (its signature biome).
     { id: 'flyer', w: 2 },
+    { id: 'charger', w: 1 }, // round-3 — a rare dasher in the crypt (collective full-roster coverage mid-run).
   ],
   // Layout mix (Enrichment round-2) — the Catacombs lean into the vertical SHAFT (a switchback descent into
   // the crypt — its signature spatial feel), with the stair + islands as the alternates.

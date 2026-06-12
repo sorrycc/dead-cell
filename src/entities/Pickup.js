@@ -96,16 +96,24 @@ export class PickupPool {
     return rect
   }
 
-  // ── spawnDrop(x, y, depth, cellCount) ── the enemy-death drop (Decision 54): `cellCount` Cell
+  // ── spawnDrop(x, y, depth, cellCount, lootMult) ── the enemy-death drop (Decision 54): `cellCount` Cell
   // pickups ALWAYS (the count Enemy.dropCells() returned — threaded through enemy.onDrop), plus a
   // chance of a gold pickup and a rarer scroll. Called from GameScene's `enemy.onDrop` hook with the
   // death CENTER coords (captured before the body is disabled — see Enemy._die). Uses Math.random
   // (drops are cosmetic churn, NOT part of the seeded level layout — keeping them off the pinned
   // generator RNG preserves the level regression pin, per the §6.5 BLOCKER resolution: scroll/weapon
   // pickups are sourced from the DROP path / a scene-side chance, NOT the generator).
-  spawnDrop(x, y, depth = 0, cellCount = 3) {
-    for (let i = 0; i < cellCount; i++) this.acquire(x, y, 'cell') // the fan-out scatters them apart.
-    if (Math.random() < GOLD_DROP_CHANCE) this.acquire(x, y, 'gold')
+  //
+  // ── lootMult (Enrichment round-3 BUG fix, §6.15) ── the ROOM's loot multiplier (1 = a normal room — the
+  // identity). roomTypes.js documents ELITE/HORDE/CURSED as RICHER to clear, but lootMult only ever scaled
+  // the single entry reward — the per-kill drop ignored it, so a wall of elites paid the same as a normal
+  // room. We thread it in here: it scales BOTH the Cell count (round up the boosted count → more meta
+  // currency) AND the gold drop (a richer gold pile when one drops), so a tagged room's CLEAR is materially
+  // richer (the payout that justifies the harder fight). Default 1 → byte-identical to before for a normal room.
+  spawnDrop(x, y, depth = 0, cellCount = 3, lootMult = 1) {
+    const cells = Math.max(1, Math.round(cellCount * lootMult)) // scale the cell count by the room's lootMult.
+    for (let i = 0; i < cells; i++) this.acquire(x, y, 'cell') // the fan-out scatters them apart.
+    if (Math.random() < GOLD_DROP_CHANCE) this.acquire(x, y, 'gold', { amount: Math.round(GOLD_AMOUNT * lootMult) })
     if (Math.random() < SCROLL_DROP_CHANCE) this.acquire(x, y, 'scroll', { scrollId: _pickScrollId() })
   }
 

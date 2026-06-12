@@ -50,6 +50,7 @@ export class Input {
       k: KC.K,
       q: KC.Q, // §6.9 (Decision 72) — DRINK FLASK (the between-area heal valve).
       e: KC.E, // §6.9 (Decision 74) — INTERACT (open the in-run shop / vendor when in range).
+      r: KC.R, // round-3 (item 3) — SWAP WEAPON (toggle the active slot when a 2nd slot is unlocked).
     })
 
     // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
@@ -89,7 +90,10 @@ export class Input {
     // §6.9 — one-shot EDGES (JustDown, sole-owned here like the others): DRINK FLASK (Q) + INTERACT (E).
     const healPressed = Phaser.Input.Keyboard.JustDown(keys.q)
     const interactPressed = Phaser.Input.Keyboard.JustDown(keys.e)
+    // round-3 (item 3) — SWAP WEAPON (R): a one-shot edge (JustDown, sole-owned here) that toggles the
+    // active weapon slot when a 2nd slot is unlocked (a no-op single-slot — the identity).
+    const swapPressed = Phaser.Input.Keyboard.JustDown(keys.r)
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed }
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed, swapPressed }
   }
 }

@@ -229,6 +229,12 @@ export class GameScene extends Phaser.Scene {
     // fresh meta grants 0 → identity (no scroll applied — the run plays exactly as before the enrichment).
     this._applyStartingScrolls(startStats.startScrolls ?? 0)
 
+    // ── Guaranteed per-biome POWER scroll (§6.5, Enrichment round 3 — the in-run power-arc fix) ── arm one
+    // power/vitality scroll at the START of the FIRST biome so the run begins its own visible power curve
+    // (the biome-transition hook in _nextLevel arms one for each subsequent biome). Deterministic off the
+    // run seed ⊕ the biome index; mutates RunState's run-only mults (never banked) then syncs the player.
+    this._grantBiomePowerScroll()
+
     // ── Enemy hurtbox group + per-level enemy list (rebuilt each level) ──
     this.enemyHurtboxes = this.physics.add.group({ allowGravity: true })
     this.enemies = []
@@ -594,6 +600,11 @@ export class GameScene extends Phaser.Scene {
     this.desc = desc
     this.tileMap = new TileMap(this, desc)
     this.isBossRoom = true // a flag the HUD-clear + teardown read (review MINOR — boss-bar lifecycle).
+    // ── Reset the room-type state (round-3) ── the boss arena is NEVER tagged (it IS the set-piece), and it
+    // does NOT call _applyRoomType. Reset roomType/roomDamageTakenMult to the neutral identity here so a
+    // PREVIOUS level's CURSED debuff (_hurtPlayer) or lootMult (boss-add drops) can't leak into the boss room.
+    this.roomType = ROOM_NORMAL
+    this.roomDamageTakenMult = 1
 
     // Reposition the player at the central entrance (HP carried — Decision 46, never refilled here).
     this.player.body.reset(desc.entrance.x, desc.entrance.y)
@@ -678,7 +689,7 @@ export class GameScene extends Phaser.Scene {
     const attacker = { cx: this.player.body.center.x, facing: this.player.facing }
     const result = resolveHit(attacker, this.player.attackerShape, swing, { allowBackstab: false })
     result.knockbackY = -260 // override: pop straight up off the spikes.
-    this.player.onHit(result)
+    this._hurtPlayer(result) // scales by the CURSED-room damage-taken mult before onHit (round-3, §6.15).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
   }
 
@@ -739,7 +750,12 @@ export class GameScene extends Phaser.Scene {
     // charges back to max (the "fountain at the new biome's start" — the genre's between-area heal valve).
     // HP itself is still CARRIED (never auto-refilled, Decision 46); the flasks are the player's CHOICE to
     // spend. This makes a damaged run survivable across biomes without trivialising the within-biome slide.
-    if (this.runState.biomeIndex !== prevBiomeIndex) this.runState.flasks = this.runState.maxFlasks
+    if (this.runState.biomeIndex !== prevBiomeIndex) {
+      this.runState.flasks = this.runState.maxFlasks
+      // §6.5 (round-3) — entering a NEW biome arms a guaranteed POWER scroll so the run's own power curve
+      // keeps pace with the rising difficulty (a "scroll of power" per biome — the in-run power-arc fix).
+      this._grantBiomePowerScroll()
+    }
     this._teardownLevel()
     this._buildLevel() // reads the advanced biome/seed/depth from RunState (HP NOT refilled).
     this._updateHint()
@@ -838,7 +854,7 @@ export class GameScene extends Phaser.Scene {
     if (!this.hint) return
     const rs = this.runState
     this.hint.setText(
-      `MOVE arrows/WASD  JUMP Space  ATTACK J/click  DODGE Shift/K  [ESC] Title   |   ` +
+      `MOVE arrows/WASD  JUMP Space  ATTACK J/click  DODGE Shift/K  SWAP R  [ESC] Title   |   ` +
         `DEPTH ${rs.depth} · ${rs.biome().name} ${rs.levelInBiome + 1}/${rs.biome().levels}  ` +
         // RUN seed (the shareable run id, Decision 71) + the live LEVEL seed. The run seed identifies the
         // WHOLE run (same run seed → same biome/level/layout chain — AC47); the level seed is its chained head.
@@ -916,20 +932,52 @@ export class GameScene extends Phaser.Scene {
     return WEAPON_AFFIXES[WEAPON_AFFIXES.length - 1].affix.id // float-rounding fallthrough → the last affix.
   }
 
-  // ── _equipWeaponWithAffix(weaponId, affixId) (Enrichment round-2) ── resolve the base weapon + the rolled
-  // affix to a FOLDED weapon (foldWeaponAffix — a fresh object, never mutating the shared config) and equip
-  // it, recording BOTH ids on RunState so a level rebuild re-folds the SAME weapon (the carry discipline the
-  // bare weaponId already follows). affixId null → the plain weapon (identity). Used by the pickup + shop +
-  // branch-reward paths (DRY — one equip-with-affix site). Returns the folded weapon (for any caller use).
+  // ── _equipWeaponWithAffix(weaponId, affixId) (Enrichment round-2; round-3 item 3 — slot-aware) ── resolve
+  // the base weapon + the rolled affix to a FOLDED weapon (foldWeaponAffix — a fresh object, never mutating
+  // the shared config) and equip it into the chosen SLOT, recording BOTH ids on RunState so a level rebuild
+  // re-folds the SAME weapon (the carry discipline the bare weaponId already follows). affixId null → the
+  // plain weapon (identity). Used by the pickup + shop + branch-reward paths (DRY — one equip-with-affix site).
+  //
+  // SLOT CHOICE (round-3 item 3 — the build decision): a found/bought weapon fills the SECONDARY slot when it
+  // is UNLOCKED and EMPTY (so the first pickup ADDS a moveset rather than replacing the starter — carry
+  // melee+ranged); otherwise it replaces the ACTIVE slot (the round-2 behaviour, and the only behaviour on a
+  // single-slot run — the identity). Returns the folded weapon (for any caller use).
   _equipWeaponWithAffix(weaponId, affixId) {
     const base = WEAPONS[weaponId]
     if (!base) return null
     const affix = affixId ? WEAPON_AFFIXES_BY_ID[affixId] : null
     const folded = foldWeaponAffix(base, affix)
-    this.player.equipWeapon(folded) // resets the combo so the new moveset starts clean (Decision 63).
-    this.runState.weaponId = weaponId // the base id (carried across level rebuilds).
-    this.runState.weaponAffixId = affix ? affix.id : null // the affix id (re-folded on rebuild — round-2).
+    // Decide the slot: fill the empty SECONDARY when the 2nd slot is unlocked + empty (a build add); else
+    // the active slot (replace — the single-slot identity path). secondSlotUnlocked is false on a fresh run.
+    const fillSecondary = this.player.secondSlotUnlocked && !this.runState.weaponId2 && this.player.activeWeaponIndex === 0
+    if (fillSecondary) {
+      this.player.equipToSlot(folded, 1) // fill the empty secondary without disturbing the active weapon.
+      this.runState.weaponId2 = weaponId
+      this.runState.weaponAffixId2 = affix ? affix.id : null
+    } else {
+      this.player.equipWeapon(folded) // replace the active slot (resets the combo — Decision 63).
+      // Record onto whichever slot is active so a rebuild re-folds it (round-3 carry discipline).
+      if (this.player.activeWeaponIndex === 1) {
+        this.runState.weaponId2 = weaponId
+        this.runState.weaponAffixId2 = affix ? affix.id : null
+      } else {
+        this.runState.weaponId = weaponId
+        this.runState.weaponAffixId = affix ? affix.id : null
+      }
+    }
     return folded
+  }
+
+  // ── _swapWeapon() (round-3 item 3 — the SWAP key handler) ── toggle the player's active weapon slot. A
+  // no-op on a single-slot run / when the 2nd slot is empty (Player.swapWeapon returns false). On a real
+  // swap, pop a small tell (a confirm flash + spark) so the moveset change reads, and the HUD weapon label
+  // refreshes next _emitHud. Guarded against firing during a death/transition/shop (the update gate already
+  // blocks those — this is only reached inside the active branch).
+  _swapWeapon() {
+    if (this.player.swapWeapon()) {
+      this.cameras.main.flash(120, 174, 214, 241) // a faint blue pulse marks the weapon swap.
+      this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 })
+    }
   }
 
   // ── _applyRoomType(desc) (Enrichment round-2, §6.15) ── roll a tagged ROOM TYPE off the LEVEL seed (a
@@ -1060,7 +1108,12 @@ export class GameScene extends Phaser.Scene {
     // captured death-center coords + the Cell count; we spawn pooled pickups there (a Cell always +
     // a gold/scroll chance). The coords are captured in Enemy._die BEFORE the body is disabled (the
     // review BLOCKER fix). Enemy stays self-contained (no pool import — just this callback).
-    enemy.onDrop = (dropX, dropY, count) => this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count)
+    // §6.15 (round-3 BUG fix) — thread the ROOM's lootMult into the per-kill drop so an ELITE/HORDE/CURSED
+    // room is actually RICHER to clear, not just on entry: lootMult boosts the cell count + the gold drop
+    // (Pickup.spawnDrop). roomType is null on a miniboss level / before _applyRoomType → default 1 (identity,
+    // a normal room drops exactly as before). Read at fire time so a level's tag applies to every kill in it.
+    enemy.onDrop = (dropX, dropY, count) =>
+      this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count, this.roomType ? this.roomType.lootMult ?? 1 : 1)
     this.enemyHurtboxes.add(enemy.collider)
     // FLYER: exclude its body from the solids/oneWay colliders so it isn't stopped by / standing on the
     // floor (it hovers). The collider was added to enemyHurtboxes above (so player hits still land); the
@@ -1070,6 +1123,35 @@ export class GameScene extends Phaser.Scene {
     enemy._noSolids = !!spec.noGravity
     this.enemies.push(enemy)
     return enemy
+  }
+
+  // ── spawnBossAdds(boss, atk) (Enrichment round 3 — the boss 'summon' kind, §6.6) ── the SCENE HOOK the
+  // Boss calls when it casts a 'summon' attack: spawn `atk.count` enemy adds of `atk.spec` near the boss,
+  // depth-scaled by the CURRENT depth (scaleSpec — the SAME fold every spawn uses, DRY), capped so the LIVE
+  // add count never exceeds atk.maxAdds (a long boss fight can't snowball into an unwinnable swarm). The adds
+  // are TAGGED (_bossAdd) so the cap counts only summoned adds (not any pre-existing room enemies), and they
+  // route through _spawnEnemy so they join enemyHurtboxes + get the kill/drop hooks with ZERO extra wiring.
+  // Placed flanking the boss on its floor (alternating sides) so they appear beside it, not on top of the
+  // player. KISS: a fair grunt add (the spec's archetype), no patrol bounds fuss (full-arena patrol via the
+  // boss's own bounds). Defensive: an unknown spec id degrades to the grunt (never throws).
+  spawnBossAdds(boss, atk) {
+    const liveAdds = this.enemies.reduce((n, e) => n + (e._bossAdd && !e.dead && !e.removed ? 1 : 0), 0)
+    const maxAdds = atk.maxAdds ?? 3
+    const want = Math.min(atk.count ?? 1, Math.max(0, maxAdds - liveAdds))
+    if (want <= 0) return // already at the live-add cap — the summon fizzles (the snowball guard).
+    const base = ENEMY_SPECS[atk.spec] || ENEMY_SPECS.grunt
+    const spec = scaleSpec(base, scaleAtDepth(this.runState.depth))
+    const desc = this.desc
+    const minX = TILE_SIZE * 2
+    const maxX = (desc ? desc.worldWidth : boss.maxX + TILE_SIZE * 2) - TILE_SIZE * 2
+    for (let i = 0; i < want; i++) {
+      // Flank the boss alternately left/right so adds appear beside it (clamped into the arena interior).
+      const side = i % 2 === 0 ? -1 : 1
+      const x = Phaser.Math.Clamp(boss.body.center.x + side * (boss.spec.bodyW * 0.5 + TILE_SIZE), minX, maxX)
+      const y = boss.body.center.y
+      const add = this._spawnEnemy(x, y, spec, { patrolMinX: minX, patrolMaxX: maxX, worldDesc: desc })
+      add._bossAdd = true // tag so the live-add cap counts only summoned adds (not room enemies).
+    }
   }
 
   // ── _maybePlaceWeaponPickup(desc) (§6.5, Decision 63) ── deterministically (off the level seed)
@@ -1154,6 +1236,20 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ── Combat overlap callbacks (design §6.3 — unchanged from the Combat phase) ──
+
+  // ── _hurtPlayer(result) (Enrichment round 3 — the CURSED-room debuff fix, §6.15) ── the SINGLE player-
+  // damage application point: scale the resolved hit's damage by this.roomDamageTakenMult (the per-room
+  // debuff — 1.4 in a CURSED room, 1 everywhere else) BEFORE player.onHit. _applyRoomType SET this mult
+  // but NOTHING read it, so the CURSED room (lootMult 2.0 + a guaranteed scroll) was pure upside — its
+  // whole risk/reward design was inert. Routing all four player-hit sites (enemy melee / enemy contact /
+  // enemy projectile / hazard) through here makes the curse bite (DRY — one place owns the scaling). The
+  // mult only touches DAMAGE (not knockback) so the curse is purely "you take more damage", as designed.
+  // Identity-safe: a normal room's mult is 1 → result.damage is unchanged (byte-identical to before).
+  _hurtPlayer(result) {
+    const mult = this.roomDamageTakenMult ?? 1
+    if (mult !== 1) result.damage = Math.round(result.damage * mult)
+    this.player.onHit(result)
+  }
 
   _dedupFilter(hitboxRect, enemyRect) {
     const hb = hitboxRect.hb
@@ -1248,7 +1344,7 @@ export class GameScene extends Phaser.Scene {
     pj.hitSet.add(this.player.id)
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
     const result = resolveHit(pj.attackerShape, this.player.attackerShape, swing, { allowBackstab: false })
-    this.player.onHit(result)
+    this._hurtPlayer(result) // scales by the CURSED-room damage-taken mult before onHit (round-3, §6.15).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
     this.enemyProjectilePool.release(projRect) // the shot dies on first hit (no pierce).
   }
@@ -1426,6 +1522,28 @@ export class GameScene extends Phaser.Scene {
     this._syncPlayerScrollStats() // reflect the armed run-only boosts on the live player NOW.
   }
 
+  // ── _grantBiomePowerScroll() (Enrichment round 3 — the in-run power-arc fix, §6.5) ── arm ONE guaranteed
+  // POWER scroll (Power or Vitality — the two stat-curve scrolls) at the START of every biome. THE GAP IT
+  // CLOSES: Cells only bank at run END, so WITHIN a run the player never got reliably stronger except via
+  // random weapon/scroll drops (SCROLL_DROP_CHANCE is only 0.12) — a run could feel like it was getting
+  // WEAKER relative to the depth curve (the genre uses found "scrolls of power" per level to race the ramp).
+  // A guaranteed power scroll per biome (4 biomes → +damage/+max-HP four times across a run) gives the run
+  // its OWN visible power arc that races the rising difficulty. Deterministic off the RUN seed ⊕ the biome
+  // index (a seeded run replays the same grant; off any pinned draw — the off-the-pin discipline). It mutates
+  // RunState's run-only mults (NEVER banked — permadeath) then syncs the live player. Called at run start
+  // (biome 0, in create()) and on each biome roll (_nextLevel) so EVERY biome's first room hands you power.
+  _grantBiomePowerScroll() {
+    // Only the stat-CURVE scrolls (power / vitality) — the ones that build the run's raw power, not the
+    // identity scrolls (vampirism/venom/alacrity/endurance, which the random drops + shop still cover).
+    const POWER_SCROLL_IDS = ['power', 'vitality']
+    const rng = mulberry32((this.runSeed ^ 0x90 ^ (this.runState.biomeIndex * 0x9e3779b9)) >>> 0)
+    const id = POWER_SCROLL_IDS[Math.floor(rng() * POWER_SCROLL_IDS.length)]
+    const scroll = SCROLLS_BY_ID[id]
+    if (!scroll) return
+    scroll.apply(this.runState)
+    this._syncPlayerScrollStats() // reflect the armed boost (a vitality scroll grows + tops up HP) live.
+  }
+
   _onEnemyHitPlayer(hitboxRect) {
     const hb = hitboxRect.hb
     if (!hb.active || !this.player.isHittable()) return
@@ -1436,7 +1554,7 @@ export class GameScene extends Phaser.Scene {
       ? enemy.attackerShape
       : { cx: this.player.body.center.x - this.player.facing, facing: -this.player.facing }
     const result = resolveHit(attacker, this.player.attackerShape, hb.swing, { allowBackstab: false })
-    this.player.onHit(result)
+    this._hurtPlayer(result) // scales by the CURSED-room damage-taken mult before onHit (round-3, §6.15).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
   }
 
@@ -1453,7 +1571,7 @@ export class GameScene extends Phaser.Scene {
     const result = resolveHit(enemy.attackerShape, this.player.attackerShape, contactSwing, {
       allowBackstab: false,
     })
-    this.player.onHit(result)
+    this._hurtPlayer(result) // scales by the CURSED-room damage-taken mult before onHit (round-3, §6.15).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
   }
 
@@ -1477,12 +1595,23 @@ export class GameScene extends Phaser.Scene {
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
   }
 
-  // ── _weaponLabel() (Enrichment round-2) ── the HUD weapon string: the weapon name, plus the rolled affix
-  // name when the equipped weapon is affixed (e.g. "Sword ✦ Keen"). A plain weapon shows just its name (the
-  // identity — a fresh run's "Sword" reads exactly as before). One source so the HUD label is consistent.
+  // ── _weaponLabel() (Enrichment round-2; round-3 item 3 — two-slot aware) ── the HUD weapon string: the
+  // ACTIVE weapon name, plus the rolled affix name when affixed (e.g. "Sword ✦ Keen"). A plain weapon shows
+  // just its name (the identity — a fresh run's "Sword" reads exactly as before). When a SECOND slot holds a
+  // weapon, the inactive one is appended in muted brackets (e.g. "Bow ✦ Keen  [Sword]") so the swap target
+  // reads on the HUD. One source so the HUD label is consistent.
   _weaponLabel() {
-    const w = this.player.equippedWeapon
-    return w.affixName ? `${w.name} ✦ ${w.affixName}` : w.name
+    const active = this.player.equippedWeapon
+    const activeLabel = active.affixName ? `${active.name} ✦ ${active.affixName}` : active.name
+    // The OTHER slot (round-3 item 3): show it bracketed as the swap target when present + the slot's unlocked.
+    if (this.player.secondSlotUnlocked) {
+      const other = this.player.weapons[this.player.activeWeaponIndex === 0 ? 1 : 0]
+      if (other) {
+        const otherLabel = other.affixName ? `${other.name} ✦ ${other.affixName}` : other.name
+        return `${activeLabel}  [${otherLabel}] (R)`
+      }
+    }
+    return activeLabel
   }
 
   // Push HP (+ combo + depth/biome) to the registry for the decoupled HUD (Decision 2). The HUD reads
@@ -1536,6 +1665,7 @@ export class GameScene extends Phaser.Scene {
       // edges sampled in Input; resolved BEFORE the player tick so a heal/shop-open lands this frame.
       if (inputState.healPressed) this._drinkFlask()
       if (inputState.interactPressed) this._tryOpenShop()
+      if (inputState.swapPressed) this._swapWeapon() // round-3 (item 3) — toggle the active weapon slot.
       this.player.update(gdt, inputState)
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
       // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.

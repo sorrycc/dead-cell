@@ -27,6 +27,10 @@ import { PLAYER_MAX_HP } from '../config/constants.js'
 //   startScrolls     — §6.9 (Decision 73): run-only scroll boosts auto-applied at run start (0 = neutral).
 //   maxFlasks        — §6.9 (Decision 72): healing-flask charges (refilled each biome). 2 = the base valve.
 //   flaskHealFrac    — §6.9 (Decision 72): fraction of MAX HP each flask drink restores (base 40%).
+//   weaponSlots      — round-3 (item 3): how many weapon slots the run carries. 1 = single-slot (the
+//                      identity — the Phase-4/round-2 behaviour); a meta upgrade raises it to 2 (a second
+//                      weapon slot + a swap key — a run carries melee+ranged or two movesets, the
+//                      build-identity lever). Bigger-is-better (more slots never weakens you).
 // The §6.9 enrichment ADDS its fields at NEUTRAL base values so the additive-identity case (empty meta) is
 // byte-unchanged — a fresh run still plays exactly as before the enrichment (the verifier's identity pin holds).
 export const BASE_PLAYER_STATS = Object.freeze({
@@ -40,6 +44,7 @@ export const BASE_PLAYER_STATS = Object.freeze({
   startScrolls: 0,
   maxFlasks: 2,
   flaskHealFrac: 0.4,
+  weaponSlots: 1, // round-3 (item 3) — base single-slot; the meta 'weaponSlot' upgrade raises it to 2.
 })
 
 // ── applyUpgrades(baseStats, upgrades) → a NEW starting-stats object (PURE, Decision 56/57) ──

@@ -430,6 +430,43 @@ numbering continuity; no separate work remains.
     a GUARANTEED reward (gold/scroll/weapon/heal) there. The verifier asserts the treasure ledge is STANDABLE
     + REACHABLE from the entrance; the MAIN entrance→exit path is unchanged (the branch only ADDS nodes).
 
+**Enrichment round 3 (the depth/coherence pass) — closing the next batch of gaps:**
+
+68. **BUG — the CURSED room's debuff is now applied.** `_applyRoomType` set `roomDamageTakenMult` (1.4 for
+    CURSED) but NONE of the four player-hit sites read it, so the CURSED room (lootMult 2.0 + a guaranteed
+    scroll) was pure upside. A single `_hurtPlayer(result)` helper scales `result.damage` by the mult before
+    `player.onHit` and ALL four sites (enemy melee / contact / projectile / hazard) route through it — the
+    curse bites, its risk/reward design is live, and a normal room (mult 1) is byte-identical (DRY).
+
+69. **BUG — `lootMult` now scales per-kill drops, not just the entry reward.** `Pickup.spawnDrop` ignored the
+    room's `lootMult`, so an ELITE/HORDE/CURSED room paid the same Cells/gold per kill as a normal room. The
+    room's `lootMult` is threaded into `spawnDrop` (via the `enemy.onDrop` wiring) and scales BOTH the Cell
+    count and the gold-drop amount — a tagged room's CLEAR is now materially richer (the payout that justifies
+    the harder fight). Default 1 → byte-identical for a normal room.
+
+70. **Front-loaded enemy variety.** Chargers/flyers/spitters barely appeared before the deepest biome. The
+    Sewers pool gains a light **charger + flyer** weight and the Catacombs pool a light **charger**, so the
+    first half of a run shows more of the 5 archetypes and the charger is no longer hidden until the finale
+    biome. Pure-config (`biomes.js` `enemyPool` arrays); the verifier already asserts pool ids are known.
+
+71. **A boss SIGNATURE mechanic — the `summon` attack kind.** The boss kit grew 4 → 5 primitives with a NEW
+    `summon` kind: spawn 1–2 enemy adds via a scene hook (`spawnBossAdds`, reusing `_spawnEnemy` + `scaleSpec`),
+    capped by a live-add count (`maxAdds`) so a long fight can't snowball. The Warden (finale) + the Bone Warden
+    (miniboss) get a "summoner" identity — a split-attention check distinct from the other four. `BOSS_ATTACK_KINDS`
+    + the verifier sweep validate the new kind (used-in-a-phase, positive count/maxAdds, a known `spec` id).
+
+72. **An in-run POWER ARC — a guaranteed power scroll per biome.** Cells only bank at run END, so within a run
+    the player never reliably got stronger (scroll drop chance is only 0.12). A guaranteed **Power or Vitality**
+    scroll is armed at the START of every biome (seeded off the run seed ⊕ biome index — a replay grants the
+    same), so the run has its own visible power curve that races the rising difficulty. Run-only (never banked).
+
+73. **A SECOND weapon slot + a swap key — the build-identity lever.** A new meta upgrade (`weaponSlot`, premium
+    one-time unlock) lets a run carry TWO weapons; **R** swaps the active slot. With the slot unlocked, the first
+    found/bought weapon FILLS the empty secondary (carry melee+ranged) rather than replacing the starter — turning
+    a loot pickup into a BUILD decision. The Player is slot-backed (`equippedWeapon` is now a getter over the
+    active slot — every hit-site read unchanged); RunState carries both slots' ids; a fresh meta is single-slot
+    (the identity — swap is a no-op). The verifier proves the upgrade unlocks the slot + never weakens.
+
 ---
 
 ## 4. Problem Analysis

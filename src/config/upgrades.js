@@ -143,6 +143,24 @@ export const UPGRADES = [
       flaskHealFrac: stats.flaskHealFrac + 0.1 * level,
     }),
   },
+
+  // ── SECOND WEAPON SLOT (Enrichment round-3, item 3 — the BUILD-IDENTITY lever) ──────────────────────
+  // All other meta tiers are flat +stat scalars; this one is QUALITATIVE — it unlocks a SECOND weapon slot
+  // so a run carries TWO weapons (melee+ranged or two movesets) and a SWAP key toggles which is active.
+  // That turns a loot pickup from "replace my weapon" into a real BUILD decision (fill the free slot vs
+  // swap out the active one) — the genre's replay hook (build identity), the single biggest depth lever the
+  // meta tree was missing. Pure DATA: the Player reads startStats.weaponSlots (≥2 ⇒ slot unlocked); GameScene
+  // routes a pickup into the empty slot when unlocked; Input adds the swap edge. A fresh meta leaves
+  // weaponSlots at 1 (single-slot — the identity), so an un-upgraded run plays EXACTLY as before. maxLevel 1
+  // (it's a one-time unlock, not a stacking scalar). Bigger-is-better (it never weakens you).
+  {
+    id: 'weaponSlot',
+    name: 'Second Weapon Slot',
+    desc: 'Carry a 2nd weapon (swap with R)',
+    maxLevel: 1,
+    costs: [60], // a premium unlock (it's a qualitative power spike, not a +5% scalar).
+    apply: (stats, level) => ({ ...stats, weaponSlots: 1 + level }), // level 1 → 2 slots; level 0 → 1 (identity).
+  },
 ]
 
 // id → row lookup (for MetaState.buy + the Hub's affordability/owned-level readout). DRY: one source.

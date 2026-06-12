@@ -89,6 +89,15 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
     // run starts with no affix (the starting weapon is unmodified — the identity).
     weaponAffixId: null,
 
+    // ── SECOND weapon SLOT (Enrichment round-3, item 3 — the build-identity lever) ── how many slots the
+    // run carries (1 = single-slot, the identity; a meta upgrade seeds 2) + the SECONDARY slot's weapon id +
+    // affix (null = the slot is empty). Carried as SCALARS (mirroring the primary weaponId/weaponAffixId) so a
+    // level rebuild re-equips BOTH slots' folded weapons (GameScene re-folds WEAPONS[id] with the affix). A
+    // fresh run is single-slot with an empty secondary → byte-identical to round-2.
+    weaponSlots: startStats ? startStats.weaponSlots ?? 1 : 1,
+    weaponId2: null, // the secondary slot's weapon id (null = the slot is empty / locked).
+    weaponAffixId2: null, // the secondary slot's affix id (null = a plain weapon / empty slot).
+
     // ── Run stats (for the GameOver summary, AC46) ──
     kills: 0, // GameScene bumps this on each enemy death.
     startedAt, // passed IN (purity, Decision 44); summary() computes timeMs = now − startedAt.

@@ -46,13 +46,15 @@ npm run verify   # headless determinism check (scripts/verify-gen.mjs)
   advance swings; hit an enemy from behind for a **BACKSTAB** crit
 - **Dodge-roll:** **Shift** or **K** — horizontal dash with i-frames (flashes yellow) and a
   brief cooldown; dodge-through an enemy's (or the boss's) **telegraphed** strike to take no damage
+- **Swap weapon:** **R** — toggle between your two equipped weapons (only when the **Second Weapon
+  Slot** meta upgrade is unlocked and you carry a second weapon; a no-op otherwise)
 - **Drink flask:** **Q** — heal a chunk of max HP from a limited-charge flask; charges **refill on
   every biome transition** (a fountain at each new area). Don't waste a drink at full HP.
 - **Shop / interact:** **E** — when standing on a vendor (a `[E] SHOP` prompt appears) opens the
   paused buy menu; **UP / DOWN** select, **E / SPACE / ENTER** buy or LEAVE
 - **Pickups:** walk over them — **Cells** (cyan, banked to permanent meta), **gold** (run-only),
-  **scrolls** (magenta, run-only stat boosts), **weapons** (white, swap the equipped weapon),
-  **heals** (green fountains)
+  **scrolls** (magenta, run-only stat boosts), **weapons** (white — swap the active weapon, or, with the
+  Second Weapon Slot unlocked, fill the empty slot so you carry both), **heals** (green fountains)
 - **ESC** → Title
 
 ## How to play
@@ -82,10 +84,11 @@ telegraphs dies. Difficulty scales with **depth** (deeper enemies are tankier an
 the deepest at the boss. All of it is pure-config data, re-proven monotone by `npm run verify`.
 
 **Permadeath + meta:** on **death OR victory** the run's **Cells** are banked to permanent meta
-(gold/scrolls are lost), and you return to the **Hub** to spend them on a **9-row upgrade tree**:
+(gold/scrolls are lost), and you return to the **Hub** to spend them on a **10-row upgrade tree**:
 **+Max HP**, **+Melee Damage**, **+Ranged Damage**, **−Dodge Cooldown**, **+Dodge I-Frames**, a
-**Starting Weapon** unlock, a **Gold Head-Start**, **Starting Scrolls**, and a **Bigger Flask** (more
-charges + bigger heals). Progress persists to `localStorage` and survives a relaunch.
+**Starting Weapon** unlock, a **Gold Head-Start**, **Starting Scrolls**, a **Bigger Flask** (more
+charges + bigger heals), and a **Second Weapon Slot** (carry two weapons and **swap with R** mid-run —
+turning loot into a build decision). Progress persists to `localStorage` and survives a relaunch.
 
 The HUD shows the **HP bar**, live **Cells / gold** counters, the **equipped weapon**, the **flask
 charges**, the **depth · biome** readout, and — in the boss room — the **boss's HP bar** across the top.

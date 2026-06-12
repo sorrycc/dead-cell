@@ -30,6 +30,17 @@
 //                dodge by weaving a gap in the ring, not by side-stepping a cone. `count` is the ring
 //                density (more = tighter gaps). This is the round-3 "make the climax feel fresh" lever:
 //                the two bosses now share FOUR primitives, not three, with a genuinely new dodge pattern.
+//   • 'summon' — (Enrichment round 3 — the SIGNATURE-mechanic kind) SPAWN `count` normal enemy ADDS (a
+//                weighted `spec` id, e.g. a grunt) near the boss at telegraph end, so the fight stops being
+//                a pure 1-v-1 telegraph-dodge and becomes a "clear the adds while reading the boss" check —
+//                a genuinely DIFFERENT pressure (split attention) than the other four primitives. Unlike
+//                slam/volley/dash/sweep (which the boss resolves itself via its pools), summon needs to put
+//                a real Enemy into the room, so Boss.js calls a SCENE HOOK (scene.spawnBossAdds) — the ONLY
+//                new wiring, and it reuses GameScene._spawnEnemy + the per-biome scaleSpec verbatim (DRY).
+//                `count` = adds per cast (kept small — 1–2 — so it pressures without swarming), `spec` = the
+//                archetype id to spawn, `maxAdds` (read scene-side) caps the live add count so a long fight
+//                can't snowball into an unwinnable swarm. This gives a boss a MEMORABLE identity (the
+//                "summoner") on the SAME scaffolding — a small, contained, parameterised add.
 // An attack entry is `{ kind, telegraph, active, recovery, ...params }`. Phase 2 adds denser attacks +
 // tightens telegraphs (telegraphMult) → the genre's "the back half demands cleaner play".
 //
@@ -78,12 +89,13 @@ export const RAMPARTS_BOSS = {
       attacks: ['slam', 'dash', 'slam'],
     },
     {
-      // ── Phase 2 (≤50%): tighter telegraphs, ADDS the volley + the round-3 SWEEP ring, moves faster
-      // (the escalation, AC56). The sweep is the new "find the gap in the ring" pressure on the back half. ──
+      // ── Phase 2 (≤50%): tighter telegraphs, ADDS the volley + the round-3 SWEEP ring + the SUMMON (its
+      // signature back-half "call the guards" beat), moves faster (the escalation, AC56). The summon makes
+      // the Warden's back half a split-attention check — clear the adds while still reading its telegraphs. ──
       hpThreshold: 0.5,
       telegraphMult: 0.72, // wind-ups shrink → cleaner play required (the back-half ramp).
       moveSpeed: 110,
-      attacks: ['slam', 'volley', 'sweep', 'dash', 'volley'],
+      attacks: ['slam', 'summon', 'volley', 'sweep', 'dash'],
     },
   ],
 
@@ -129,6 +141,19 @@ export const RAMPARTS_BOSS = {
       recovery: 0.7, // s — a long recovery (the punish window after you thread the ring).
       count: 10, // bolts in the ring (evenly spaced over 360° — sparse enough to weave a gap).
       projectile: { speed: 320, damage: 16, knockback: 220, lifetime: 2.2, w: 14, h: 14 },
+    },
+    // 'summon' (round-3 NEW kind) — the Warden CALLS THE GUARDS: spawn `count` grunt adds near it at
+    // telegraph end (a split-attention beat — clear the adds while reading the boss). A long, very readable
+    // wind-up (you SEE it coming). Boss.js routes this to scene.spawnBossAdds (reuses _spawnEnemy + scaleSpec);
+    // maxAdds caps the live add count so the fight can't snowball into an unwinnable swarm.
+    summon: {
+      kind: 'summon',
+      telegraph: 0.9, // s — a long tell (the room is about to get crowded — give the player time).
+      active: 0.1, // s — the spawn beat (the adds appear at telegraph end).
+      recovery: 0.7, // s — a recovery (the boss is briefly vulnerable after calling adds).
+      count: 2, // grunt adds per cast (small — pressure, not a swarm).
+      spec: 'grunt', // the archetype id to spawn (a fair melee add; scaled by the boss biome's depth).
+      maxAdds: 3, // scene-side cap on the LIVE add count (a long fight can't snowball into a swarm).
     },
   },
 }
@@ -408,8 +433,9 @@ export const CATACOMBS_MINIBOSS = {
   hitstun: 0.0,
   hurtIframe: 0.06,
   phases: [
-    { hpThreshold: 1.0, telegraphMult: 0.9, moveSpeed: 95, attacks: ['slam', 'sweep', 'dash'] },
-    { hpThreshold: 0.5, telegraphMult: 0.72, moveSpeed: 125, attacks: ['dash', 'sweep', 'slam', 'volley'] },
+    // Phase 1 opens with the Bone Warden's signature SUMMON (it raises bone-grunts) into a slam/sweep/dash mix.
+    { hpThreshold: 1.0, telegraphMult: 0.9, moveSpeed: 95, attacks: ['summon', 'slam', 'sweep', 'dash'] },
+    { hpThreshold: 0.5, telegraphMult: 0.72, moveSpeed: 125, attacks: ['dash', 'summon', 'sweep', 'slam', 'volley'] },
   ],
   attacks: {
     slam: {
@@ -445,6 +471,18 @@ export const CATACOMBS_MINIBOSS = {
       count: 12,
       projectile: { speed: 330, damage: 14, knockback: 200, lifetime: 2.3, w: 14, h: 14 },
     },
+    // 'summon' (round-3) — the Bone Warden RAISES THE DEAD: spawn `count` grunt adds (its signature gate
+    // mechanic before the finale). Routed to scene.spawnBossAdds (reuses _spawnEnemy + scaleSpec); maxAdds
+    // caps the live add count so the miniboss room can't snowball.
+    summon: {
+      kind: 'summon',
+      telegraph: 0.85,
+      active: 0.1,
+      recovery: 0.65,
+      count: 2,
+      spec: 'grunt',
+      maxAdds: 2, // a touch lower than the finale Warden's cap (it's a miniboss — a smaller set-piece).
+    },
   },
 }
 
@@ -473,5 +511,6 @@ export const BOSS_ORDER = [
 ]
 
 // ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). The
-// round-3 'sweep' (a true-radial projectile ring — Boss.js dispatches it) is the FOURTH primitive. ──
-export const BOSS_ATTACK_KINDS = ['slam', 'volley', 'dash', 'sweep']
+// round-3 'sweep' (a true-radial projectile ring) is the FOURTH primitive; 'summon' (spawn enemy adds via
+// the scene hook — Boss.js dispatches it) is the FIFTH, giving a boss a signature "summoner" identity. ──
+export const BOSS_ATTACK_KINDS = ['slam', 'volley', 'dash', 'sweep', 'summon']

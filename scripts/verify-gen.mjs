@@ -50,7 +50,7 @@ import { createRunState } from '../src/core/RunState.js'
 // localStorage) — the same convention the level/run modules satisfy. core/MetaState.js imports only
 // util/save.js (Phaser-free) + the pure configs, and applyUpgrades/BASE_PLAYER_STATS touch NO storage,
 // so this import never throws under node (review MINOR — the purity-convention pin made explicit).
-import { UPGRADES } from '../src/config/upgrades.js'
+import { UPGRADES, UPGRADES_BY_ID } from '../src/config/upgrades.js'
 import { WEAPON_ORDER, WEAPON_AFFIXES, WEAPON_AFFIX_ORDER, WEAPON_AFFIX_CHANCE, foldWeaponAffix } from '../src/config/weapons.js'
 import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
 // Bosses-phase PURE modules (§6.6, Decision 64/68, AC56/AC59/AC61): the archetype specs + per-biome
@@ -596,6 +596,16 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (maxed.startScrolls < BASE_PLAYER_STATS.startScrolls) fail(`upgrade ${upg.id}: startScrolls decreased`)
     if (maxed.maxFlasks < BASE_PLAYER_STATS.maxFlasks) fail(`upgrade ${upg.id}: maxFlasks decreased`)
     if (maxed.flaskHealFrac < BASE_PLAYER_STATS.flaskHealFrac) fail(`upgrade ${upg.id}: flaskHealFrac decreased`)
+    // ── ROUND-3 (item 3) — the second-weapon-slot field is bigger-is-better (more slots never weakens you).
+    // A max-level fold must leave weaponSlots ≥ base on every upgrade (rows that don't touch it leave it at
+    // base = identity, which still satisfies ≥). This makes the new qualitative tier verifier-proven non-weakening.
+    if (maxed.weaponSlots < BASE_PLAYER_STATS.weaponSlots) fail(`upgrade ${upg.id}: weaponSlots decreased`)
+  }
+  // The 'weaponSlot' upgrade at max level must actually UNLOCK the second slot (≥2) — it'd be dead config
+  // (the whole point of item 3) if it folded to 1. Asserted explicitly so a mis-tuned apply fails loudly.
+  {
+    const maxed = applyUpgrades(BASE_PLAYER_STATS, { weaponSlot: UPGRADES_BY_ID.weaponSlot.maxLevel })
+    if (!(maxed.weaponSlots >= 2)) fail(`weaponSlot upgrade: max-level fold must yield weaponSlots ≥ 2 (it unlocks the 2nd slot)`)
   }
 }
 
@@ -711,6 +721,12 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   if (!BOSS_ATTACK_KINDS.includes('sweep')) fail(`BOSS_ATTACK_KINDS missing the round-3 'sweep' kind`)
   const sweepUsed = BOSS_ORDER.some((b) => b.phases.some((ph) => ph.attacks.includes('sweep')))
   if (!sweepUsed) fail(`no boss uses the new 'sweep' attack kind in any phase pattern (dead config)`)
+  // Round-3 (item 5): the kit grew 4 → 5 with the NEW 'summon' kind (spawn enemy adds — a signature
+  // "summoner" mechanic). Assert the kind set includes it AND some boss USES it (not dead config), so a
+  // boss has a genuinely distinct mechanic, not just a 4th projectile/melee reskin.
+  if (!BOSS_ATTACK_KINDS.includes('summon')) fail(`BOSS_ATTACK_KINDS missing the round-3 'summon' kind`)
+  const summonUsed = BOSS_ORDER.some((b) => b.phases.some((ph) => ph.attacks.includes('summon')))
+  if (!summonUsed) fail(`no boss uses the new 'summon' attack kind in any phase pattern (dead config)`)
   for (const boss of BOSS_ORDER) {
     if (!(typeof boss.maxHp === 'number') || boss.maxHp <= 0) fail(`boss ${boss.id}: maxHp must be > 0`)
     if (!Array.isArray(boss.phases) || boss.phases.length < 2) fail(`boss ${boss.id}: expected ≥2 phases (AC56)`)
@@ -729,6 +745,15 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
         if (!atk) fail(`boss ${boss.id}: phase references attack "${kind}" missing from the attacks map`)
         if (!(atk.telegraph > 0)) fail(`boss ${boss.id}: attack "${kind}" telegraph must be > 0 (dodgeable, AC56)`)
         if (!(atk.active > 0)) fail(`boss ${boss.id}: attack "${kind}" active must be > 0`)
+        // Round-3 (item 5) — a 'summon' attack's params are well-formed: a positive add `count`, a positive
+        // `maxAdds` live cap (≥ count so a single cast isn't pre-capped to nothing), and a `spec` that
+        // resolves to a KNOWN archetype (a dangling id would spawn nothing — a content bug, fails loudly).
+        if (kind === 'summon') {
+          if (!(atk.count > 0)) fail(`boss ${boss.id}: summon count must be > 0`)
+          if (!(atk.maxAdds > 0)) fail(`boss ${boss.id}: summon maxAdds must be > 0 (the live-add cap)`)
+          if (atk.maxAdds < atk.count) fail(`boss ${boss.id}: summon maxAdds (${atk.maxAdds}) < count (${atk.count}) — a cast is pre-capped to nothing`)
+          if (!ENEMY_SPECS[atk.spec]) fail(`boss ${boss.id}: summon spec "${atk.spec}" is not a known archetype (AC59)`)
+        }
       }
     }
     // Depth-scaling GUARDRAIL (review MAJOR — the HONEST claim): a deeper boss is never WEAKER. The
