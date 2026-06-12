@@ -56,8 +56,13 @@ import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
 // Bosses-phase PURE modules (§6.6, Decision 64/68, AC56/AC59/AC61): the archetype specs + per-biome
 // pools, the boss table, and the boss-arena generator branch. All node-importable (no Phaser) — the
 // verifier asserts the enemy-pool/archetype + boss-table well-formedness + the boss-arena contract.
-import { ENEMY_SPECS, ENEMY_ARCHETYPES, GRUNT } from '../src/config/enemies.js'
+import { ENEMY_SPECS, ENEMY_ARCHETYPES, GRUNT, ELITE_AFFIXES, ELITE_AFFIX, ELITE_CHANCE } from '../src/config/enemies.js'
 import { BOSS_ORDER, BOSS_ATTACK_KINDS, BOSSES } from '../src/config/bosses.js'
+// Enrichment round-3 PURE tables: the expanded run-only scroll set + the weighted elite-affix set. Both are
+// node-importable pure data — a successful import re-proves purity, and the §9 sweep below asserts each is
+// well-formed (a non-empty list, an apply()/identity-safe shape) — the same guardrail every config table gets.
+import { SCROLLS, SCROLL_IDS } from '../src/config/scrolls.js'
+import { createRunState as createRunStateForScrolls } from '../src/core/RunState.js'
 // Enrichment PURE modules (§6.10/§6.11/§6.12, Decision 76/77/78): the in-run shop catalog (the gold sink),
 // the elite-affix table, and the status-effect table. All node-importable (no Phaser) — a successful import
 // re-proves their purity, and the new sections below assert each table is well-formed (KISS guardrails).
@@ -675,6 +680,11 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 // attack exists in the boss's `attacks` map with the right params; the depth-scaling fold never weakens. ──
 {
   if (BOSS_ORDER.length < 1) fail(`BOSS_ORDER has ${BOSS_ORDER.length} bosses, expected ≥1 (AC56)`)
+  // Round-3: the boss kit grew from 3 → 4 primitives (the NEW 'sweep' radial ring). Assert the kind set
+  // includes it AND that some boss actually USES it in a phase pattern (so the new kind isn't dead config).
+  if (!BOSS_ATTACK_KINDS.includes('sweep')) fail(`BOSS_ATTACK_KINDS missing the round-3 'sweep' kind`)
+  const sweepUsed = BOSS_ORDER.some((b) => b.phases.some((ph) => ph.attacks.includes('sweep')))
+  if (!sweepUsed) fail(`no boss uses the new 'sweep' attack kind in any phase pattern (dead config)`)
   for (const boss of BOSS_ORDER) {
     if (!(typeof boss.maxHp === 'number') || boss.maxHp <= 0) fail(`boss ${boss.id}: maxHp must be > 0`)
     if (!Array.isArray(boss.phases) || boss.phases.length < 2) fail(`boss ${boss.id}: expected ≥2 phases (AC56)`)
@@ -822,6 +832,94 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 9) Enrichment round-3 build-variety tables (the expanded SCROLLS + the weighted ELITE_AFFIXES). An
+//    INDEPENDENT proof that the deepened run-only pool + elite-affix set are well-formed: a non-empty
+//    list, a pure apply() that does not throw / does not leak (it only mutates the passed RunState's
+//    run-only fields), and per-affix sane params. Mirrors the upgrade/shop/boss table well-formedness
+//    checks — a malformed table fails loudly under node, never reaching the game.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 9a) SCROLLS well-formed (AC52 — build variety): ≥4 scrolls (the round-3 ask), each with a string
+  // id + name + a function apply; the id list is unique (SCROLL_IDS deduped). The genre's build divergence
+  // needs a pool, not 2 flat bumps. ──
+  if (!Array.isArray(SCROLLS) || SCROLLS.length < 4) {
+    fail(`SCROLLS has ${SCROLLS?.length} entries, expected ≥4 (round-3 build variety)`)
+  }
+  const seenScrollIds = new Set()
+  for (const s of SCROLLS) {
+    if (typeof s.id !== 'string' || !s.id) fail('scroll missing id')
+    if (typeof s.name !== 'string' || !s.name) fail(`scroll ${s.id}: missing name`)
+    if (typeof s.apply !== 'function') fail(`scroll ${s.id}: apply is not a function`)
+    if (seenScrollIds.has(s.id)) fail(`scroll ${s.id}: duplicate id`)
+    seenScrollIds.add(s.id)
+  }
+  if (SCROLL_IDS.length !== SCROLLS.length) fail('SCROLL_IDS length != SCROLLS length (id list drift)')
+
+  // ── 9b) Each scroll's apply() is PURE-effect (mutates ONLY the passed RunState's run-only fields) and a
+  // never-weaken boost: applying it must not THROW and must leave the run a sane state. We apply EACH scroll
+  // to a fresh RunState (constructed node-side — RunState is Phaser-free) and assert the run-only fields it
+  // touches moved in the right direction (a boost never weakens — the same sense the upgrade fold proves). ──
+  for (const s of SCROLLS) {
+    const run = createRunStateForScrolls(0xc0ffee, 0)
+    // Snapshot the run-only fields the scroll set can touch.
+    const before = {
+      dmg: run.scrollDamageMult,
+      hp: run.scrollMaxHpBonus,
+      life: run.scrollLifestealFrac,
+      stat: run.scrollStatusDurationMult,
+      cd: run.scrollDodgeCdMult,
+      ifr: run.scrollDodgeIframeBonus,
+      flasksMax: run.maxFlasks,
+    }
+    s.apply(run) // must not throw.
+    // Damage / max-HP / lifesteal / status / flask are bigger-is-better; the dodge-cooldown mult is
+    // smaller-is-better (a shorter cooldown). Assert NONE moved the wrong way (a boost never weakens).
+    if (run.scrollDamageMult < before.dmg) fail(`scroll ${s.id}: scrollDamageMult decreased`)
+    if (run.scrollMaxHpBonus < before.hp) fail(`scroll ${s.id}: scrollMaxHpBonus decreased`)
+    if (run.scrollLifestealFrac < before.life) fail(`scroll ${s.id}: scrollLifestealFrac decreased`)
+    if (run.scrollStatusDurationMult < before.stat) fail(`scroll ${s.id}: scrollStatusDurationMult decreased`)
+    if (run.scrollDodgeIframeBonus < before.ifr) fail(`scroll ${s.id}: scrollDodgeIframeBonus decreased`)
+    if (run.maxFlasks < before.flasksMax) fail(`scroll ${s.id}: maxFlasks decreased`)
+    if (run.scrollDodgeCdMult > before.cd) fail(`scroll ${s.id}: scrollDodgeCdMult increased (a longer dodge cooldown is a weaken)`)
+    // At least ONE field must have changed (a no-op scroll is a content bug — a found scroll must DO something).
+    const changed =
+      run.scrollDamageMult !== before.dmg || run.scrollMaxHpBonus !== before.hp ||
+      run.scrollLifestealFrac !== before.life || run.scrollStatusDurationMult !== before.stat ||
+      run.scrollDodgeCdMult !== before.cd || run.scrollDodgeIframeBonus !== before.ifr ||
+      run.maxFlasks !== before.flasksMax
+    if (!changed) fail(`scroll ${s.id}: apply() changed no run-only field (a no-op scroll)`)
+  }
+
+  // ── 9c) ELITE_AFFIXES well-formed (AC64 — elite variety): a weighted set of ≥3 affixes ({ affix, w }),
+  // each with a string id, a positive weight, and sane modifier ranges (multipliers > 0; a death burst, if
+  // present, has a positive count + a projectile spec). The single-affix ELITE_AFFIX back-compat export must
+  // resolve to one of the set's affixes (DRY — not a divergent copy). ELITE_CHANCE is a probability in (0,1). ──
+  if (!Array.isArray(ELITE_AFFIXES) || ELITE_AFFIXES.length < 3) {
+    fail(`ELITE_AFFIXES has ${ELITE_AFFIXES?.length} entries, expected ≥3 (round-3 elite variety)`)
+  }
+  const seenAffixIds = new Set()
+  for (const entry of ELITE_AFFIXES) {
+    if (!(typeof entry.w === 'number') || entry.w <= 0) fail(`elite affix entry: weight must be > 0`)
+    const a = entry.affix
+    if (!a || typeof a.id !== 'string' || !a.id) fail('elite affix: missing id')
+    if (seenAffixIds.has(a.id)) fail(`elite affix ${a.id}: duplicate id`)
+    seenAffixIds.add(a.id)
+    // Modifier sanity: any present multiplier must be > 0 (a 0/negative would zero/flip the stat).
+    for (const f of ['hpMult', 'bodyScale', 'telegraphMult', 'speedMult', 'knockbackTakeMult', 'hpRegenPerSec', 'cellBonus']) {
+      if (a[f] !== undefined && !(typeof a[f] === 'number' && a[f] >= 0)) fail(`elite affix ${a.id}: ${f} must be a number ≥ 0`)
+    }
+    if (a.hpMult !== undefined && a.hpMult <= 0) fail(`elite affix ${a.id}: hpMult must be > 0`)
+    if (a.deathBurst) {
+      if (!(a.deathBurst.count > 0)) fail(`elite affix ${a.id}: deathBurst.count must be > 0`)
+      if (!a.deathBurst.projectile || !(a.deathBurst.projectile.speed > 0)) fail(`elite affix ${a.id}: deathBurst needs a projectile with speed > 0`)
+    }
+  }
+  // The back-compat default must be one of the set's affixes (referential — DRY, not a stale copy).
+  if (!ELITE_AFFIXES.some((e) => e.affix === ELITE_AFFIX)) fail('ELITE_AFFIX (back-compat) is not one of ELITE_AFFIXES')
+  if (!(typeof ELITE_CHANCE === 'number' && ELITE_CHANCE > 0 && ELITE_CHANCE < 1)) fail(`ELITE_CHANCE must be in (0,1), got ${ELITE_CHANCE}`)
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -832,6 +930,7 @@ console.log(
     `pools (AC59); boss table well-formed + depth-scaling guardrail (AC56/AC61); ${WEAPON_ORDER.length} ` +
     `weapons (AC60); boss-arena branch deterministic + valid over ${N} seeds (AC57); ` +
     `${SHOP_ITEMS.length} shop items well-formed (AC63); ${BOSS_ORDER.length} bosses well-formed (AC65); ` +
-    `status tick/expiry/refresh pure+pinned (${STATUS_KINDS.length} kinds, AC66)`,
+    `status tick/expiry/refresh pure+pinned (${STATUS_KINDS.length} kinds, AC66); ` +
+    `${SCROLLS.length} scrolls + ${ELITE_AFFIXES.length} elite affixes well-formed (round-3 build variety)`,
 )
 process.exit(0)

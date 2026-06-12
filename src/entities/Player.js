@@ -113,8 +113,16 @@ export class Player {
     this.meleeDamageMult = 1 // permanent meta melee-damage multiplier (Decision 60).
     this.rangedDamageMult = 1 // §6.9 (Decision 73) — permanent meta RANGED (bow) damage multiplier.
     this.scrollDamageMult = 1 // run-only scroll damage multiplier (read LIVE; never saved).
-    this.dodgeCooldownMult = 1 // factor on DODGE_COOLDOWN (≤1 → dodge sooner; Decision 60).
-    this.dodgeIframeBonus = 0 // §6.9 (Decision 73) — flat extra dodge i-frame seconds (0 = neutral).
+    this.dodgeCooldownMult = 1 // META factor on DODGE_COOLDOWN (≤1 → dodge sooner; Decision 60).
+    this.dodgeIframeBonus = 0 // §6.9 (Decision 73) — META flat extra dodge i-frame seconds (0 = neutral).
+    // ── Run-only scroll dodge/sustain/status fields (Enrichment round 3) ── kept SEPARATE from the meta
+    // factors above so meta × scroll compose at the read site (no double-fold). All default to the neutral
+    // identity (1× / 0) so a fresh run with no scroll plays exactly as before. Synced from RunState by
+    // GameScene._syncPlayerScrollStats; lifesteal/status are read at the melee-hit site.
+    this.scrollDodgeCdMult = 1 // run-only ×factor on the dodge cooldown (Alacrity scroll; stacks on the meta one).
+    this.scrollDodgeIframeBonus = 0 // run-only flat extra dodge i-frame seconds (Alacrity scroll).
+    this.lifestealFrac = 0 // fraction of MELEE damage dealt healed back (Vampirism scroll; read at the hit site).
+    this.statusDurationMult = 1 // ×applied status duration (Venom scroll; read when arming a weapon's status).
     this.equippedWeapon = SWORD // the active weapon (its swings table + type drive attacks, Decision 61).
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
@@ -305,12 +313,13 @@ export class Player {
       this.state = STATE.DODGE
       this.facing = input.moveX !== 0 ? Math.sign(input.moveX) : this.facing
       this.dodgeTimer = DODGE_DURATION
-      // The dodge i-frame window = the base window + the meta 'dodge i-frames' bonus (Decision 73). The
-      // bonus widens the safe window (a more forgiving roll); a fresh meta leaves it at the Phase-1 base.
-      this.iframeTimer = DODGE_IFRAMES + this.dodgeIframeBonus
-      // Gate measured from start; outlasts duration. The meta "shorter dodge cooldown" upgrade folds in
-      // as dodgeCooldownMult (≤1 → dodge sooner; Decision 60). Identity at mult=1 (the Phase-4 value).
-      this.dodgeCooldownTimer = DODGE_COOLDOWN * this.dodgeCooldownMult
+      // The dodge i-frame window = the base window + the META bonus (Decision 73) + the run-only scroll
+      // bonus (Alacrity, round 3). Both default to 0 so a fresh run leaves it at the Phase-1 base; together
+      // they widen the safe window (a more forgiving roll).
+      this.iframeTimer = DODGE_IFRAMES + this.dodgeIframeBonus + this.scrollDodgeIframeBonus
+      // Gate measured from start; outlasts duration. The cooldown folds the META factor (Decision 60) ×
+      // the run-only scroll factor (Alacrity) — both ≤1 → dodge sooner. Identity at 1×1 (the Phase-4 value).
+      this.dodgeCooldownTimer = DODGE_COOLDOWN * this.dodgeCooldownMult * this.scrollDodgeCdMult
       this._kickScaleY(DODGE_SQUASH_Y)
     }
 

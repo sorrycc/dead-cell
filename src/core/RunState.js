@@ -71,9 +71,14 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
     flasks: startStats ? startStats.maxFlasks : 2, // current charges (start full).
     flaskHealFrac: startStats ? startStats.flaskHealFrac : 0.4, // fraction of MAX HP each drink restores.
 
-    // ── Run-only scroll modifiers (§6.5, Decision 55/60) — applied LIVE, never saved to meta. ──
+    // ── Run-only scroll modifiers (§6.5, Decision 55/60; Enrichment round 3) — applied LIVE, never saved
+    // to meta. Each defaults to a NEUTRAL identity so a fresh run with no scroll plays exactly as before. ──
     scrollDamageMult: 1, // stacks ON TOP of the permanent meleeDamageMult at the hit site.
     scrollMaxHpBonus: 0, // flat max-HP bonus from vitality scrolls (run-only; resets next run).
+    scrollLifestealFrac: 0, // fraction of MELEE damage dealt healed back (Vampirism scroll; read at the hit site).
+    scrollStatusDurationMult: 1, // ×applied bleed/poison/stun duration (Venom scroll; applied when arming a status).
+    scrollDodgeCdMult: 1, // ×factor on the player's dodge cooldown (Alacrity scroll; synced to the player).
+    scrollDodgeIframeBonus: 0, // flat extra dodge i-frame seconds (Alacrity scroll; synced to the player).
 
     // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
     // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──

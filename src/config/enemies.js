@@ -182,50 +182,167 @@ export const FLYER = {
   noGravity: true, // GameScene reads this to disable body gravity + skip the solids collider (AC59).
 }
 
+// ── SPITTER — a spread-fire shotgunner (behavior:'ranged' + spread, AC59; Enrichment round 3 — the 5th
+// archetype). ── A close-to-mid ranged enemy that fires a 3-shot FAN (a tight cone) instead of a single
+// bolt, so it punishes a head-on approach you can't simply side-step one bolt out of. It reuses the EXISTING
+// 'ranged' behaviour entirely (kiting + fire-on-the-beat) — the ONLY new thing is `projectileSpread` +
+// `projectileCount`, a small guarded branch in Enemy._fireStrike that fires N shots across an angular fan via
+// the round-3 2-D projectile aim (no new behaviour branch in the FSM — the Decision-68 philosophy). Tanky-ish
+// mid HP (it holds ground and sprays). Its threat is the SPREAD, so a single shot is weak. The 5th archetype
+// keeps the deepest pools from feeling stale (paired with the 4th biome below).
+export const SPITTER = {
+  id: 'spitter',
+  behavior: 'ranged', // REUSES the shooter FSM path (kite + fire on the beat) — only the fan is new.
+  maxHp: 70, // sturdier than the glass-cannon Shooter (it stands and sprays).
+  bodyW: 40,
+  bodyH: 48,
+  color: 0x16a085, // resting fill (teal — distinct from the Shooter's purple).
+  colorTelegraph: 0xf1c40f,
+  colorHurt: 0xffffff,
+  patrolSpeed: 56,
+  chaseSpeed: 120,
+  chaseAccel: 760,
+  detectRange: 420,
+  detectHeight: 150,
+  loseRange: 540,
+  loseGrace: 1.4,
+  attackRange: 320, // px — fires from mid range (closer than the Shooter — the fan wants you near).
+  preferredRange: 220, // px — kites to keep a mid gap (the fan is most dangerous at this spacing).
+  attackCooldown: 1.8, // s — a slower cadence (a fan is a bigger commitment than one bolt).
+  telegraph: 0.55, // s — a clear aim wind-up (the fan is dodgeable on reaction, AC56).
+  attackActive: 0.1,
+  attackRecovery: 0.45,
+  contactDamage: 6,
+  contactCooldown: 0.7,
+  swing: { reach: 30, halfHeight: 20, forward: 12, damage: 0, knockback: 0 }, // well-formed (never swung).
+  // The fired projectile (weaker per-shot than the Shooter's — its threat is the SPREAD, not one bolt).
+  projectile: {
+    ...BOW.projectile,
+    speed: 420,
+    damage: 7, // low per-shot (3 of them across a fan — you must dodge the cone, not one bolt).
+    knockback: 160,
+    lifetime: 1.5,
+  },
+  projectileCount: 3, // shots per fan (round-3 — read ONLY by the 'ranged' spread branch in Enemy).
+  projectileSpread: 26, // total fan width in DEGREES (a tight cone aimed at the player).
+  hitstun: 0.26,
+  hurtIframe: 0.12,
+  knockbackTakeMult: 1.0,
+  cellDrop: 5, // a priority kill (a richer drop than the Shooter — it's tankier + more dangerous up close).
+}
+
 // ── ENEMY_SPECS (id → spec) ── the lookup GameScene + the verifier use to resolve an archetype id to
-// its spec. The four archetypes (≥4, AC59). KISS: a flat map, mirroring WEAPONS/BIOMES.
+// its spec. FIVE archetypes now (≥4, AC59; round-3 added the Spitter). KISS: a flat map, mirroring WEAPONS.
 export const ENEMY_SPECS = {
   grunt: GRUNT,
   shooter: SHOOTER,
   charger: CHARGER,
   flyer: FLYER,
+  spitter: SPITTER,
 }
 
 // The ordered list (for the verifier sweep + any list rendering).
-export const ENEMY_ARCHETYPES = [GRUNT, SHOOTER, CHARGER, FLYER]
+export const ENEMY_ARCHETYPES = [GRUNT, SHOOTER, CHARGER, FLYER, SPITTER]
 
-// ── ELITE affix (design §6.11, Decision 77, AC64) ──
+// ── ELITE affixes (design §6.11, Decision 77, AC64; Enrichment round 3 — the weighted set) ──
 // An elite is a NORMAL archetype with a small bundle of MODIFIERS rolled at spawn — NOT a new archetype
-// or subclass (it reuses the ONE Enemy FSM, the Decision-68 philosophy): a bigger body, more HP, a gold
-// tint, a TIGHTER telegraph (faster wind-up → it punishes a lazy dodge), and a DEATH BURST (a radial fan
-// of pooled 'enemy' projectiles when it dies — a "don't melee it carelessly" tell). Cheap mid-run spikes
-// that materially raise encounter variety on the SAME scaffolding (the genre's elite pressure).
+// or subclass (it reuses the ONE Enemy FSM, the Decision-68 philosophy): a bigger body, more HP, a tint,
+// a tighter/looser telegraph, and a per-affix gimmick. Cheap mid-run spikes that materially raise
+// encounter variety on the SAME scaffolding (the genre's elite pressure).
 //
-// PURE DATA (verifier-importable): the affix is a plain modifier object Enemy.js folds into its live spec
-// at construction (it never mutates the shared archetype spec — same aliasing safety as scaleSpec). The
-// roll CHANCE is data here too (GameScene rolls it off a fresh seeded RNG so a run replays the same elites).
+// WHY A SET (the round-3 variety fix): the old code had ONE hardcoded affix, so every elite played
+// identically (always the same gold tank with a death burst). This is now a small WEIGHTED set of FOUR
+// affixes — frost / explosive / regenerating / fast — each a distinct threat, so elites VARY run-to-run.
+// All are PURE-DATA adds Enemy.js folds; GameScene rolls one off a seeded RNG (a run replays the same
+// elites). KISS: four affixes (YAGNI on more); each leans on the EXISTING fold + two tiny new hooks
+// (speedMult, hpRegenPerSec) the Enemy reads undefined-safe — near-zero engine risk.
+//
+// THE AFFIX FIELDS (Enemy._foldElite reads these; all optional — an absent field is the neutral default):
+//   id            — the affix id (for the verifier sweep + any debug readout).
 //   hpMult        — multiply the (already depth-scaled) maxHp (a tankier elite).
-//   bodyScale     — scale bodyW/bodyH (a visibly bigger threat — reads at a glance).
-//   tint          — the resting-fill colour override (gold — the elite tell, distinct from every archetype).
-//   telegraphMult — scale the attack wind-up (< 1 → faster telegraph: a tighter dodge window, AC56-aware).
+//   bodyScale     — scale bodyW/bodyH (a visibly bigger/smaller threat — reads at a glance).
+//   tint          — the resting-fill colour override (the elite tell, per-affix so the kind reads on sight).
+//   telegraphMult — scale the attack wind-up (<1 → faster/tighter; >1 → slower/looser). Read off this.elite.
+//   speedMult     — scale patrolSpeed + chaseSpeed (a fast elite harasses; folded into the live spec).
+//   knockbackTakeMult — OVERRIDE the archetype's incoming-knockback take-mult (a frost elite is unbudgeable).
+//   hpRegenPerSec — HP regenerated per second while alive (a regenerating elite — kill it FAST). Ticked in
+//                   Enemy.update; capped at maxHp; stops at death. 0/undefined ⇒ no regen.
 //   cellBonus     — extra Cells dropped on death (an elite is a priority kill → a richer reward).
-//   deathBurst    — { count, projectile } | null: a radial volley fired from the enemy ProjectilePool on
-//                   death (the affix's signature — a posthumous AoE you must respect). null = no burst.
-export const ELITE_AFFIX = {
-  hpMult: 2.2, // a chunky HP bump so an elite is a real time-sink (≈ a mini-spike mid-room).
-  bodyScale: 1.35, // a bigger body — the visual tell + a touch easier to hit (a fair trade for the HP).
-  tint: 0xf1c40f, // gold — the universal elite colour (over the archetype's resting fill).
-  telegraphMult: 0.7, // tighter wind-ups (faster attacks) — punishes a careless dodge (the elite pressure).
-  cellBonus: 4, // +4 Cells on death (a priority-kill reward — more meta currency for the harder fight).
-  // DEATH BURST: a 6-shot radial fan of weak 'enemy' projectiles on death (dodge the corpse). Uses the
-  // SAME projectile shape the SHOOTER/boss volley fire (Decision 65) so it rides the existing pool + the
-  // enemy-projectile→player overlap with NO new wiring. Low per-shot damage (it's a "step back" tell, not
-  // a one-shot). The fan is centred radially in Enemy._die.
+//   deathBurst    — { count, projectile } | null: a TRUE-radial volley fired from the enemy ProjectilePool
+//                   on death (the explosive affix's signature — a posthumous AoE). null = no burst.
+
+// FROST — an icy bulwark: very tanky, barely knocked back (unbudgeable), a SLOWER/looser telegraph (it's
+// ponderous) so the threat is its durability, not its speed. The blue tint reads "this one tanks".
+export const ELITE_FROST = {
+  id: 'frost',
+  hpMult: 3.0, // the tankiest affix — a real time-sink (kite it or commit).
+  bodyScale: 1.4,
+  tint: 0x5dade2, // icy blue — the frost tell.
+  telegraphMult: 1.1, // a touch SLOWER wind-up (ponderous) — the trade for the durability.
+  knockbackTakeMult: 0.35, // barely nudged — you can't juggle it off you (its "frozen footing").
+  cellBonus: 5,
+  deathBurst: null,
+}
+
+// EXPLOSIVE — the classic "dodge the corpse": a chunky gold elite with the TRUE-radial death burst. A
+// tighter telegraph than base so it pressures you while alive, then punishes a careless melee on death.
+export const ELITE_EXPLOSIVE = {
+  id: 'explosive',
+  hpMult: 2.0,
+  bodyScale: 1.35,
+  tint: 0xf1c40f, // gold/orange — the explosive tell.
+  telegraphMult: 0.75,
+  cellBonus: 4,
+  // DEATH BURST: a 6-shot TRUE-radial ring of weak 'enemy' projectiles on death (dodge the corpse). Uses
+  // the SAME projectile shape the SHOOTER/boss volley fire (Decision 65) so it rides the existing pool +
+  // the enemy-projectile→player overlap with NO new wiring. Low per-shot damage (a "step back" tell, not a
+  // one-shot). Enemy._fireDeathBurst fires each shot with an `angle` aim so ProjectilePool gives it a real
+  // 2-D velocity — the ring arcs in every direction (the round-3 fix: the old pool flattened it left/right).
   deathBurst: {
-    count: 6, // projectiles in the radial ring (evenly spaced — a 360° fan).
+    count: 6, // projectiles in the radial ring (evenly spaced — a real 360° fan).
     projectile: { speed: 300, damage: 8, knockback: 200, lifetime: 1.0, w: 12, h: 12 },
   },
 }
+
+// REGENERATING — a self-healing elite (HP ticks back up while alive): a DPS race. Moderate HP but it
+// regenerates, so chip damage doesn't stick — you must commit and kill it fast. Green tint = "it heals".
+export const ELITE_REGEN = {
+  id: 'regenerating',
+  hpMult: 2.4,
+  bodyScale: 1.3,
+  tint: 0x2ecc71, // healthy green — the regen tell.
+  telegraphMult: 0.85,
+  hpRegenPerSec: 6, // HP/s regained while alive (capped at maxHp; stops at death) — kill it before it heals.
+  cellBonus: 5,
+  deathBurst: null,
+}
+
+// FAST — a small, quick harasser: a faster move + a TIGHT telegraph (it punishes a lazy dodge), lower HP
+// (it's the glass one) and a smaller body. Red tint = "this one is quick". The agility-pressure affix.
+export const ELITE_FAST = {
+  id: 'fast',
+  hpMult: 1.5,
+  bodyScale: 1.1,
+  tint: 0xe74c3c, // hot red — the speed tell.
+  telegraphMult: 0.6, // the tightest wind-up — a real dodge-skill check.
+  speedMult: 1.45, // noticeably quicker patrol + chase (it closes the gap).
+  cellBonus: 4,
+  deathBurst: null,
+}
+
+// ── ELITE_AFFIXES (the weighted roll set, AC64) ── GameScene picks one off a seeded RNG via the weights.
+// KISS: a flat { affix, w } list mirroring the biome enemyPool shape (DRY — the same weighted-pick idiom).
+export const ELITE_AFFIXES = [
+  { affix: ELITE_FROST, w: 2 },
+  { affix: ELITE_EXPLOSIVE, w: 3 }, // the signature affix gets the highest weight (the readable "tell").
+  { affix: ELITE_REGEN, w: 2 },
+  { affix: ELITE_FAST, w: 3 },
+]
+
+// ── ELITE_AFFIX (back-compat default) ── the EXPLOSIVE affix kept under the old export name so any code
+// or test that imported the single affix still resolves to a valid, representative elite (DRY — it's the
+// same object in ELITE_AFFIXES, not a copy). New code rolls the weighted ELITE_AFFIXES set instead.
+export const ELITE_AFFIX = ELITE_EXPLOSIVE
 
 // The per-spawn elite ROLL chance (design §6.11, Decision 77) — DATA so GameScene rolls it off a fresh
 // seeded RNG (a run replays the same elites). KISS: a flat chance (no depth ramp this slice — YAGNI; the

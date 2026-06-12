@@ -18,7 +18,7 @@ import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
 import { WEAPONS } from '../config/weapons.js'
-import { ENEMY_SPECS, ELITE_AFFIX, ELITE_CHANCE } from '../config/enemies.js'
+import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
 import { SHOP_ITEMS } from '../config/shop.js'
@@ -379,11 +379,12 @@ export class GameScene extends Phaser.Scene {
     // bounds come FROM the generator (Decision 41 — the OWNING run's world span).
     const scale = scaleAtDepth(this.runState.depth)
     const archetypeRng = mulberry32((desc.seed ^ 0xa11ce5 ^ this.runState.depth) >>> 0) // off-the-pin RNG.
-    // ── ELITE roll RNG (§6.11, Decision 77, AC64) ── a SEPARATE off-the-pin seeded RNG (a distinct mix
-    // constant so the elite roll doesn't correlate with the archetype pick) — a run replays the same
-    // elites. _rollElite returns the ELITE_AFFIX or null; _spawnEnemy folds it into the enemy (more HP,
-    // a gold body, a tighter telegraph, a death burst). The elite is applied AFTER the depth scaleSpec, so
-    // a deep elite is depth-scaled THEN affix-multiplied (tankier with depth AND elite — the right stacking).
+    // ── ELITE roll RNG (§6.11, Decision 77, AC64; round-3 weighted set) ── a SEPARATE off-the-pin seeded
+    // RNG (a distinct mix constant so the elite roll doesn't correlate with the archetype pick) — a run
+    // replays the same elites AND the same affix per elite. _rollElite returns ONE weighted affix from
+    // ELITE_AFFIXES (frost/explosive/regenerating/fast) or null; _spawnEnemy folds it into the enemy (more
+    // HP, a tinted body, a per-affix gimmick). The elite is applied AFTER the depth scaleSpec, so a deep
+    // elite is depth-scaled THEN affix-multiplied (tankier with depth AND elite — the right stacking).
     const eliteRng = mulberry32((desc.seed ^ 0xe117e0 ^ this.runState.depth) >>> 0)
     for (const e of desc.enemies) {
       const base = this._pickArchetype(biome, archetypeRng)
@@ -483,6 +484,25 @@ export class GameScene extends Phaser.Scene {
         this,
       ),
     )
+
+    // ── Normal-level HAZARDS as DAMAGING bodies (Enrichment round 3 — the environmental-threat fix) ──
+    // The generator scatters HAZARD tiles into every room (biome.hazardPatches) but, until now, ONLY the
+    // boss room promoted them to bodies — so in all 9 normal levels the spikes were render-only set dressing
+    // with zero gameplay effect. Promote them to STATIC bodies here too + wire the SAME player×hazard overlap
+    // the boss room uses (reusing _onHazardContact verbatim — DRY) so the platforming becomes a real risk
+    // surface + the dodge-roll's i-frames matter for TRAVERSAL, not just combat. SAFE BY CONSTRUCTION: the
+    // generator keeps hazards OFF the critical path AND out of the swept jump corridor (scatterHazards skips
+    // the corridor mask), so a clean run is never forced onto spikes — they punish sloppy positioning only.
+    // The collider + cooldown are the SAME fields the boss room uses (torn down by _teardownLevel's guards).
+    this.tileMap.enableHazardBodies()
+    this._hazardCooldown = 0 // s — gates the hazard contact tick (don't shred HP every frame).
+    this._hazardCollider = this.physics.add.overlap(
+      this.player.collider,
+      this.tileMap.hazardBodies,
+      () => this._onHazardContact(),
+      () => this._hazardCooldown <= 0 && this.player.isHittable() && !this.gameOver,
+      this,
+    )
   }
 
   // ── _enemyNotFlyer(enemyRect) ── the shared collider predicate (Decision 68/AC59): true for a normal
@@ -578,9 +598,11 @@ export class GameScene extends Phaser.Scene {
     console.log(`[GameScene] BOSS ROOM — ${bossSpec.name} (hp ${bossSpec.maxHp}) at depth ${this.runState.depth}`)
   }
 
-  // ── _onHazardContact() (design §6.6.2, AC57) ── the arena-hazard contact tick: a fixed bite of damage
-  // on a cooldown (so standing on the spikes hurts but isn't an instant kill). Reuses the player.onHit
-  // pipeline (a synthetic upward-knockback hit so the player is bumped off the spikes). Boss room only.
+  // ── _onHazardContact() (design §6.6.2, AC57; round-3 — now ALSO normal-level hazards) ── the hazard
+  // contact tick: a fixed bite of damage on a cooldown (so standing on the spikes hurts but isn't an instant
+  // kill). Reuses the player.onHit pipeline (a synthetic upward-knockback hit so the player is bumped off the
+  // spikes). Used by BOTH the boss arena AND every normal level now that hazards are damaging bodies there
+  // (the round-3 environmental-threat promotion) — the dodge-roll's i-frames matter for traversal too.
   _onHazardContact() {
     if (this._hazardCooldown > 0 || !this.player.isHittable() || this.gameOver) return
     this._hazardCooldown = 0.7 // s — min gap between hazard ticks.
@@ -792,12 +814,21 @@ export class GameScene extends Phaser.Scene {
     return ENEMY_SPECS[pool[pool.length - 1].id] || ENEMY_SPECS.grunt
   }
 
-  // ── _rollElite(rng) (design §6.11, Decision 77, AC64) ── roll the ELITE affix off the passed seeded RNG:
-  // ELITE_CHANCE of the time return ELITE_AFFIX (Enemy folds it — more HP, a gold body, a tighter telegraph,
-  // a death burst), else null (a normal enemy — the identity). KISS: ONE affix this slice (a future set is a
-  // weighted pick here — YAGNI). Off the seeded eliteRng so a run replays the same elites (determinism).
+  // ── _rollElite(rng) (design §6.11, Decision 77, AC64; round-3 weighted set) ── roll an ELITE affix off
+  // the passed seeded RNG: ELITE_CHANCE of the time pick ONE affix from the weighted ELITE_AFFIXES set
+  // (frost/explosive/regenerating/fast — Enemy folds it), else null (a normal enemy — the identity). The
+  // weighted pick uses the SAME idiom as _pickArchetype (DRY). Off the seeded eliteRng so a run replays the
+  // same elites AND the same affix per elite (determinism — AC47). Two draws (the gate, then the pick) keep
+  // the affix deterministic given the seed; both come off the dedicated eliteRng thread (off the level pin).
   _rollElite(rng) {
-    return rng() < ELITE_CHANCE ? ELITE_AFFIX : null
+    if (rng() >= ELITE_CHANCE) return null // not an elite this spawn (the common case — identity).
+    const total = ELITE_AFFIXES.reduce((s, e) => s + (e.w || 1), 0)
+    let r = rng() * total
+    for (const entry of ELITE_AFFIXES) {
+      r -= entry.w || 1
+      if (r <= 0) return entry.affix
+    }
+    return ELITE_AFFIXES[ELITE_AFFIXES.length - 1].affix // fallthrough (float rounding) → the last affix.
   }
 
   // ── _pickBossId(bossField) (design §6.12, Decision 78, AC65) ── resolve the boss biome's `boss` field to
@@ -945,13 +976,31 @@ export class GameScene extends Phaser.Scene {
       damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
-    // ── STATUS (§6.13, Decision 79, AC66) ── apply the EQUIPPED melee weapon's status (spear → bleed,
-    // hammer → stun) to the struck enemy. Null for a weapon with no status tag (sword) → no-op (identity).
-    enemy.applyStatus(this.player.equippedWeapon.status)
+    // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the EQUIPPED melee weapon's
+    // status (spear → bleed, hammer → stun) to the struck enemy, scaled by the run-only status-duration
+    // mult (Venom). Null for a weapon with no status tag (sword) → no-op (identity).
+    enemy.applyStatus(this._scaleStatus(this.player.equippedWeapon.status))
+    // ── LIFESTEAL (Vampirism scroll, round 3) ── heal a fraction of the MELEE damage dealt. 0 by default
+    // (no scroll → no heal — the identity); heal() no-ops at full HP / when dead, so this is always safe.
+    if (this.player.lifestealFrac > 0 && result.damage > 0) {
+      this.player.heal(Math.round(result.damage * this.player.lifestealFrac))
+    }
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
     })
+  }
+
+  // ── _scaleStatus(spec) (Enrichment round 3 — the Venom scroll) ── return a status spec whose `duration`
+  // is scaled by the run-only scrollStatusDurationMult (mirrored on the player). Returns the spec UNCHANGED
+  // when the mult is 1 (the identity — no scroll) or the spec is null (a no-status weapon), so a normal run
+  // is byte-identical. A NEW shallow-clone is returned when scaled (never mutating the shared weapon spec —
+  // the aliasing safety every fold keeps). applyStatus reads `duration`, so scaling it lengthens the DoT/stun.
+  _scaleStatus(spec) {
+    if (!spec) return spec
+    const mult = this.player.statusDurationMult ?? 1
+    if (mult === 1) return spec
+    return { ...spec, duration: (spec.duration ?? 0) * mult }
   }
 
   // ── Projectile → enemy hit (§6.5, Decision 62, review MAJOR) ── a SEPARATE handler from the melee
@@ -973,10 +1022,11 @@ export class GameScene extends Phaser.Scene {
       damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
-    // ── STATUS (§6.13, Decision 79, AC66) ── apply the firing weapon's status stamped on the shot (the
-    // bow's poison) to the struck enemy. null for a no-status weapon → no-op (identity). It's read off the
-    // PROJECTILE (pj.status, stamped at fire) so a mid-flight weapon swap doesn't change what the shot does.
-    enemy.applyStatus(pj.status)
+    // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the firing weapon's status
+    // stamped on the shot (the bow's poison) to the struck enemy, scaled by the run-only status-duration
+    // mult (Venom). null for a no-status weapon → no-op (identity). It's read off the PROJECTILE (pj.status,
+    // stamped at fire) so a mid-flight weapon swap doesn't change what the shot does.
+    enemy.applyStatus(this._scaleStatus(pj.status))
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
@@ -1044,11 +1094,19 @@ export class GameScene extends Phaser.Scene {
     this.pickupPool.release(pickupRect)
   }
 
-  // ── Sync run-only scroll stats onto the live Player (§6.5, Decision 60) ── scrollDamageMult is read
-  // LIVE at the hit site (no copy needed). scrollMaxHpBonus is a flat max-HP boost: raise the player's
-  // maxHp to base+bonus and HEAL by the just-added amount (so a vitality scroll both grows + tops up).
+  // ── Sync run-only scroll stats onto the live Player (§6.5, Decision 60; Enrichment round 3) ──
+  // scrollDamageMult is read LIVE at the hit site, but we mirror EVERY run-only scroll field onto the
+  // player here so the live reads (dodge cooldown/i-frames at the dodge-start site, lifesteal + status
+  // duration at the melee-hit site) see the armed values without reaching into RunState each frame.
+  // scrollMaxHpBonus is a flat max-HP boost: raise the player's maxHp to base+bonus and HEAL by the
+  // just-added amount (so a vitality scroll both grows + tops up). All other fields are neutral by
+  // default (a fresh run with no scroll leaves the Phase-4 player exactly — the additive identity).
   _syncPlayerScrollStats() {
     this.player.scrollDamageMult = this.runState.scrollDamageMult
+    this.player.scrollDodgeCdMult = this.runState.scrollDodgeCdMult
+    this.player.scrollDodgeIframeBonus = this.runState.scrollDodgeIframeBonus
+    this.player.lifestealFrac = this.runState.scrollLifestealFrac
+    this.player.statusDurationMult = this.runState.scrollStatusDurationMult
     const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus
     const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
     this.player.maxHp = newMax

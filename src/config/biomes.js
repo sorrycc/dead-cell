@@ -20,7 +20,7 @@ export const ROWS_MAX = 30
 //             (BLOCKER 1 fix — a biome is NOT a single room; depth scales WITHIN a biome over its
 //             `levels` rooms, so "rising difficulty" is observable, not a 3-room blink-and-miss).
 // `name`    : human label for the GameOver run summary + the HUD depth/biome readout (AC46).
-// `difficultyTier` : a MONOTONE-non-decreasing integer index (0/1/2 here) — a later biome is
+// `difficultyTier` : a MONOTONE-non-decreasing integer index (0/1/2/3 here) — a later biome is
 //             intrinsically denser WITHOUT touching the depth curve (the two STACK in
 //             effectiveDifficulty, Decision 43). The verifier asserts it's non-decreasing along the
 //             ordered list (AC43).
@@ -107,13 +107,52 @@ export const SEWERS = {
   },
 }
 
-// ── RAMPARTS — the third / LAST biome (Decision 43, tier 2). ──
-// Grey-stone fortress. Longest + densest. tier 2 (the run's hardest). endsInBoss stays false until
-// Phase 6 (when the last biome's flag flips to gate a boss before completion).
+// ── CATACOMBS — the FOURTH biome (Enrichment round 3, tier 2) ── inserted BETWEEN Sewers and Ramparts to
+// EXTEND the descent (a run was fairly short: 9 rooms + boss). Same field SHAPE as the others (DRY — the
+// generator reads identical keys); a bone-grey crypt aesthetic distinct from the green Sewers + grey
+// Ramparts. It introduces the round-3 5th archetype (the SPITTER shotgunner) + the FLYER to the mid-run
+// pool, so the new rooms feel different from both neighbours AND the deepest pool isn't the only place the
+// full variety appears. tier 2 > Sewers' 1; Ramparts bumps to tier 3 (the chain stays monotone — the
+// verifier asserts non-decreasing tiers along BIOME_ORDER). A pure-data add: no generator/RunState change
+// (the run length derives from the per-biome `levels`, the architecture biomes.js explicitly invites).
+export const CATACOMBS = {
+  id: 'catacombs',
+  name: 'Catacombs',
+  difficultyTier: 2, // tier 2 — between Sewers (1) and the bumped Ramparts (3); monotone.
+  endsInBoss: false,
+  levels: 3, // 3 generated rooms before rolling to Ramparts (extends the run by a biome).
+  // Enemy pool (Decision 68/AC59) — Catacombs leans on the new SPITTER shotgunner + the FLYER over a grunt
+  // base (a ranged-spread + aerial mix — distinct from the Sewers' grunt+shooter kiting feel).
+  enemyPool: [
+    { id: 'grunt', w: 2 },
+    { id: 'spitter', w: 3 }, // the round-3 5th archetype debuts here (its signature biome).
+    { id: 'flyer', w: 2 },
+  ],
+  cols: 82, // between Sewers (76) and Ramparts (88) — within bounds.
+  rows: 25,
+  minEnemies: 4,
+  maxEnemies: 7,
+  minPickups: 2,
+  maxPickups: 4,
+  oneWayLedges: 8,
+  hazardPatches: 8, // a touch more environmental danger (the round-3 hazards now bite — a crypt of spikes).
+  platformLenRange: [3, 6],
+  colors: {
+    solid: 0x4a4458, // bone-grey/violet stone.
+    oneWay: 0x7d6b8a, // weathered crypt ledges.
+    hazard: 0x9b59b6, // necrotic spikes (violet).
+    bg: 0x130f18, // dark crypt backdrop.
+    entrance: 0x2ecc71,
+    exit: 0xf4d03f,
+  },
+}
+
+// ── RAMPARTS — the FIFTH / LAST biome (Decision 43, tier 3) ── tier bumped 2→3 with the Catacombs insert
+// so the chain stays monotone. Grey-stone fortress. Longest + densest. The boss biome.
 export const RAMPARTS = {
   id: 'ramparts',
   name: 'Ramparts',
-  difficultyTier: 2,
+  difficultyTier: 3,
   endsInBoss: true, // §6.6.2 (Decision 66) — the boss biome: its FINAL level is a boss arena (no Door).
   // §6.12 (Decision 78) — the boss biome's final gate is now a SEEDED PICK between TWO bosses (The Warden
   // OR The Hollow Sentinel), so different runs face a different fight (the variety win). `boss` is an ARRAY
@@ -121,12 +160,14 @@ export const RAMPARTS = {
   // boss). A single-id string is still accepted by GameScene (back-compat) — the array is the multi-boss form.
   boss: ['rampartsBoss', 'rampartsBoss2'], // The Warden | The Hollow Sentinel (AC57/AC65).
   levels: 3, // 2 normal generated levels + the boss arena as the last (levelInBiome === levels-1).
-  // Enemy pool (Decision 68/AC59) — Ramparts adds CHARGERS + FLYERS (the full variety) over the base.
+  // Enemy pool (Decision 68/AC59) — Ramparts is the FULL roster: every archetype incl. the round-3 Spitter,
+  // so the deepest biome throws the whole bestiary at you (the hardest, most varied rooms).
   enemyPool: [
     { id: 'grunt', w: 2 },
     { id: 'shooter', w: 2 },
     { id: 'charger', w: 2 },
     { id: 'flyer', w: 2 },
+    { id: 'spitter', w: 2 },
   ],
   cols: 88, // longest (within bounds).
   rows: 26,
@@ -148,10 +189,11 @@ export const RAMPARTS = {
 }
 
 // ── BIOME_ORDER (Decision 43, AC43) ── THE ordering the run walks (RunState indexes into it) and the
-// verifier sweeps. Tiers are 0/1/2 (monotone non-decreasing). The array is trivially extendable;
-// adding a 4th biome is one entry + a tier — no generator/RunState change (the run length derives
-// from the per-biome `levels`). KISS: three biomes ship now (YAGNI on more).
-export const BIOME_ORDER = [PRISON, SEWERS, RAMPARTS]
+// verifier sweeps. Tiers are 0/1/2/3 (monotone non-decreasing). The array is trivially extendable; the
+// round-3 CATACOMBS insert (one entry + a tier bump on the following biome) proves the architecture's
+// claim — no generator/RunState change (the run length derives from the per-biome `levels`). FOUR biomes
+// ship now → 12 generated rooms + the boss (a longer descent).
+export const BIOME_ORDER = [PRISON, SEWERS, CATACOMBS, RAMPARTS]
 
 // The biome map (id → config) — kept for any id-keyed lookup; BIOME_ORDER is the run sequence.
-export const BIOMES = { prison: PRISON, sewers: SEWERS, ramparts: RAMPARTS }
+export const BIOMES = { prison: PRISON, sewers: SEWERS, catacombs: CATACOMBS, ramparts: RAMPARTS }

@@ -15,15 +15,23 @@
 //     wind-ups, the back-half pressure ramp — AC56/§6.6.6).
 //   • `moveSpeed` — the slow hover/step speed toward the player between attacks (phase 2 faster).
 //
-// ATTACK KINDS (Decision 64 — 3 reused shapes, parameterised; Boss.js implements each):
+// ATTACK KINDS (Decision 64 — parameterised shapes; Boss.js implements each):
 //   • 'slam'   — a big melee swing in front (acquires from the shared enemyHitboxes pool — the swing
 //                schema). `swing` (reach/halfHeight/forward/damage/knockback) tunes it.
-//   • 'volley' — fires N pooled 'enemy' projectiles in a small vertical spread (the enemy
+//   • 'volley' — fires N pooled 'enemy' projectiles in a small spread toward the player (the enemy
 //                ProjectilePool — Decision 65). `volley` ({ count, spreadDeg, projectile }) tunes it.
 //   • 'dash'   — a telegraphed horizontal lunge across the arena with a body-contact hitbox.
 //                `dash` ({ speed, contactDamage }) tunes it.
-// An attack entry is `{ kind, telegraph, active, recovery, ...params }`. Phase 2 adds the 'volley' to
-// the pattern + tightens telegraphs (telegraphMult) → the genre's "the back half demands cleaner play".
+//   • 'sweep'  — (Enrichment round 3 — the NEW kind) a TRUE-radial 360° RING of pooled 'enemy'
+//                projectiles fired all at once from the boss (a "find the gap / jump it" zone), enabled
+//                now that the ProjectilePool gives shots a real 2-D velocity. It exercises the existing
+//                enemy ProjectilePool + the enemy-projectile→player overlap (NO new wiring) but plays
+//                COMPLETELY differently from the player-aimed volley — it ignores where you stand, so you
+//                dodge by weaving a gap in the ring, not by side-stepping a cone. `count` is the ring
+//                density (more = tighter gaps). This is the round-3 "make the climax feel fresh" lever:
+//                the two bosses now share FOUR primitives, not three, with a genuinely new dodge pattern.
+// An attack entry is `{ kind, telegraph, active, recovery, ...params }`. Phase 2 adds denser attacks +
+// tightens telegraphs (telegraphMult) → the genre's "the back half demands cleaner play".
 //
 // DEPTH SCALING (Decision 64/66, AC61 — the HONEST scope, review MAJOR). GameScene folds the boss spec
 // by scaleAtDepth(depth) via a BOSS-SPECIFIC fold (scaleBossSpec, config/difficulty.js) — NOT the
@@ -70,11 +78,12 @@ export const RAMPARTS_BOSS = {
       attacks: ['slam', 'dash', 'slam'],
     },
     {
-      // ── Phase 2 (≤50%): tighter telegraphs, ADDS the volley, moves faster (the escalation, AC56). ──
+      // ── Phase 2 (≤50%): tighter telegraphs, ADDS the volley + the round-3 SWEEP ring, moves faster
+      // (the escalation, AC56). The sweep is the new "find the gap in the ring" pressure on the back half. ──
       hpThreshold: 0.5,
       telegraphMult: 0.72, // wind-ups shrink → cleaner play required (the back-half ramp).
       moveSpeed: 110,
-      attacks: ['slam', 'volley', 'dash', 'volley'],
+      attacks: ['slam', 'volley', 'sweep', 'dash', 'volley'],
     },
   ],
 
@@ -108,6 +117,18 @@ export const RAMPARTS_BOSS = {
       speed: 700, // px/s — the lunge velocity.
       contactDamage: 26, // hp — a heavy slam if the dash connects.
       knockback: 600, // px/s — the shove on a dash hit.
+    },
+    // 'sweep' (round-3 NEW kind) — a TRUE-radial 360° ring of pooled 'enemy' projectiles fired at once.
+    // You dodge by weaving the gap between bolts (or jumping the ring), not by side-stepping — a genuinely
+    // new pattern the 2-D projectile work unlocked. A long readable telegraph (it's a big tell); the ring is
+    // SPARSE enough (count vs lifetime) that a clean player threads it. Same projectile shape as the volley.
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.8, // s — a long, very readable wind-up (the ring is a big commitment).
+      active: 0.14, // s — the "release" beat (the whole ring fires at telegraph end).
+      recovery: 0.7, // s — a long recovery (the punish window after you thread the ring).
+      count: 10, // bolts in the ring (evenly spaced over 360° — sparse enough to weave a gap).
+      projectile: { speed: 320, damage: 16, knockback: 220, lifetime: 2.2, w: 14, h: 14 },
     },
   },
 }
@@ -144,11 +165,13 @@ export const RAMPARTS_BOSS_2 = {
       attacks: ['volley', 'dash', 'volley'],
     },
     {
-      // ── Phase 2 (≤50%): adds the slam, tightens telegraphs, moves faster (the escalation, AC56). ──
+      // ── Phase 2 (≤50%): adds the slam + the round-3 SWEEP ring (its DENSE zoning signature), tightens
+      // telegraphs, moves faster (the escalation, AC56). The Sentinel's sweep is denser than the Warden's —
+      // its ranged identity carried into the ring (harder gaps to thread). ──
       hpThreshold: 0.5,
       telegraphMult: 0.66,
       moveSpeed: 130,
-      attacks: ['volley', 'slam', 'dash', 'volley'],
+      attacks: ['volley', 'sweep', 'slam', 'dash', 'volley'],
     },
   ],
   attacks: {
@@ -180,6 +203,16 @@ export const RAMPARTS_BOSS_2 = {
       contactDamage: 24,
       knockback: 560,
     },
+    // 'sweep' (round-3 NEW kind) — the Sentinel's DENSE radial ring (its zoning identity carried into the
+    // 360° pattern). More bolts than the Warden's sweep (tighter gaps to thread), a touch quicker telegraph.
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.7,
+      active: 0.12,
+      recovery: 0.6,
+      count: 14, // a denser ring than the Warden's 10 (harder gaps — the ranged boss's signature).
+      projectile: { speed: 340, damage: 14, knockback: 200, lifetime: 2.4, w: 14, h: 14 },
+    },
   },
 }
 
@@ -194,5 +227,6 @@ export const BOSSES = {
 // The ordered list (for the verifier's well-formedness sweep — BOTH bosses are checked).
 export const BOSS_ORDER = [RAMPARTS_BOSS, RAMPARTS_BOSS_2]
 
-// ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). ──
-export const BOSS_ATTACK_KINDS = ['slam', 'volley', 'dash']
+// ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). The
+// round-3 'sweep' (a true-radial projectile ring — Boss.js dispatches it) is the FOURTH primitive. ──
+export const BOSS_ATTACK_KINDS = ['slam', 'volley', 'dash', 'sweep']

@@ -12,11 +12,13 @@ import { TILE, TILE_SIZE } from './LevelGenerator.js'
 //   • a `oneWay` STATIC group — the ONEWAY runs (rendered amber; GameScene keeps the §6.1
 //     processCallback one-way collider pointed at THIS group).
 //   • HAZARD tiles — a distinct red primitive per tile. RENDER-ONLY by default (a plain `add.group()`
-//     with NO Arcade bodies — Decision 29). In the BOSS ROOM ONLY, GameScene calls
-//     enableHazardBodies() to promote each hazard rect to a STATIC Arcade body so the player×hazards
-//     overlap can actually fire (the §6.6.2 arena hazard — review BLOCKER #1; a plain render-only group
-//     has no bodies, so an overlap against it would NEVER fire). Outside the boss room they stay
-//     render-only so normal levels don't become lethal (preserving the §6.4 balance).
+//     with NO Arcade bodies — Decision 29). GameScene calls enableHazardBodies() to promote each hazard
+//     rect to a STATIC Arcade body so the player×hazards overlap can actually fire (a plain render-only
+//     group has no bodies, so an overlap against it would NEVER fire). As of Enrichment round 3 this is
+//     called in EVERY level (not just the §6.6.2 boss arena) — the generator keeps hazards off the
+//     critical path + jump corridor, so promoting them makes normal-level platforming a real risk surface
+//     WITHOUT blocking a clean route (the round-3 environmental-threat fix). The default-render-only
+//     construction is preserved so a TileMap built without the GameScene call stays harmless (KISS).
 // It also sets the world + camera bounds from the description's world size, and exposes destroy() so
 // the in-place level→level rebuild (Decision 40) leaks nothing.
 //
@@ -46,11 +48,12 @@ export class TileMap {
     // ── solids static group: one merged-run rectangle+body each (Decision 37). ──
     this.solids = scene.physics.add.staticGroup()
     this.oneWay = scene.physics.add.staticGroup()
-    // Hazards default to a RENDER-ONLY plain group (no bodies — Decision 29). The boss room promotes
-    // them to a STATIC body group via enableHazardBodies() (review BLOCKER #1). We keep BOTH a plain
-    // group of the rects (for uniform render + teardown) AND a separate STATIC group that is left
-    // EMPTY until enableHazardBodies() runs — GameScene's player×hazards overlap targets the static
-    // group, which only HAS bodies in the boss room (so the overlap can fire there + nowhere else).
+    // Hazards default to a RENDER-ONLY plain group (no bodies — Decision 29). GameScene promotes them to
+    // a STATIC body group via enableHazardBodies() (review BLOCKER #1) — in EVERY level as of round 3, not
+    // just the boss room. We keep BOTH a plain group of the rects (for uniform render + teardown) AND a
+    // separate STATIC group that is left EMPTY until enableHazardBodies() runs — GameScene's player×hazards
+    // overlap targets the static group, which has bodies only after that call (so a render-only TileMap
+    // built without the GameScene wiring stays harmless).
     this.hazards = scene.add.group()
     this.hazardBodies = scene.physics.add.staticGroup() // empty unless enableHazardBodies() is called.
     this._hazardBodiesEnabled = false
@@ -97,12 +100,13 @@ export class TileMap {
     return rect
   }
 
-  // ── enableHazardBodies() (design §6.6.2, Decision 66, AC57 — review BLOCKER #1) ── promote each
-  // render-only HAZARD rect to a STATIC Arcade body so an overlap(player.collider, hazardBodies) can
-  // actually fire (a body-less group never overlaps). Called ONLY in the boss room (GameScene), so
-  // normal levels' hazards stay render-only. The body is a SHRUNK static body centered on the rect so
-  // the contact reads as "stepping on the spikes" (not the full tile). Idempotent (guard) so a
-  // re-call is a no-op. The bodies are owned by `hazardBodies` (a staticGroup), torn down in destroy().
+  // ── enableHazardBodies() (design §6.6.2, Decision 66, AC57 — review BLOCKER #1; round-3 — all levels) ──
+  // promote each render-only HAZARD rect to a STATIC Arcade body so an overlap(player.collider, hazardBodies)
+  // can actually fire (a body-less group never overlaps). Called in EVERY level by GameScene now (the
+  // round-3 environmental-threat promotion) — the generator keeps hazards off the critical path + jump
+  // corridor, so a clean route is never blocked. The body is centered on the rect (the 0.7×0.5-tile spike
+  // primitive) so the contact reads as "stepping on the spikes". Idempotent (guard) so a re-call is a
+  // no-op. The bodies are owned by `hazardBodies` (a staticGroup), torn down in destroy().
   enableHazardBodies() {
     if (this._hazardBodiesEnabled) return
     this._hazardBodiesEnabled = true

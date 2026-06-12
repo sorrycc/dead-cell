@@ -262,13 +262,15 @@ export class Boss {
     if (this.deathTimer <= 0) this._despawn()
   }
 
-  // Fire the chosen attack at telegraph end (DISPATCH by kind, Decision 64).
+  // Fire the chosen attack at telegraph end (DISPATCH by kind, Decision 64; round-3 adds 'sweep').
   _fireAttack(atk, ctx) {
     if (atk.kind === 'slam') {
       const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
       this.strikeRect = this.hitboxPool.acquire(attacker, atk.swing, this.id)
     } else if (atk.kind === 'volley') {
       this._fireVolley(atk, ctx)
+    } else if (atk.kind === 'sweep') {
+      this._fireSweep(atk) // round-3 — a true-radial 360° ring (the new dodge pattern).
     } else if (atk.kind === 'dash') {
       // The dash body-contact damage is applied via GameScene's enemy-contact overlap (the boss body is
       // in enemyHurtboxes); we bump the spec's contactDamage for the dash window so the lunge hits hard.
@@ -276,8 +278,9 @@ export class Boss {
     }
   }
 
-  // ── 'volley' — fire `count` pooled 'enemy' projectiles in a small vertical spread toward the player
-  // (Decision 65). Each shot's spec is the attack's projectile; the spread tilts the launch direction. ──
+  // ── 'volley' — fire `count` pooled 'enemy' projectiles in a real angular spread toward the player
+  // (Decision 65; Enrichment round 3 — the true-2-D-arc fix). Each shot's spec is the attack's projectile;
+  // the spread fans the launch ANGLE so the volley arcs as a genuine cone, not a flat horizontal line. ──
   _fireVolley(atk, ctx) {
     if (!this.projectilePool || !atk.projectile) return
     const count = Math.max(1, atk.count || 1)
@@ -285,19 +288,32 @@ export class Boss {
     const p = ctx.player.body.center
     const cx = this.body.center.x
     const cy = this.body.center.y
-    // Aim the CENTER shot at the player; fan the rest across the spread.
+    // Aim the CENTER shot at the player; fan the rest evenly across the spread cone.
     const baseAngle = Math.atan2(p.y - cy, p.x - cx)
+    const attacker = { cx, cy, facing: this.facing }
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? 0 : i / (count - 1) - 0.5 // −0.5 … +0.5 across the burst.
-      const ang = baseAngle + t * spreadRad
-      const dir = Math.cos(ang) >= 0 ? 1 : -1
-      // The ProjectilePool fires along ±facing at spec.speed; to honor the vertical fan we give each
-      // shot a tilted spec (a per-shot copy with a vy component baked via a synthetic facing+speed).
-      // KISS: pass facing=dir and a per-shot spec whose speed is the full magnitude; the small vertical
-      // fan reads via the spawn offset. (A full 2-D projectile is YAGNI — the horizontal volley + the
-      // player's vertical position already make it dodgeable.)
-      const attacker = { cx, cy: cy + Math.sin(ang) * 30, facing: dir }
-      this.projectilePool.acquire(attacker, atk.projectile, this.id)
+      const angle = baseAngle + t * spreadRad
+      // Fire with an `angle` aim so the ProjectilePool builds a TRUE 2-D velocity (cos/sin·speed) — the fan
+      // arcs toward the player + spreads vertically, the readable-but-dodgeable cone the spec intends.
+      this.projectilePool.acquire(attacker, atk.projectile, this.id, null, { angle })
+    }
+  }
+
+  // ── 'sweep' (Enrichment round 3 — the NEW attack kind) ── fire a TRUE-radial 360° RING of pooled 'enemy'
+  // projectiles all at once, evenly spaced around the boss. You dodge by weaving the gap between bolts (or
+  // jumping the ring), NOT by side-stepping — a genuinely new pattern the 2-D ProjectilePool unlocked. Uses
+  // the SAME pool + the enemy-projectile→player overlap as the volley (NO new wiring — Decision 65). Each
+  // shot gets an `angle` aim so the pool gives it a real 2-D velocity (the ring actually radiates outward).
+  _fireSweep(atk) {
+    if (!this.projectilePool || !atk.projectile) return
+    const count = Math.max(1, atk.count || 1)
+    const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
+    // A small per-boss phase offset so consecutive rings don't align bolt-for-bolt (varies the gap).
+    const offset = (this._patternIndex % 2) * (Math.PI / count)
+    for (let i = 0; i < count; i++) {
+      const angle = offset + (i / count) * Math.PI * 2 // even spacing around the full ring.
+      this.projectilePool.acquire(attacker, atk.projectile, this.id, null, { angle })
     }
   }
 
@@ -330,6 +346,13 @@ export class Boss {
       w = 70
       h = 70
       x = cx + this.facing * (this.spec.bodyW * 0.5 + 40)
+    } else if (atk.kind === 'sweep') {
+      // A big CENTERED warning box around the boss (the ring radiates outward in all directions, so the
+      // tell is "the whole area around the boss is about to spray") — distinct from the directional cues.
+      w = this.spec.bodyW + 140
+      h = this.spec.bodyH + 140
+      x = cx
+      y = cy
     }
     this.telegraphFx.setSize(w, h)
     this.telegraphFx.setPosition(x, y)

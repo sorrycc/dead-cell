@@ -200,6 +200,14 @@ export class Enemy {
       return
     }
 
+    // ── ELITE HP REGEN (Decision 77, AC64; round-3 regenerating affix) ── a regenerating elite heals over
+    // time while alive (on the gameplay dt, so it FREEZES with the world during a hit-stop — consistent).
+    // Capped at maxHp; only a live (non-dead) enemy regens. No-op for a normal enemy / a non-regen affix
+    // (this.elite.hpRegenPerSec absent ⇒ 0). This makes "kill it before it heals" a real DPS race.
+    if (this.elite && this.elite.hpRegenPerSec > 0 && !this.dead && this.hp < this.maxHp) {
+      this.hp = Math.min(this.maxHp, this.hp + this.elite.hpRegenPerSec * dt)
+    }
+
     switch (this.state) {
       case STATE.IDLE:
         this._tickIdle(dt)
@@ -404,10 +412,28 @@ export class Enemy {
   _fireStrike(ctx) {
     const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
     if (this.behavior === 'ranged') {
-      // SHOOTER: fire a pooled 'enemy' projectile along facing (its hit is resolved by GameScene's
+      // SHOOTER / SPITTER: fire pooled 'enemy' projectile(s) (the hit is resolved by GameScene's
       // enemy-projectile overlap against the player — Decision 65). Null pool ⇒ cosmetic no-op (safe).
       if (this.projectilePool && this.spec.projectile) {
-        this.projectilePool.acquire(attacker, this.spec.projectile, this.id)
+        const count = Math.max(1, this.spec.projectileCount || 1)
+        if (count === 1) {
+          // SHOOTER (the original path — a single bolt along facing). Byte-identical to before round 3.
+          this.projectilePool.acquire(attacker, this.spec.projectile, this.id)
+        } else {
+          // SPITTER (round-3 5th archetype): a FAN of `count` shots across `projectileSpread` degrees, aimed
+          // at the player's CURRENT position. Uses the round-3 2-D projectile aim so the cone actually arcs
+          // (a single guarded branch — the FSM stays one switch; Decision 68). KISS — the spread is a tight cone.
+          const p = ctx?.player?.body?.center
+          const dx = (p?.x ?? (this.body.center.x + this.facing)) - this.body.center.x
+          const dy = (p?.y ?? this.body.center.y) - this.body.center.y
+          const baseAngle = Math.atan2(dy, dx)
+          const spreadRad = ((this.spec.projectileSpread || 0) * Math.PI) / 180
+          for (let i = 0; i < count; i++) {
+            const t = count === 1 ? 0 : i / (count - 1) - 0.5 // −0.5 … +0.5 across the fan.
+            const angle = baseAngle + t * spreadRad
+            this.projectilePool.acquire(attacker, this.spec.projectile, this.id, null, { angle })
+          }
+        }
       }
       return
     }
@@ -556,37 +582,44 @@ export class Enemy {
     this.scaleY = sy
   }
 
-  // ── _foldElite(spec, affix) → a NEW elite-folded spec (design §6.11, Decision 77, AC64) ── bake the
-  // affix's HP/body/tint modifiers into a fresh shallow-clone (NEVER mutating the caller's spec — the
-  // aliasing safety scaleSpec keeps). telegraphMult + deathBurst are NOT folded into the spec (they're
-  // read off this.elite by the attack/death code), so the spec shape the rest of Enemy reads is unchanged.
-  // cellDrop gains the affix bonus here so dropCells() (which reads spec.cellDrop) rewards the kill — DRY.
+  // ── _foldElite(spec, affix) → a NEW elite-folded spec (design §6.11, Decision 77, AC64; round-3 set) ──
+  // bake the affix's HP/body/tint/speed/knockback modifiers into a fresh shallow-clone (NEVER mutating the
+  // caller's spec — the aliasing safety scaleSpec keeps). telegraphMult + deathBurst + hpRegenPerSec are NOT
+  // folded into the spec (they're read off this.elite by the attack/regen/death code), so the spec shape the
+  // rest of Enemy reads is unchanged. cellDrop gains the affix bonus here so dropCells() rewards the kill —
+  // DRY. Every affix field is optional (?? the neutral default) so an absent field leaves the base value —
+  // a frost elite (no speedMult) keeps base speed, a fast elite (no knockbackTakeMult) keeps base knockback.
   _foldElite(spec, affix) {
+    const speedMult = affix.speedMult ?? 1
     return {
       ...spec,
       maxHp: Math.round(spec.maxHp * (affix.hpMult ?? 1)),
       bodyW: Math.round(spec.bodyW * (affix.bodyScale ?? 1)),
       bodyH: Math.round(spec.bodyH * (affix.bodyScale ?? 1)),
-      color: affix.tint ?? spec.color, // the gold elite tell (over the archetype's resting fill).
+      color: affix.tint ?? spec.color, // the per-affix elite tell (over the archetype's resting fill).
+      patrolSpeed: spec.patrolSpeed * speedMult, // a fast affix harasses (≥1 → quicker); identity at 1.
+      chaseSpeed: spec.chaseSpeed * speedMult,
+      knockbackTakeMult: affix.knockbackTakeMult ?? spec.knockbackTakeMult, // a frost elite is unbudgeable.
       cellDrop: (spec.cellDrop ?? 3) + (affix.cellBonus ?? 0), // a richer reward for the harder kill.
     }
   }
 
-  // ── _fireDeathBurst() (design §6.11, Decision 77, AC64) ── an ELITE's signature: on death, fire a radial
-  // fan of pooled 'enemy' projectiles (the SAME pool + overlap the SHOOTER/boss volley use — Decision 65, no
-  // new wiring) so the corpse is a "step back" tell. Evenly spaced over 360°. Called from _die() at the
-  // captured death center (the body is already disabled, so we pass the coords in). Null burst / null pool ⇒
-  // no-op (safe). The projectile spec's damage is low (a tell, not a one-shot).
+  // ── _fireDeathBurst() (design §6.11, Decision 77, AC64; Enrichment round 3 — the radial-fan fix) ── an
+  // ELITE's signature: on death, fire a TRUE radial ring of pooled 'enemy' projectiles (the SAME pool +
+  // overlap the SHOOTER/boss volley use — Decision 65, no new wiring) so the corpse is a "step back" tell.
+  // Evenly spaced over 360°. Called from _die() at the captured death center (the body is already disabled,
+  // so we pass the coords in). Null burst / null pool ⇒ no-op (safe). The projectile spec's damage is low
+  // (a tell, not a one-shot). Each shot is fired with an `angle` aim so the ProjectilePool gives it a true
+  // 2-D velocity (cos/sin·speed) — the ring now actually ARCS in every direction (the old code collapsed
+  // each shot to ±facing horizontal, flattening the "360° fan" into a flat left/right line — the bug).
   _fireDeathBurst(cx, cy) {
     const burst = this.elite && this.elite.deathBurst
     if (!burst || !this.projectilePool || !burst.projectile) return
     const count = Math.max(1, burst.count || 1)
+    const attacker = { cx, cy, facing: this.facing }
     for (let i = 0; i < count; i++) {
-      const ang = (i / count) * Math.PI * 2 // even spacing around the full ring.
-      const dir = Math.cos(ang) >= 0 ? 1 : -1 // the pool fires along ±facing (KISS — same as the volley).
-      // Offset the muzzle along the ring direction so the fan reads radially (the vy is via the spawn y).
-      const attacker = { cx, cy: cy + Math.sin(ang) * 24, facing: dir }
-      this.projectilePool.acquire(attacker, burst.projectile, this.id)
+      const angle = (i / count) * Math.PI * 2 // even spacing around the full ring.
+      this.projectilePool.acquire(attacker, burst.projectile, this.id, null, { angle })
     }
   }
 
