@@ -28,13 +28,17 @@ npm run preview  # serve the built dist/
 npm run verify   # headless determinism check (scripts/verify-gen.mjs)
 ```
 
-## Controls (Phase 0)
+## Controls (Phase 1)
 
 - **Title:** SPACE / ENTER / click → Start
-- **Game (Phase 0 proof):** the player rectangle falls under gravity and lands on the
-  platform; the HUD overlay shows top-right. **ESC** → Title.
+- **Move:** Arrow keys or **WASD** (run with acceleration + friction)
+- **Jump:** **Space** or **J** — variable height (tap = short hop, hold = full jump), with
+  coyote time + jump buffer
+- **Dodge-roll:** **Shift** or **K** — horizontal dash with i-frames (flashes yellow) and a
+  brief cooldown
+- **ESC** → Title
 
-Run/jump/attack/dodge controls arrive in Phase 1+.
+Attack controls arrive in Phase 3.
 
 ## Architecture
 
@@ -50,8 +54,9 @@ combat/ effects/ util/`. Procedural generation is **seeded + pure** (`util/rng.j
 
 ## Build roadmap (8 phases)
 
-0. **Scaffold** — project, scene stubs, seeded RNG, save helpers, design doc *(this phase)*.
-1. **Platformer core** — run / jump / gravity / ground + wall collision on Arcade Physics.
+0. **Scaffold** — project, scene stubs, seeded RNG, save helpers, design doc.
+1. **Platformer core** — run / jump / gravity / dodge-roll / one-way platform / camera follow
+   on Arcade Physics *(this phase)*.
 2. **Procedural levels** — pure, seeded biome/room generators, verified headlessly.
 3. **Combat** — melee + pooled ranged, knockback, dodge-roll i-frames, hitstop/shake.
 4. **Enemies** — state-machine AI, contact/attack damage, Cells drops.
