@@ -118,10 +118,52 @@ saves; level editor.
 18. The player rectangle **squashes/stretches** on jump/land/dodge and **reads its facing
     direction** — the feel is visibly responsive and crisp.
 
-**Phase 2 — Procedural levels:**
+**Phase 2 — Procedural levels (THIS PHASE — fully specified):**
 
-19. A pure, seeded generator produces a deterministic, solvable room/biome layout; the same seed
-    yields an identical layout; `npm run verify` asserts this headlessly in node.
+> NOTE ON PHASE ORDER (continued from §3 Combat note). The orchestrator built **Combat first**
+> ("Phase 2 · Combat", §6.3). Procedural levels — the doc's original "Phase 2" / §6.2 — are
+> implemented NOW, on top of the Phase-1 platformer + the live Combat phase. The hand-built test
+> room in GameScene (§6.1/§6.3) is REPLACED by a generated level; enemies/pickups spawn at the
+> generated points; reaching the exit Door triggers a next-level transition.
+>
+> AC-NUMBERING (review fix — collision avoidance, per the §3 lettered-AC note). The skeleton's
+> original Phase-2 placeholder was **AC19**; the Combat phase then reserved **20–26**. To avoid the
+> ambiguity the doc warned about, Phase 2's expanded ACs KEEP the historical anchor **19** for the
+> core "pure seeded deterministic generator" criterion and use the **next free integers 27–30** for
+> the four it splits into — never reusing Combat's 20–26.
+
+19. **Pure, seeded, deterministic generator.** `world/LevelGenerator.js` is a PURE module (NO Phaser
+    import) exporting `generateLevel(seed, biomeConfig)` → a plain **level description** object: a
+    `tiles` grid (each cell `EMPTY | SOLID | ONEWAY | HAZARD`), `cols/rows/tileSize`, an `entrance`
+    and an `exit` tile position, `platforms` (the solid spans, for renderer convenience), and
+    `enemies[]` + `pickups[]` spawn points (world coords). The SAME `(seed, biomeConfig)` always
+    yields a byte-identical description (sequence-pinned in `verify-gen.mjs`).
+27. **Guaranteed traversable entrance → exit (respecting jump reach).** The generator builds the
+    level as a chain of solid platforms whose every (gap, step) is inside the PLAYER's real jump reach
+    — a COUPLED 2-D envelope derived from `Player.js`/`constants.js` physics where the horizontal
+    allowance is a FUNCTION of the vertical step (max climb ≈ 128px; horizontal reach shrinks as the
+    climb grows), with a 0.7 safety margin so the envelope UNDER-estimates true reach (Decision 35).
+    A headless BFS/flood over a jump-reachability graph rebuilt from the EMITTED platforms via the
+    SHARED `platformStep`+`canReachStep` (in `verify-gen.mjs`) confirms the exit is reachable from the
+    entrance for MANY seeds; generation is reach-bounded BY CONSTRUCTION so the check never fails, and
+    a verifier PASS is SOUND (the real player can definitely make every proven jump).
+28. **Within size + difficulty bounds; no spawn inside a wall.** Every generated level satisfies:
+    `cols/rows` within `[MIN, MAX]`; a non-zero, in-bounds `exit` distinct from `entrance`;
+    entrance + exit cells are `EMPTY` (standable, not buried); every enemy/pickup spawn sits on
+    `EMPTY` ground with a `SOLID` (or `ONEWAY`) cell directly beneath it (never inside a wall, never
+    floating); enemy count within `[minEnemies, maxEnemies]` from the biome config. `npm run verify`
+    asserts ALL of these across a large seed sweep.
+29. **TileMap → Arcade static bodies + primitive render.** `world/TileMap.js` (Phaser-coupled) turns
+    a description into the room: solid/one-way spans become Arcade **static** bodies (merged per
+    horizontal run, not one body per tile — fewer bodies), hazards render as a distinct primitive,
+    and the whole grid renders as colored rectangles (programmer-art). It exposes the `solids`
+    static group + the `oneWay` group for GameScene's colliders, and the world/camera bounds.
+30. **`Door` exit + level transition.** `entities/Door.js` is the level EXIT placed at the
+    description's `exit`; an overlap with the player triggers `onExit()`. GameScene wires it to a
+    **next-level transition** (re-generate with the next seed and rebuild the room) — proving the
+    run can advance from one generated level to the next. (Full multi-biome run flow + the real
+    door-gating economy is Phase 5; this phase only proves the generate → play → reach-exit →
+    next-level edge.)
 
 **Phase 3 — Combat (THIS PHASE — fully specified):**
 
@@ -544,6 +586,131 @@ phases plug in without re-architecting.
   already took, applied to the player's own hit reaction. (Enemies use their own `hitstunTimer` for
   the symmetric reason — their AI tick is frozen during hurt.)
 
+> Decisions 33–40 are the **Procedural levels** phase (§6.2). They are final for this phase; later
+> phases append their own.
+
+**33. Level model = a TILE GRID + a derived description, generator is PURE (no Phaser)**
+- Options: A) generate Phaser objects directly in a scene method · B) a PURE `generateLevel(seed,
+  biomeConfig)` that returns a plain DESCRIPTION (a 2-D `tiles` array of small int enums + spawn
+  lists in world coords), consumed by a separate Phaser-coupled `TileMap` renderer.
+- Decision: **B)** — the mandated convention: the generator imports NO Phaser so `verify-gen.mjs`
+  imports it under plain node and asserts determinism + solvability headlessly (Decision 5 / §6.0).
+  A grid of `EMPTY|SOLID|ONEWAY|HAZARD` ints is the simplest deterministic representation (KISS), is
+  trivially serializable for the regression pin, and cleanly separates *what the level IS* (pure
+  data) from *how it renders* (TileMap, Phaser). The description ALSO carries `platforms` (merged
+  solid spans) + `entrance/exit` + `enemies[]/pickups[]` so the renderer + scene don't re-derive
+  them. This mirrors crowd-runner's pure config → entity split (Track builds entities from a config).
+
+**34. Layout algorithm = a reach-bounded "platform staircase" walk, NOT cellular-automata caves**
+- Options: A) random cave (cellular automata / drunkard's walk) then carve · B) a deterministic
+  **left-to-right chain of platforms**: start at the entrance platform, repeatedly place the NEXT
+  platform a seeded `(gap, step)` away where `gap` is the nearest-edge clear GAP within `[MIN_GAP,
+  MAX_GAP]` and `step` a vertical row change within `[-MAX_STEP_UP, +MAX_STEP_DOWN]` such that
+  `canReachStep` accepts the emitted pair (the EXACT metric, Decision 36), until we span the level
+  width; the last platform holds the exit. Fill the floor band below with solids; scatter a few
+  one-way ledges + hazards OFF the critical path (and out of the jump corridor).
+- Decision: **B)** — for a JUMP platformer the guarantee that matters is "can the player physically
+  jump from platform N to N+1", which a cave generator does NOT give for free (you'd post-hoc verify
+  + reject + retry, non-deterministic in spirit and slow). The staircase walk makes traversability
+  **true by construction**: every consecutive pair is placed within the player's measured jump reach
+  (Decision 35), so the entrance→exit path is guaranteed before any check runs. KISS, deterministic,
+  and the verifier's BFS is then a *proof*, not a filter. Caves are YAGNI for v1 (a later biome can
+  add a different generator behind the same `generateLevel` signature).
+
+**35. Reach budgets DERIVED from Player.js physics — a COUPLED 2-D envelope, asserted sound (review BLOCKER #1)**
+- Problem: the gap/step bounds in Decision 34 must come from the REAL controller, not guesses, or
+  "traversable" is a lie. From `Player.js` + `constants.js`: `JUMP_VELOCITY=620`, `GRAVITY=1500`
+  (ascent), `FALL_GRAVITY_EXTRA=900` (descent → `g_down=2400`), `RUN_SPEED=320`. Apex climb
+  `v²/2g_up ≈ 128.1px`. **The deeper problem the prior revision missed:** jump reach is COUPLED — a
+  max-up jump leaves LESS horizontal reach. An INDEPENDENT predicate (`|dx|≤MAX_GAP AND dy≥−STEP_UP`)
+  was sound only by luck of the chosen numbers; a one-line re-tune (`MAX_STEP_UP=4`) could silently
+  produce unreachable "verified" levels — the load-bearing soundness claim of the phase (AC27).
+- Decision: the horizontal reach is a FUNCTION of the vertical step — `rawReachPx(dyPx)` in
+  `LevelGenerator.js`. To land ON TOP at height `up` above launch, use the DESCENDING crossing of
+  that height after the apex (the longest air time, the correct reach): `t = v/g_up +
+  sqrt(2·(apex−up)/g_down)`, `rawReach(up) = RUN_SPEED·t · 0.7`. The 0.7 **safety margin** keeps the
+  envelope a conservative UNDER-estimate of true reach (a PASS is always sound — never a false PASS;
+  the margin absorbs imperfect inputs + theory-vs-real-landing). Named budgets `MAX_STEP_UP=3`,
+  `MAX_STEP_DOWN=6`, `MIN_GAP=1`, `MAX_GAP=4` (`TILE=32`) bound the seeded walk; they are **CLAMPED
+  to the envelope by module-load assertions** that throw if `MAX_GAP·TILE > rawReachPx(−MAX_STEP_UP·
+  TILE)` or `MAX_STEP_UP·TILE > apex`. PROOF of the worst corner (no longer "by luck"): at up=3 tiles
+  (96px) `rawReach≈184.6px`, `×0.7≈129.2px ≥ MAX_GAP(128px)` — inside the envelope with margin. A
+  future budget widening past reach fails LOUDLY at import instead of emitting bad levels.
+
+**36. Reachability graph + BFS in the VERIFIER; reach predicate + EXACT metric SHARED as pure exports (review BLOCKER #2)**
+- Options: A) the generator self-certifies (returns a `solvable:true` it computed) · B) the
+  generator exports a pure `canReachStep`/`canReachPlatform` jump predicate AND a pure
+  `platformStep(a,b)` METRIC; `verify-gen.mjs` builds the platform-adjacency graph from a description
+  and BFS/floods entrance→exit using THOSE, asserting the exit is reached.
+- Decision: **B)** — an independent check beats self-certification (a bug in the walk that
+  self-reports "solvable" passes A; B catches it because the graph is REBUILT from the emitted
+  `tiles`/`platforms`, not the walk's intent). Crucially, the prior revision left "gap"/"step"
+  AMBIGUOUS, so the walk and the BFS could measure different things — defeating the independent-check
+  value. FIX: pin ONE metric in `platformStep(a,b)` (exported, imported by BOTH): `dy = b.row−a.row`
+  (platform-top to platform-top); `dx` = the nearest-edge clear column gap in the travel direction (0
+  if spans overlap). The generator places `next` so `canReachStep(platformStep(prev,next))` holds;
+  the verifier rebuilds via the SAME `platformStep`+`canReachStep`. Same math on both sides → they
+  cannot check different graphs, while the graph is still re-derived independently from the tiles.
+  Because the predicate is a conservative under-estimate (Decision 35 margin), a PASS implies the
+  real player makes it.
+
+**37. Solid bodies = MERGED per horizontal run, not one Arcade body per tile (TileMap)**
+- Options: A) one static body per SOLID tile · B) `TileMap` merges each contiguous horizontal run of
+  same-type tiles in a row into ONE rectangle + ONE static body.
+- Decision: **B)** — a per-tile body explosion (hundreds of bodies) wastes broad-phase + memory for
+  no behavioral gain; merged spans give identical collision with a fraction of the bodies (the room
+  is mostly long floor/ledge runs). This is also why the description carries `platforms` (the merged
+  spans) — the generator already computed the runs, so the renderer reuses them (DRY) instead of
+  re-scanning. One-way spans go to a SEPARATE `oneWay` group (they keep the §6.1 processCallback
+  collider); hazards are non-colliding primitives this phase (damage wiring is Phase 5 — YAGNI).
+
+**38. Spawn placement = ON the ground, validated, so nothing spawns inside a wall (AC28)**
+- Options: A) random world points · B) the generator only ever emits a spawn at a cell that is
+  `EMPTY` with a `SOLID`/`ONEWAY` cell DIRECTLY BELOW it (standable ground), converting the tile
+  coord to a world coord centered on the tile, feet on the platform top.
+- Decision: **B)** — "no spawn inside a wall / no floating spawn" (AC28) is guaranteed at emit time,
+  not patched later. The generator keeps a list of valid standable cells (computed once from the
+  grid) and draws enemy/pickup positions from it via the seeded RNG. The verifier RE-derives
+  standability from the emitted `tiles` and asserts every spawn satisfies it — an independent check
+  (same philosophy as Decision 36). Enemy count is clamped to the biome's `[minEnemies, maxEnemies]`.
+
+**39. Biome config = a PURE config object passed in, ships ONE biome now (YAGNI)**
+- Options: A) hard-code dimensions/counts in the generator · B) `generateLevel(seed, biomeConfig)`
+  takes a config (`{ cols, rows, minEnemies, maxEnemies, hazardChance, oneWayChance, colors… }`); a
+  `config/biomes.js` (PURE) exports the concrete configs; ONE biome (`PRISON`, the Dead Cells opener)
+  ships now.
+- Decision: **B)** — parameterizing by config keeps the generator reusable for Phase 5's multi-biome
+  runs WITHOUT building them now (the signature is future-proof; only one config exists → YAGNI). The
+  config is pure data (no Phaser) so the verifier sweeps the SAME biome the game uses. Size/difficulty
+  BOUNDS (AC28) are read from this config, so "within bounds" is checked against the real source.
+
+**40. Door = the exit entity; GameScene re-generates on overlap (next-level edge)**
+- Options: A) reaching the exit immediately `scene.start('Victory')` · B) an `entities/Door.js` at
+  the description's `exit`; an overlap fires `onExit()`, which GameScene handles by **re-generating**
+  the level with the NEXT seed and rebuilding the room in place (tear down old bodies/entities, build
+  the new description) — a level→level transition.
+- Decision: **B)** — this phase's job is "reaching the Door triggers a next-level transition" (the
+  task), which proves the generate→play→advance loop, not the run/victory economy (Phase 5/6). A Door
+  entity (not an inline overlap) gives Phase 5 a real object to gate (locked until the room is
+  cleared, cost in scrolls, etc.) without a rewrite. Re-generation uses a deterministic seed sequence
+  (`nextSeed = mulberry32-advanced` or `seed+1`) so the chain of levels is itself reproducible. The
+  player is repositioned to the new entrance; HUD/Effects persist (only the world rebuilds).
+
+**41. Enemy spawns require a MIN-WIDTH platform; patrol bounds come FROM the generator (review MAJOR)**
+- Problem: §6.2's first cut said enemy patrol bounds are "derived from the platform the enemy stands
+  on" but (a) gave no mechanism to map a world-coord spawn back to its owning merged run, and (b) the
+  staircase stamps short 3-tile runs, so a Brute (bodyW≈38px) on a 2–3 tile span would clamp
+  instantly and jitter at the edges — it would look broken.
+- Decision: the GENERATOR owns this, not the scene. (1) `collectStandable` records, for each
+  standable cell, the OWNING support run's `col`/`len` (it scans the contiguous SOLID/ONEWAY span
+  beneath) — so no world→platform mapping is needed at spawn time. (2) Enemies are only drawn from
+  standable cells whose owning run is ≥ `MIN_ENEMY_PLATFORM_TILES` (= 5; ~160px → ~110px patrol span
+  ≫ bodyW, real movement not a twitch) — pickups have no such requirement. (3) Each emitted enemy
+  carries `patrolMinX/patrolMaxX` = the owning run's world span inset by `ENEMY_PATROL_INSET` px, so
+  GameScene passes them straight to `_spawnEnemy` and the live Decision-29 pit-safety (patrol +
+  chase clamp to bounds) holds for GENERATED geometry. The full-width floor band keeps wide runs
+  plentiful, so requiring 5 never starves spawns (verified: every swept seed still has enemies).
+
 ---
 
 ## 6. Design
@@ -858,7 +1025,215 @@ player can move within before the camera scrolls (kills micro-jitter from run ac
 are named constants in GameScene. Follow is clamped by the camera bounds set in Phase 0, so the
 camera never shows outside the room.
 
-### 6.2 Phase 2 — Procedural levels *(filled when Phase 2 is designed)*
+### 6.2 Phase 2 — Procedural levels (THIS PHASE — see the phase-order note in §3/§AC)
+
+**Goal.** Replace the hand-built test room with a **deterministically generated** level. A PURE,
+seeded generator (`world/LevelGenerator.js`) returns a plain **level description** — a tile grid
+(`EMPTY|SOLID|ONEWAY|HAZARD`), `entrance`/`exit` doors, merged solid `platforms`, and
+`enemies[]`/`pickups[]` spawn points — that is **traversable entrance→exit by construction**
+(every required jump is within the player's measured reach). A Phaser-coupled `world/TileMap.js`
+turns that description into Arcade **static** bodies + primitive tiles; an `entities/Door.js` is
+the exit. GameScene now **builds a generated level** (seeded from a fixed run seed for now),
+spawns enemies/pickups at the generated points, and reaching the Door **re-generates the next
+level**. A headless `verify-gen.mjs` sweep proves determinism + traversability + bounds for MANY
+seeds. Everything stays framerate-independent + allocation-sane; the generator is pure (Decision 33).
+This phase satisfies **AC19 + AC27–AC30** (the Phase-2 block; numbers chosen to avoid the Combat
+20–26 collision — see the AC-numbering note in §3).
+
+**The level description (the contract between generator, renderer, scene, verifier).**
+`generateLevel(seed, biomeConfig)` returns a plain object (no Phaser, no functions on it — pure
+data so it serializes for the regression pin):
+
+```
+{
+  cols, rows, tileSize,            // grid dimensions + px per tile (TILE=32)
+  worldWidth, worldHeight,         // cols·tileSize, rows·tileSize (TileMap sets bounds from these)
+  tiles,                           // rows×cols Int array of EMPTY|SOLID|ONEWAY|HAZARD enums
+  entrance: { col, row, x, y },    // spawn cell (EMPTY, standable) + its world center
+  exit:     { col, row, x, y },    // exit cell (EMPTY, standable, distinct from entrance)
+  platforms: [ { col, row, len, type } … ],  // merged horizontal solid/one-way runs (Decision 37)
+  enemies:  [ { x, y, spec } … ],  // standable world spawn points (Decision 38) + which spec
+  pickups:  [ { x, y, kind } … ],  // standable world spawn points (kind: 'cell'|'gold' placeholder)
+  seed, biomeId,                   // echoed for debugging + the next-seed chain (Decision 40)
+}
+```
+
+The TILE enums are small ints exported from `LevelGenerator.js` (`TILE = { EMPTY:0, SOLID:1,
+ONEWAY:2, HAZARD:3 }`) so generator, TileMap, and verifier share ONE definition (DRY).
+
+**Generation algorithm (the reach-bounded staircase walk — Decisions 34/35).** PURE; one seeded
+`mulberry32(seed)` RNG threads the whole generation so the same seed is byte-identical.
+
+1. **Dimensions** from `biomeConfig` (`cols/rows`), clamped to `[MIN,MAX]` bounds (AC28). Init the
+   grid to `EMPTY`.
+2. **Floor band** along the bottom rows = `SOLID` (the ground the staircase sits above; gives the
+   room a base + catches falls). Side columns = `SOLID` walls (room edges; Decision: world bounds
+   also catch the player, but the wall tiles make it read + keep spawns off the edge).
+3. **The critical-path platform chain.** Place platform 0 (the **entrance** platform) at the left,
+   on/near the floor. Repeatedly place platform `k+1` from platform `k` by drawing a seeded
+   `gapTiles ∈ [MIN_GAP, MAX_GAP]` (horizontal advance) and `stepTiles ∈ [-MAX_STEP_UP,
+   +MAX_STEP_DOWN]` (vertical change), each STAMPED as a short `SOLID` run; continue until the
+   walk's x passes `cols - margin`. The LAST platform is the **exit** platform. Because every
+   `(gap, step)` is inside the player's measured reach (Decision 35), platform `k → k+1` is always
+   jumpable → the entrance→exit path is traversable BY CONSTRUCTION (AC27).
+4. **`entrance`/`exit` cells** = the standable `EMPTY` cell directly ABOVE the first/last platform's
+   top tile (feet on the platform). Asserted distinct + in-bounds (AC28).
+5. **Off-path decoration (seeded, bounded).** Scatter a few extra `ONEWAY` ledges and `HAZARD` tiles
+   at seeded positions that are NOT on the critical path. Counts come from `biomeConfig`
+   (`oneWayLedges`/`hazardPatches`). Beyond avoiding occupied tiles, decoration is kept out of the
+   **swept JUMP CORRIDOR** between consecutive critical platforms — a coarse rectangular mask of the
+   airspace + launch/landing bands the player's real trajectory passes through (review MINOR: the
+   verifier proves a PLATFORM-graph BFS, so a hazard in the airspace between two reachable platforms
+   would be off the graph yet on the player's path). Masking the corridor makes the "never blocks the
+   route" claim hold for the actual walked path, not merely the abstraction. Hazards sit ON a support
+   (no floating spikes) and are render-only this phase (damage is Phase 5 — YAGNI).
+6. **Standable-cell set + spawns (Decision 38).** Scan the grid ONCE for every `EMPTY` cell with a
+   `SOLID`/`ONEWAY` directly below = the standable set. Draw `n ∈ [minEnemies, maxEnemies]` enemy
+   spawns + a few pickup spawns from it via the RNG (excluding cells too near the entrance so the
+   player isn't ambushed on frame 1). Convert each to a world coord (tile center x, platform-top y −
+   half body). Emit `enemies[]`/`pickups[]`.
+7. **`platforms[]`** = merge each contiguous horizontal run of `SOLID` (and separately `ONEWAY`)
+   tiles per row into one `{col,row,len,type}` (Decision 37) — computed here so TileMap + verifier
+   reuse it.
+
+**Jump-reach predicate (shared, pure — Decisions 35/36) — a TRUE 2-D ENVELOPE (review BLOCKER #1).**
+`canReachStep(dxTiles, dyTiles)` → boolean. The PRIOR design treated the two axes as INDEPENDENT
+(`|dx| ≤ MAX_GAP` AND `dy ≥ -MAX_STEP_UP`). That is unsound in principle: jump reach is **coupled** —
+a max-height jump leaves LESS horizontal reach and vice-versa — so it was safe only by luck of the
+specific budgets, and a one-line re-tune (e.g. `MAX_STEP_UP=4`) could silently emit unreachable
+"verified" levels. **FIX:** the horizontal allowance is now a FUNCTION of `dy`, derived from the real
+Player.js physics (`rawReachPx(dyPx)` in `LevelGenerator.js`):
+
+- Ascent gravity `g_up = GRAVITY (1500)`; descent gravity `g_down = GRAVITY + FALL_GRAVITY_EXTRA
+  (2400)` (the fast-fall); apex climb `v²/2g_up ≈ 128.1px`.
+- To LAND ON TOP at a target `up` px higher, the body must cross height `up` with a downward
+  (real-landing) velocity — the DESCENDING crossing after the apex, which is the LATEST/longest air
+  time: `t = v/g_up + sqrt(2·(apex−up)/g_down)`, so `rawReach(up) = RUN_SPEED·t · REACH_MARGIN(0.7)`.
+- `canReachStep` returns `|dx|·TILE ≤ rawReachPx(dy·TILE)` (plus the `dy ∈ [−MAX_STEP_UP,
+  MAX_STEP_DOWN]` bound the generator places within). The 0.7 margin makes the envelope a
+  conservative **under**-estimate of true reach, so a verifier PASS is sound (never a false PASS).
+
+**Soundness PROVEN, not lucky.** Worked corner (the reviewer's load-bearing case): at `up = 3 tiles
+(96px)` → `rawReach ≈ 184.6px`; `×0.7 ≈ 129.2px ≥ MAX_GAP (4 tiles = 128px)`, so the worst-case
+"max-up + max-across" jump is inside the safe envelope **with** margin. This is no longer "by luck of
+the numbers": `LevelGenerator.js` runs **module-load assertions** that throw if `MAX_GAP` exceeds the
+coupled reach at `MAX_STEP_UP` (or if `MAX_STEP_UP` exceeds the apex), so any future budget re-tune
+that would break reach fails LOUDLY at import instead of producing unreachable levels.
+
+The generator uses `canReachStep` to bound the walk; the verifier uses the SAME function (imported,
+DRY — Decision 36) to build the platform graph and BFS entrance→exit. Because both call the identical
+`platformStep` + `canReachStep`, they cannot check different graphs (see the pinned metric below).
+
+**The EXACT metric (review BLOCKER #2) — ONE measurement, byte-identical in walk + BFS.** "gap" and
+"step" must measure one thing in both the generator's placement and the verifier's edge
+construction, or the verifier proves a different graph than the player traverses. PINNED in
+`platformStep(a, b)` (exported from `LevelGenerator.js`; both sides import it — they cannot disagree):
+
+- A platform IS its merged SOLID/ONEWAY run `{ col, row, len }`; its walkable TOP is row `row`,
+  spanning columns `[col, col+len−1]`. The player stands on top.
+- **VERTICAL step** `dy = b.row − a.row` — platform-TOP row to platform-TOP row (negative = `b`
+  higher, since smaller row index is higher on screen).
+- **HORIZONTAL gap** `dx` = the NEAREST-EDGE clear column gap in the travel direction: `b.col −
+  (a.col+a.len−1)` if `b` is to the right; `(b.col+b.len−1) − a.col` if to the left; `0` if the
+  spans overlap in columns. This is the clear gap the player's leading foot must clear.
+
+The generator places each next platform so `canReachStep(platformStep(prev, next))` holds; the
+verifier rebuilds the graph from the EMITTED `platforms` via the SAME `platformStep` + `canReachStep`
+and BFSes it. Identical math on both sides — the "independent check" value is preserved because the
+verifier re-derives the graph from the emitted tiles, not the walk's intent (Decision 36), while the
+*metric* is shared (so a PASS means the real traversal graph is solvable, not a different one).
+
+**`world/TileMap.js` (Phaser-coupled — Decisions 22/37).** `new TileMap(scene, description)`:
+- Sets `physics.world.setBounds` + `cameras.main.setBounds` to `worldWidth/Height`.
+- Builds a `solids` static group: for each `SOLID` `platform` run, one drawn rectangle promoted to a
+  static body (merged span, not per-tile). Walls + floor band are runs too.
+- Builds a `oneWay` static group for `ONEWAY` runs (rendered amber; GameScene keeps the §6.1
+  processCallback one-way collider against this group).
+- Renders `HAZARD` tiles as a distinct primitive (e.g. red spikes rectangle) — non-colliding this
+  phase (a `hazards` group is exposed for Phase 5 to wire damage).
+- Exposes `solids`, `oneWay`, `hazards`, and `destroy()` (tears down all created GameObjects + bodies
+  so a level→level rebuild leaks nothing — Decision 40's in-place regeneration depends on this).
+
+**`entities/Door.js` (Decision 40).** A plain class holding a drawn rectangle + an Arcade body (a
+sensor — overlap, not collide) at the description's `exit` world position; `onExit` callback fired
+by GameScene's overlap. Rendered as a distinct primitive (a glowing yellow slab). An ENTRANCE marker
+is drawn by GameScene (cosmetic) so the start reads. `destroy()` for rebuilds. The Door does NOT
+self-guard double-firing or self-destroy — that discipline lives in GameScene (next paragraph).
+
+**GameScene changes (replace the hand-built room — §6.1/§6.3 geometry is removed).**
+- `create()`: pick the run seed (a fixed `START_SEED` placeholder until RunState exists in a later
+  phase), `this.biome = PRISON` (from `config/biomes.js`), construct the PERSISTENT pieces (Player,
+  Input, Effects, both HitboxPools, the enemy hurtbox group, the combat overlaps, the camera follow),
+  then `this._buildLevel(seed)`.
+- `_buildLevel(seed)`: `desc = generateLevel(seed, this.biome)`; `this.tileMap = new TileMap(this,
+  desc)`; reposition the Player at `desc.entrance` via `body.reset()` (clears residual velocity);
+  for each `desc.enemies` spawn an `Enemy` with patrol bounds **taken directly from the generated
+  entry** (`e.patrolMinX/patrolMaxX`) — the GENERATOR derived them from the owning platform run's
+  world span (Decision 41), so the scene never maps a world coord back to a platform, and the bounds
+  are guaranteed wide enough (enemies only spawn on runs ≥ `MIN_ENEMY_PLATFORM_TILES`); for each
+  `desc.pickups` drop a placeholder primitive; place the `Door` at `desc.exit`. Re-wire the PER-LEVEL
+  colliders against the new `tileMap.solids` / `tileMap.oneWay`. The one-way collider's
+  `processCallback` reads the **player's COLLIDER body** (`player.body.bottom`), NEVER the
+  squash-scaled visual (the §6.1 / review-issue-#6 invariant, preserved through this rewrite); its
+  epsilon is `MAX_FALL_SPEED · MAX_DT` (**derived**, not a magic literal — review MINOR).
+- `_onDoorOverlap()` (the Door's overlap callback) — **re-entrancy + footgun guards (review MAJOR):**
+  Arcade fires overlap EVERY frame the bodies overlap, and `_nextLevel()` destroys the current
+  tileMap/enemies/door. Two pins: (1) a one-shot `this.transitioning` flag — `_onDoorOverlap` returns
+  immediately if it's already set, so a multi-frame overlap fires the transition exactly once (it's
+  cleared only after the rebuild completes); (2) the actual teardown+rebuild is DEFERRED to the next
+  tick via `time.delayedCall(0)` — never run inside the overlap callback — because destroying a
+  collider's body while Arcade is iterating its colliders list (`world.step`) is a classic footgun.
+- `_nextLevel()`: advance the seed (`nextSeed(this.seed)`), `_teardownLevel()` (remove per-level
+  colliders, force-despawn enemies, destroy pickups/markers/door/tileMap — KEEP the Player, Input,
+  Effects, HitboxPools, HUD, and the persistent combat overlaps), `_buildLevel(this.seed)`, log the
+  transition (AC30), clear `transitioning`. The **generator GUARANTEES** the new entrance (far left)
+  and new exit (far right) are ≥ ~20 tiles apart (the staircase spans 40+ cols; verified ≥ 52 across
+  seeds), so re-spawning the Player at the entrance can NEVER overlap the freshly-placed exit Door on
+  the rebuild frame — stated here as the invariant the rebuild relies on. A camera flash marks it.
+- `update()`: unchanged in shape (dt boundary, hit-stop, player/enemy ticks, FX, HUD). Gameplay is
+  frozen while `transitioning` (the rebuild is mid-flight) as well as during the death handoff.
+
+**`config/biomes.js` (NEW, PURE — Decision 39).** Exports `PRISON` (and a `BIOMES` map): `{ id,
+cols, rows, minEnemies, maxEnemies, minPickups, maxPickups, oneWayLedges, hazardPatches,
+platformLenRange, colors:{ solid, oneWay, hazard, bg, entrance, exit } }`. Decoration uses bounded
+COUNTS (`oneWayLedges`/`hazardPatches`), not per-tile chances, so the seeded sweep is deterministic +
+size-independent. `platformLenRange` min is ≥ 3 (standable runs). Size BOUNDS (`COLS_MIN/MAX`,
+`ROWS_MIN/MAX`) for AC28 are exported here too — the single source the generator clamps to AND the
+verifier asserts against. Pure data so the verifier sweeps the real config.
+
+**`scripts/verify-gen.mjs` (GROWN — AC19/27/28).** In addition to the existing rng/combat pins, it
+imports `generateLevel`, `TILE`, `canReachPlatform` from `world/LevelGenerator.js` and `PRISON` +
+the size bounds from `config/biomes.js` (all PURE — a successful node import re-proves the purity
+convention, Decision 33), then sweeps **N = 200** seeds (spread by a Knuth multiplicative hash) and
+for EACH asserts:
+- **Determinism (AC19):** `generateLevel(seed, PRISON)` twice → **element-wise DEEP-EQUAL** (a local
+  `deepEqual` recurses arrays/objects; a plain `===` would compare the `tiles` 2-D int grid by
+  REFERENCE — two fresh generations have different array objects — so element-wise is required,
+  review MINOR). Fast headlessly: each call is pure integer work over a ~64×22 grid; 200×2 calls +
+  the deep-equal run in well under a second.
+- **Regression pin (AC19) — a FULL reference, not a vague hash (review MAJOR):** for ONE fixed seed
+  (`0x1234abcd`) over a small biome, deep-equal the WHOLE structured description (cols/rows/world/
+  entrance/exit/enemies/pickups/seed/biomeId) AND the `tiles` grid pinned via a SPECIFIED, stable
+  **row-major string serialization** (each row = its tile ints joined). The pinned values are
+  COMPUTED from the real generator (like the rng pin), never hand-invented — an algorithm change
+  fails loudly; regenerate by re-running, never edit to silence.
+- **Bounds (AC28):** `cols/rows` within `[COLS_MIN/MAX, ROWS_MIN/MAX]`; `exit` non-zero, in-bounds,
+  `!==` entrance; entrance + exit cells are `EMPTY` AND standable; enemy count `≤ maxEnemies`.
+- **No spawn in a wall (AC28):** every `enemies[]`/`pickups[]` point maps to a cell that is `EMPTY`
+  with a `SOLID`/`ONEWAY` directly below (re-derived from `tiles`, independent of the generator's
+  intent — Decision 38).
+- **Traversable (AC27):** build the platform reachability graph from `platforms` using
+  `canReachStep`, BFS from the entrance platform, assert the exit platform is reached (Decision 36).
+Exits non-zero on any failure so `npm run verify` gates CI. (It does NOT import TileMap/Door — those
+are Phaser-coupled; importing them would throw under node, which is the convention's whole point.)
+
+**Why this is the minimum that satisfies AC19 + AC27–AC30 without over-reaching (YAGNI):** ONE biome ships
+(the config signature is multi-biome-ready, Phase 5 adds more); hazards render but don't damage yet
+(Phase 5); pickups are placeholder markers (Phase 4/5 owns the economy); the next-seed chain is a
+simple deterministic advance (a real RunState + biome progression is Phase 5); the layout is the
+reach-bounded staircase (a cave/branching generator is a later biome behind the same signature).
+Each deferral is a clean seam — the pure `generateLevel(seed, biomeConfig)` contract + the
+description shape are exactly what later phases extend, not rewrite.
 
 ### 6.3 Phase 3 — Combat (THIS PHASE — built now, see the phase-order note in §3)
 
@@ -1155,7 +1530,40 @@ owns real GameOver + permadeath). Each deferral is a clean seam, not a stub that
 - `src/config/constants.js` — POSSIBLY extend with a shared knockback feel scalar only; per-entity
   combat tuning stays co-located in its owner (Player swing table / Enemy spec) — DRY.
 
-**Phases 2, 4–7:** files listed in each phase's `Design` section when it is implemented.
+**Phase 2 — Procedural levels (this phase; §6.2 — built after Combat per the phase-order note):**
+
+- `src/world/LevelGenerator.js` — NEW. **100% PURE** (no Phaser import; Decision 33). Exports
+  `TILE` (the cell enum), `generateLevel(seed, biomeConfig)` (the reach-bounded staircase walk →
+  a level description, Decisions 34/35/38), and `canReachStep(dx, dy)` (the shared pure jump-reach
+  predicate, Decisions 35/36). Reach budgets (`TILE`, `MAX_GAP`, `MAX_STEP_UP/DOWN`) are named
+  constants DERIVED from `Player.js` physics with a comment citing the derivation. Node-importable
+  by `verify-gen.mjs`.
+- `src/config/biomes.js` — NEW. **PURE** biome config (Decision 39): `PRISON` + a `BIOMES` map +
+  the size/difficulty BOUNDS (`COLS_MIN/MAX`, `ROWS_MIN/MAX`) for AC28. Pure data so the verifier
+  sweeps the real config the game uses.
+- `src/world/TileMap.js` — NEW. Phaser-COUPLED (Decision 37). `new TileMap(scene, description)`:
+  sets world/camera bounds, builds the merged-span `solids` static group + the `oneWay` static
+  group + the non-colliding `hazards` primitives, renders the grid as colored rectangles, and
+  `destroy()`s cleanly for level→level rebuilds (Decision 40). Exposes `solids/oneWay/hazards`.
+- `src/entities/Door.js` — NEW. The level EXIT (Decision 40): a drawn slab + an Arcade sensor body
+  at `exit`; GameScene overlaps the player against it → `onExit()` (the next-level edge). `destroy()`
+  for rebuilds; a cosmetic entrance marker too.
+- `src/scenes/GameScene.js` — EXTEND/REPLACE. The hand-built §6.1/§6.3 room geometry is REMOVED;
+  `create()` now `_buildLevel(seed)`: `generateLevel` → `TileMap` → spawn Player at the entrance,
+  Enemies at the generated points (patrol bounds = their platform span, keeping Decision-29 pit
+  safety), placeholder pickups, the exit `Door`; re-wire colliders against `tileMap.solids/oneWay`
+  (the one-way processCallback collider unchanged, just re-pointed). `_nextLevel()` (Door `onExit`):
+  advance the seed, `tileMap.destroy()` + destroy per-level entities, rebuild, reposition the Player.
+  `update()` shape unchanged (dt boundary / hit-stop / FX / HUD intact).
+- `src/util/rng.js` — UNCHANGED (the generator consumes the existing `mulberry32`/`range`).
+- `scripts/verify-gen.mjs` — GROW. Adds the level sweep (Decisions 36/38): imports `generateLevel`/
+  `TILE`/`canReachStep` + `PRISON`, sweeps N=200 seeds asserting determinism (+ a pinned signature),
+  size/difficulty bounds, non-zero/reachable exit, no spawn inside a wall, and entrance→exit
+  traversability via the BFS over the reachability graph. Keeps the existing rng + combat-purity
+  pins. Does NOT import the Phaser-coupled `TileMap`/`Door` (importing them would throw under node —
+  the convention's whole point).
+
+**Phases 4–7:** files listed in each phase's `Design` section when it is implemented.
 
 ---
 
@@ -1226,4 +1634,31 @@ owns real GameOver + permadeath). Each deferral is a clean seam, not a stub that
    backstab predicate (crit ON/OFF, away-knockback) so a regression in the pure combat math fails
    loudly in CI.
 
-**Phases 2, 4–7:** verification steps appended per phase when implemented.
+**Phase 2 — Procedural levels (this phase; §6.2):** primarily the HEADLESS sweep (the determinism +
+solvability foundation), plus `npm run dev` observation:
+
+1. [AC19] `npm run verify` exits 0. It sweeps **N=200** seeds: for each, `generateLevel(seed,
+   PRISON)` called twice is deep-equal (determinism), and one fixed seed matches a pinned
+   `tiles`/entrance/exit signature (regression). Two fresh runs of `npm run verify` print identical
+   output. (A successful node import of `world/LevelGenerator.js` + `config/biomes.js` ALSO re-proves
+   the purity convention — Decision 33 — since a Phaser-coupled module would throw under plain node.)
+2. [AC27] In the same sweep, every level's platform reachability graph (built from `platforms` via
+   `canReachStep`) reaches the exit platform from the entrance platform by BFS — entrance→exit is
+   traversable for all 200 seeds. In `npm run dev`: the player can actually jump the gaps/steps from
+   spawn to the exit Door (the budgets are conservative — reach has margin).
+3. [AC28] In the sweep, every level: `cols/rows` within the biome MIN/MAX; `exit` non-zero,
+   in-bounds, `!==` entrance; entrance + exit cells `EMPTY`; enemy count within
+   `[minEnemies,maxEnemies]`; and EVERY enemy/pickup spawn maps to an `EMPTY` cell with a
+   `SOLID`/`ONEWAY` directly below (re-derived from `tiles` — no spawn inside a wall, none floating).
+4. [AC29] In `npm run dev`: the generated room renders as primitive tiles (solids, amber one-way
+   ledges, distinct hazards); the player collides with the merged solid spans, jumps UP through +
+   lands ON the one-way ledges (the §6.1 behavior, now on generated geometry), and cannot leave the
+   room. Resize/throttle FPS — collision + feel unchanged (frame-rate independent).
+5. [AC30] In `npm run dev`: enemies + pickups appear at the generated points (on the ground, never
+   buried/floating); reaching the exit **Door** logs + triggers a transition to the NEXT generated
+   level (a fresh layout, player at the new entrance, HUD/Effects persist). The next level is itself
+   reproducible (the seed chain is deterministic).
+6. Regression: `npm run build` exits 0; the existing Phase-0/1/Combat checks in `verify-gen.mjs`
+   still pass (the rng pin + combat purity/geometry pins are untouched).
+
+**Phases 4–7:** verification steps appended per phase when implemented.

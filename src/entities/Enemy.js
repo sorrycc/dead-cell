@@ -314,6 +314,18 @@ export class Enemy {
     this.frontMarker.destroy()
   }
 
+  // ── Force immediate teardown (design §6.2, Decision 40) ── used by the level→level rebuild to
+  // destroy an enemy REGARDLESS of its FSM state (no death pop). Releases any live strike hitbox
+  // first so a frozen/in-flight strike doesn't dangle across the rebuild, then despawns. Distinct
+  // from _die() (which plays the pop + drops Cells) — a rebuild is not a kill.
+  forceDespawn() {
+    this.dead = true
+    this.state = STATE.DEAD
+    if (this.body) this.body.enable = false
+    if (this.hitboxPool) this.hitboxPool.releaseAll()
+    this._despawn()
+  }
+
   // ── Visual: follow the body, flash the state color, ease the death/impact pop. ──
   _updateVisual(dt) {
     if (this.removed) return
