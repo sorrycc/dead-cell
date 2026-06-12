@@ -14,6 +14,10 @@
 // running the same function; never edit it to make a failing test pass.
 
 import { mulberry32 } from '../src/util/rng.js'
+// Combat-phase PURE modules (design §6.3, Decision 28): these import NO Phaser, so a successful
+// import here PROVES the purity convention (a Phaser-coupled module would throw under plain node).
+import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
+import { resolveHit } from '../src/combat/damage.js'
 
 const SEED = 0x1234abcd
 const K = 5
@@ -52,5 +56,44 @@ for (let i = 0; i < K; i++) {
   }
 }
 
-console.log(`verify-gen OK: mulberry32 deterministic + pinned (seed 0x${SEED.toString(16)}, ${K} draws)`)
+// ── 3) Combat-phase PURE modules — purity + geometry/damage contracts (design §6.3, Decision 28) ──
+// The fact that the imports at the top of this file SUCCEEDED already proves hitbox.js + damage.js
+// are headlessly importable (no Phaser). These assertions pin their pure behavior so a regression
+// (e.g. someone re-couples them to Phaser, or breaks the backstab predicate) fails loudly in CI.
+
+// 3a) swingRect places the box in FRONT of the attacker by facing, with the table's width.
+{
+  const s = SWINGS[0]
+  const right = swingRect({ cx: 100, cy: 50, facing: 1 }, s)
+  const left = swingRect({ cx: 100, cy: 50, facing: -1 }, s)
+  const expectedCx = 100 + (s.forward + s.reach / 2)
+  if (right.x !== expectedCx) fail(`swingRect facing+1 x=${right.x}, expected ${expectedCx}`)
+  if (left.x !== 200 - expectedCx) fail(`swingRect facing-1 x=${left.x}, expected ${200 - expectedCx}`)
+  if (right.w !== s.reach || right.h !== s.halfHeight * 2) fail('swingRect size mismatch')
+  if (COMBO_LEN !== SWINGS.length) fail(`COMBO_LEN=${COMBO_LEN} != SWINGS.length=${SWINGS.length}`)
+}
+
+// 3b) Backstab predicate (Decision 19): a hit from the side the victim is NOT facing crits; a hit
+// from the side it IS facing does not; the allowBackstab=false flag gates the crit OFF entirely.
+{
+  const finisher = SWINGS[2]
+  // Attacker at x=0, victim at x=50 facing RIGHT (+1) → attacker is on the victim's BACK → backstab.
+  const back = resolveHit({ cx: 0, facing: 1 }, { cx: 50, facing: 1 }, finisher, { allowBackstab: true })
+  if (!back.isBackstab) fail('backstab geometry should crit')
+  if (back.damage !== finisher.damage * 2) fail(`backstab damage=${back.damage}, expected ${finisher.damage * 2}`)
+  // Same geometry but victim facing LEFT (−1) toward the attacker → FRONTAL → no crit.
+  const front = resolveHit({ cx: 0, facing: 1 }, { cx: 50, facing: -1 }, finisher, { allowBackstab: true })
+  if (front.isBackstab) fail('frontal hit must not crit')
+  if (front.damage !== finisher.damage) fail(`frontal damage=${front.damage}, expected ${finisher.damage}`)
+  // Knockback is AWAY from the attacker (victim to the right → +x shove).
+  if (front.knockbackX <= 0) fail('frontal knockback should push victim away (+x)')
+  // Crit OFF (enemy→player fairness, Decision 19): backstab geometry but no crit applied.
+  const off = resolveHit({ cx: 0, facing: 1 }, { cx: 50, facing: 1 }, finisher, { allowBackstab: false })
+  if (off.isBackstab || off.damage !== finisher.damage) fail('allowBackstab=false must disable the crit')
+}
+
+console.log(
+  `verify-gen OK: mulberry32 deterministic + pinned (seed 0x${SEED.toString(16)}, ${K} draws); ` +
+    `combat hitbox.js + damage.js pure-importable + geometry/backstab contracts pinned`,
+)
 process.exit(0)

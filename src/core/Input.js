@@ -11,37 +11,52 @@ import Phaser from 'phaser'
 //     dodgePressed }`. The field names are FINAL and match the design §6.1 API spec, the
 //     §7 Files entry, and Player.update — the earlier doc-internal name mismatch
 //     (`jumpDown`/`dodgeDown`) is resolved in favour of the edge-detected reading.
-//   • `jumpPressed` / `dodgePressed` are EDGE-detected via Phaser.Input.Keyboard.JustDown.
-//     JustDown mutates the key's internal `_justDown` flag, so calling it twice in a frame
-//     returns false the second time. Therefore THIS class is the SOLE owner of the JustDown
-//     call for the jump/dodge keys: GameScene calls `sample()` EXACTLY ONCE per frame and
-//     stores the snapshot; nothing else (HUD, ESC handler, future consumers) may call
-//     JustDown on these keys. The ESC dev hint stays on a `.once('keydown-ESC')` event so it
-//     never shares the JustDown path.
+//   • `jumpPressed` / `dodgePressed` / `attackPressed` are EDGE-detected via
+//     Phaser.Input.Keyboard.JustDown. JustDown mutates the key's internal `_justDown` flag, so
+//     calling it twice in a frame returns false the second time. Therefore THIS class is the SOLE
+//     owner of the JustDown call for the jump/dodge/attack keys: GameScene calls `sample()`
+//     EXACTLY ONCE per frame and stores the snapshot; nothing else (HUD, ESC handler, future
+//     consumers) may call JustDown on these keys. The ESC dev hint stays on a `.once('keydown-ESC')`
+//     event so it never shares the JustDown path.
+//
+// ── Combat phase additions (design §6.3, Decision 27, AC20) ──
+//   • JUMP moves to SPACE-ONLY (it shared J in Phase 1). J is now the ATTACK key — so there is no
+//     double-bind on J. Dodge stays Shift/K.
+//   • `attackPressed` is the EDGE of (J key) OR (left mouse). Pointer.isDown is a HELD state, not
+//     an edge, so we compute the pointer edge ourselves: `isDown && !_pointerWasDown`, updating the
+//     flag at the END of sample(). FIRST-FRAME CARRY-OVER GUARD (review MAJOR #27): the click that
+//     pressed START on a menu scene carries its held-down pointer state across scene.start('Game'),
+//     so we INITIALIZE `_pointerWasDown` from the CURRENT pointer state in the constructor — a
+//     still-held START click reads as "already down" → no edge → no spurious first-frame attack.
 export class Input {
   constructor(scene) {
+    this.scene = scene
     // addKeys lets us name each physical key; the snapshot derives intent from these.
     // Up/W and Down/S are RESERVED (climb / future drop-through) but intentionally unwired
-    // this phase — YAGNI. Multiple physical keys map to one intent (Space OR J, Shift OR K).
+    // this phase — YAGNI. Jump is Space-only now (J freed for attack); dodge is Shift OR K.
     const KC = Phaser.Input.Keyboard.KeyCodes
     this.keys = scene.input.keyboard.addKeys({
       left: KC.LEFT,
       a: KC.A,
       right: KC.RIGHT,
       d: KC.D,
-      up: KC.UP, // reserved (unused Phase 1)
-      w: KC.W, // reserved (unused Phase 1)
+      up: KC.UP, // reserved (unused)
+      w: KC.W, // reserved (unused)
       down: KC.DOWN, // reserved (future drop-through)
       s: KC.S, // reserved (future drop-through)
       space: KC.SPACE,
-      j: KC.J,
+      j: KC.J, // ATTACK (moved off jump in the Combat phase).
       shift: KC.SHIFT,
       k: KC.K,
     })
+
+    // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
+    // state so a START-click still held on the first GameScene frame does NOT read as a fresh edge.
+    this._pointerWasDown = scene.input.activePointer.isDown
   }
 
   // Build ONE intent snapshot for this frame. Called exactly once per GameScene.update.
-  // Pure read of key state → no side effects on gameplay, no physics-callback coupling.
+  // Pure read of key/pointer state → no side effects on gameplay, no physics-callback coupling.
   sample() {
     const keys = this.keys
 
@@ -52,15 +67,23 @@ export class Input {
     const moveX = (right ? 1 : 0) - (left ? 1 : 0)
 
     // jumpHeld drives the variable-height HOLD (release-cut in Player); jumpPressed is the
-    // discrete down-edge the buffer/coyote logic needs. JustDown is read here and ONLY here.
-    const jumpHeld = keys.space.isDown || keys.j.isDown
-    const jumpPressed =
-      Phaser.Input.Keyboard.JustDown(keys.space) || Phaser.Input.Keyboard.JustDown(keys.j)
+    // discrete down-edge the buffer/coyote logic needs. JustDown read here and ONLY here.
+    // Jump is SPACE-only now (J is attack).
+    const jumpHeld = keys.space.isDown
+    const jumpPressed = Phaser.Input.Keyboard.JustDown(keys.space)
 
     // Dodge is a one-shot edge (no "held dodge"); read its down-edge once per frame.
     const dodgePressed =
       Phaser.Input.Keyboard.JustDown(keys.shift) || Phaser.Input.Keyboard.JustDown(keys.k)
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed }
+    // Attack edge: J key OR a FRESH left-click (up→down). The pointer edge is computed from our
+    // own previous-down flag (pointer.isDown is HELD, not an edge); the constructor seeded the flag
+    // from the live pointer so a carried-over START click is never a spurious edge (Decision 27).
+    const pointer = this.scene.input.activePointer
+    const pointerEdge = pointer.isDown && !this._pointerWasDown
+    this._pointerWasDown = pointer.isDown
+    const attackPressed = Phaser.Input.Keyboard.JustDown(keys.j) || pointerEdge
+
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed }
   }
 }

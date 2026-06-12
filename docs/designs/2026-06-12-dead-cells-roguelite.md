@@ -123,31 +123,70 @@ saves; level editor.
 19. A pure, seeded generator produces a deterministic, solvable room/biome layout; the same seed
     yields an identical layout; `npm run verify` asserts this headlessly in node.
 
-**Phase 3 — Combat:**
+**Phase 3 — Combat (THIS PHASE — fully specified):**
 
-20. Melee + pooled ranged attacks deal damage with knockback; dodge-roll grants i-frames; hits
-    produce hitstop/shake juice.
+> NOTE ON PHASE ORDER. The build orchestrator schedules **Combat before Procedural levels**
+> (it calls this "Phase 2 · Combat"). The doc keeps its original section numbering — Combat is
+> §6.3 / "Phase 3" here — but is implemented NOW, on top of the Phase-1 platformer + the hand-made
+> test room (§6.1), with no dependency on the §6.2 generator. Procedural levels (§6.2) are still
+> a later phase. Where this section says "Phase 3" read "the Combat phase, built now".
+
+20. **Player melee with a light combo chain.** Attack (J **or** left-click) spawns a **transient
+    hitbox** in front of the player; chaining the input within a combo window advances a **2–3 swing
+    light combo** (swing 1 → swing 2 → finisher), each swing with its own damage/knockback/reach and
+    a brief recovery; letting the window lapse resets the chain to swing 1. Attacking is gated by a
+    per-swing **active + recovery** lockout (you cannot spam a single frame into infinite hits).
+21. **Damage resolution.** A swing's hitbox vs. an enemy hurtbox resolves **once per swing per
+    enemy** (no multi-hit from one swing): subtract damage, apply **knockback** (away from the
+    attacker), apply **hitstun** (the victim is briefly stunned), and start the victim's **hit
+    i-frames** so the same swing/contact can't re-hit it next frame.
+22. **BACKSTAB crit.** A hit that lands on an enemy **from behind** (attacker on the side the enemy
+    is *not* facing) deals a **crit multiplier** of extra damage and a stronger knockback, with a
+    distinct spark/number color — rewarding flanking + dodge-through play.
+23. **Player HP + damage reaction.** The player has **HP** shown on the HUD; taking damage (enemy
+    contact or enemy attack) subtracts HP, applies knockback, **flashes** the player, and grants a
+    **damage i-frame** window during which further hits are ignored. The **dodge i-frames**
+    (Phase 1 `isInvulnerable()`) also negate incoming hits — dodge-through is safe.
+24. **Enemy with a state-machine AI.** A base `Enemy` runs an explicit FSM
+    (**idle → patrol → chase → attack → hurt → dead**): patrols a ledge, **detects** the player
+    within a range and **chases**, **telegraphes** then commits a melee attack in range, reacts to
+    being hit (**hurt** = knockback + hitstun, interrupts its action), and **dies** at 0 HP. It
+    damages the player on **contact** and on its **telegraphed attack**. ≥1 concrete enemy type is
+    wired live into the test room.
+25. **Game feel on impact.** Every damaging hit produces, from a **pooled** effects layer:
+    **hit sparks** (particles), a **floating damage number** (crit-colored on backstab), a short
+    **screen shake**, and a brief **hit-stop** (a few ms of frozen time) — all scaled to hit
+    strength, all framerate-independent, none allocating per-hit after warm-up.
+26. **Death handoff (placeholder).** Player HP reaching 0 triggers a **placeholder transition**
+    (a short freeze/flash, then back to Title for now). The real GameOver / permadeath wiring is a
+    later phase — this phase only proves the death edge fires exactly once.
+
+> NOTE (review fix — AC-number collision). The skeleton ACs for later phases are LETTERED
+> (`AC-P4`…`AC-P7`) so they never collide with the numbered, fully-specified ACs above. Earlier
+> revisions reused `21`–`24` here, which made "AC21" ambiguous when grepped. The numbers `20`–`26`
+> are now reserved for the Combat phase ONLY; future phases will renumber their letters to the next
+> free integers when they are fully specified.
 
 **Phase 4 — Enemies:**
 
-21. Enemies run a state-machine AI, damage the player on contact/attack, take damage and die,
-    and drop **Cells**.
+- **AC-P4.** Enemies run a state-machine AI, damage the player on contact/attack, take damage and
+  die, and drop **Cells**.
 
 **Phase 5 — Run economy + biome flow:**
 
-22. Rooms/biomes chain into a run via doors; **gold/scrolls** are run-only boosts; **Cells** are
-    banked toward meta; the run is traversable end-to-end.
+- **AC-P5.** Rooms/biomes chain into a run via doors; **gold/scrolls** are run-only boosts;
+  **Cells** are banked toward meta; the run is traversable end-to-end.
 
 **Phase 6 — Bosses:**
 
-23. A multi-phase boss telegraphs attacks, transitions phases at an HP threshold, and on defeat
-    triggers Victory.
+- **AC-P6.** A multi-phase boss telegraphs attacks, transitions phases at an HP threshold, and on
+  defeat triggers Victory.
 
 **Phase 7 — Meta-progression + Hub:**
 
-24. The Hub spends banked **Cells** on **permanent** upgrades persisted to localStorage; death
-    loses run-only loot but keeps meta; relaunching the game restores meta state — the full
-    permadeath roguelite loop is closed.
+- **AC-P7.** The Hub spends banked **Cells** on **permanent** upgrades persisted to localStorage;
+  death loses run-only loot but keeps meta; relaunching the game restores meta state — the full
+  permadeath roguelite loop is closed.
 
 ---
 
@@ -289,6 +328,221 @@ phases plug in without re-architecting.
 - Decision: **B)** — the processCallback form is explicit, self-documenting, and the same shape
   combat/enemy colliders will use later (a predicate gating a collision). It cleanly yields the AC
   behavior: pass up through, land on top. KISS and no global body-flag side effects.
+
+> Decisions 16–24 are the **Combat** phase (built now; §6.3). They are final for this phase; later
+> phases append their own.
+
+**16. Hit detection = pooled rectangle bodies (overlap), NOT geometry math or per-frame allocation**
+- Options: A) compute attack/hurt overlap with hand-rolled AABB math each frame · B) represent each
+  attack hitbox + each entity hurtbox as a real **Arcade body** and resolve with
+  `this.physics.add.overlap(hitGroup, hurtGroup, onHit, processFilter)`.
+- Decision: **B)** — Arcade already does broad-phase + AABB; reusing it (overlap, not collide, so
+  there's no separation push) is DRY and matches the engine. Hitboxes are **transient** (alive only
+  for a swing's active frames) so they come from an **object POOL** (mandated convention): a small
+  invisible rectangle+body is acquired, positioned in front of the attacker, enabled for the active
+  window, then disabled back to the pool — **zero per-hit allocation** after warm-up. The **pure**
+  `combat/hitbox.js` owns the per-swing geometry (`SWINGS` + `swingRect`) and the **Phaser-coupled**
+  `combat/HitboxPool.js` owns the pool (the SPLIT is Decision 28 — superseding this entry's earlier
+  "one file owns both", which would have broken the headless-import convention); a pure
+  `combat/damage.js` owns the resolution math (so the math is unit-reasonable without Phaser).
+
+**17. Damage resolution lives in a PURE `combat/damage.js`, applied by the entity**
+- Options: A) compute damage/knockback/crit inline at the overlap callback · B) a pure
+  `resolveHit(attacker, victim, swing)` that RETURNS a plain result `{ damage, knockbackX,
+  knockbackY, isBackstab }`; the caller applies it to bodies/HP.
+- Decision: **B)** — separating the *decision* (how much damage, is it a backstab, how hard the
+  knockback) from the *effect* (mutate HP, set velocity, spawn FX) is SOLID and keeps the rule math
+  free of Phaser so it's trivially testable and reused by player→enemy AND enemy→player. `damage.js`
+  imports no Phaser. Backstab is a geometry predicate on facing (Decision 19).
+
+**18. Combo chain = an index + a combo-window timer on the Player, NOT a heavyweight state graph**
+- Options: A) a full per-swing sub-state machine · B) a `comboIndex` (0..N−1) advanced on each
+  buffered attack press, a `comboWindowTimer` that (when it lapses) resets the index to 0, and a
+  per-swing `attackTimer` (active + recovery) that gates the next swing.
+- Decision: **B)** — KISS. A light 2–3 hit combo is just "which swing am I on + how long until the
+  chain expires". Each swing reads its tuning from a small `SWINGS` table (reach, damage, knockback,
+  active, recovery, windowAfter). The Player gains an `ATTACK` state (peer to `RUN`/`DODGE`) that
+  freezes the combo logic in one readable place; movement is *reduced* (not frozen) during a swing so
+  attacking feels mobile but committed. Attacking is blocked during `DODGE` (dodge owns its window).
+
+**19. BACKSTAB = facing-relative geometry, decided in `damage.js`**
+- Options: A) track "who is behind whom" with extra per-entity flags · B) at resolve time, compare
+  the **attacker's position** to the **victim's facing**: a backstab is when the attacker is on the
+  side the victim is *not* facing (`sign(attacker.x − victim.x) === −victim.facing`, with a small
+  dead-zone so a near-vertical hit isn't a coin-flip).
+- Decision: **B)** — one stateless predicate from data both entities already expose (`facing`, body
+  center x). No bookkeeping to keep in sync (DRY). Yields a clean crit multiplier + stronger
+  knockback + a distinct FX color. Player→enemy gets backstabs (reward flanking); enemy→player uses
+  the same function but we can gate the crit off for enemies (keep early difficulty fair — a config
+  flag, not a code fork).
+
+**20. Per-swing hit DEDUP via a hit-set, NOT a global cooldown**
+- Options: A) a global "can be hit again in N ms" timer per victim · B) each active swing carries a
+  **set of already-hit victim ids**; a victim is damaged at most **once per swing**. Victim i-frames
+  (Decision 21) then stop the NEXT swing/contact from re-hitting too soon.
+- Decision: **B)** — the hit-set guarantees a single swing's multi-frame-alive hitbox can't multi-hit
+  the same enemy (the exact AC), while the *separate* victim hit-i-frame window governs cadence
+  between distinct attacks. Two orthogonal mechanisms, each doing one job (SOLID), instead of one
+  overloaded timer that has to be both.
+
+**21. HP + reaction = a tiny shared `Health` concept inlined per entity, with a hit-i-frame timer**
+- Options: A) a full ECS health component · B) each combatant just holds `hp/maxHp` +
+  `hurtIframeTimer` + an `onHit(result)` that subtracts HP, applies knockback, sets hitstun, flashes,
+  and arms the hit-i-frame so the same source can't immediately re-hit.
+- Decision: **B)** — YAGNI on an ECS for two entity types. The player and the base enemy each own
+  their HP fields and an `onHit` (DRY via the shared `damage.js` math + a shared flash/iframe helper
+  pattern, but no premature abstraction). The player's hit-i-frames are SEPARATE from its **dodge**
+  i-frames: `isInvulnerable()` already exists from Phase 1 (dodge), and the player now ALSO ignores
+  hits while `hurtIframeTimer>0` — incoming damage is blocked if EITHER is true.
+
+**22. Enemy AI = an explicit string-enum FSM with one `update(dt, ctx)` switch (mirrors Phase-1 style)**
+- Options: A) behavior-tree / steering lib · B) a hand-written FSM (`idle/patrol/chase/attack/hurt/
+  dead`) — one method per state OR a `switch(state)` — driven each frame from a small `ctx`
+  (player ref, dt) the scene passes in, exactly like the Player's tiny RUN/DODGE machine.
+- Decision: **B)** — a base enemy needs ~6 legible states; a `switch` with `_enter`/`_tick` per state
+  is the KISS, debuggable choice and matches the codebase's existing controller shape (plain class
+  holding a collider + visual, ticked by the scene). Telegraph = a timed wind-up sub-phase inside
+  `attack` (color shift + pause) before the damaging strike, so attacks are readable + dodgeable
+  (the genre's contract). `hurt` interrupts the current action (knockback + hitstun) then returns to
+  `chase`; `dead` plays a death pop then despawns. The base class is built to be SUBCLASSED/configured
+  for future enemy types (Phase 4 reuses it) but ships ONE concrete config now (YAGNI).
+
+**23. Effects = ONE pooled `effects/` layer (sparks + numbers pooled), shake/hitstop on the scene**
+- Options: A) `new` particles/text per hit · B) `effects/ParticlePool.js` (a fixed pool of reusable
+  spark rectangles) + a pooled floating-damage-number set, fronted by `effects/Effects.js` which also
+  owns **screen shake** (`camera.shake`) and **hit-stop**; the scene calls `effects.hit(x,y,opts)`.
+- Decision: **B)** — pooling particles/numbers is the mandated convention (no per-hit GC pressure).
+  `Effects` is the single juice façade (SOLID): one call from a hit site fires sparks + a number +
+  shake + hitstop, each parameterized by hit strength and crit. Spark motion + number float + fade
+  all ease framerate-independently off `dt`. Hit-stop is implemented WITHOUT real `setTimeout` drift
+  (Decision 24).
+
+**24. Hit-stop = a global time-scale freeze with a `dt`-counted timer, NOT setTimeout / per-entity pause**
+- Options: A) pause individual bodies on hit · B) on impact set a short `hitstopTimer`; while it
+  runs, GameScene **scales the dt** it feeds gameplay toward 0 (and can set `physics.world.timeScale`)
+  so the whole world briefly freezes, then snaps back — the timer counts down in REAL (unscaled)
+  time so the freeze is exactly N ms regardless of framerate.
+- Decision: **B)** — a global micro-freeze is the Dead Cells "crunch"; doing it as a scene-owned
+  timer that gates the gameplay-dt (the boundary GameScene already owns from Phase 1, BLOCKER #1) is
+  DRY and exact. We DON'T use `setTimeout` (drifts, fires off the game loop) and DON'T pause bodies
+  individually (misses FX + input). Hit-stop is capped tiny (a few frames) so it reads as impact, not
+  lag, and is skipped if one is already active (no stacking).
+
+> Decisions 25–31 close the **Combat-phase review BLOCKERs / MAJORs / MINORs** that the prior
+> revision left implementation-defined. They are final for this phase.
+
+**25. ATTACK's exact place in Player.update's linear control flow (review BLOCKER — "ATTACK never placed")**
+- Problem: `Player.update` is a linear method with a HARD dodge-start guard (`state === RUN`) and a
+  `state === DODGE ? dash : run-integration` horizontal branch. Adding ATTACK as a peer state requires
+  three precise edits the prior design hand-waved: (a) where in the 6-step order `attack()` fires,
+  (b) what changes the dodge-start guard / horizontal branch, (c) what resets state back to RUN.
+- Decision (pinned, no guessing):
+  - **Dodge-start guard relaxes from `state === RUN` to `state !== DODGE`** — so a dodge press is
+    honored DURING attack recovery (the design's "defensive option always available"; precedence
+    `DODGE > ATTACK > RUN`). Starting a dodge clears any in-progress attack (`attackTimer = 0`,
+    `comboWindowTimer = 0`, releases the live hitbox) so the two states never overlap.
+  - **`attack()` is invoked in NEW step (1.5)** — AFTER timers + the dodge-start edge (step 1),
+    BEFORE the horizontal branch (step 2). It only fires if `state !== DODGE && attackTimer <= 0`.
+    Firing it sets `state = ATTACK`, arms `attackTimer`, advances `comboIndex`, and acquires the
+    pooled swing hitbox. The order contract is: dodge-start can pre-empt it that same frame, and it
+    runs before movement so the swing's reduced-mobility scaling applies on the launch frame.
+  - **Horizontal branch gains an ATTACK arm:** `if DODGE {dash} else if ATTACK {run-integrate with
+    ACCEL·ATTACK_MOVE_SCALE and top-speed RUN_SPEED·ATTACK_MOVE_SCALE} else {normal run}`. Movement
+    is REDUCED, not frozen (committed-but-mobile, Decision 18). A small forward lunge nudge on the
+    finisher swing is applied once at `attack()` time.
+  - **ATTACK exit is SYMMETRIC to dodge's inline exit:** at the END of step (1) timer decay, after
+    decrementing `attackTimer`, `if (state === ATTACK && attackTimer <= 0) state = RUN` — the mirror
+    of the dodge's `if (dodgeTimer <= 0) state = RUN`. One reset site, deterministic.
+  - **Attacking does NOT cancel a buffered jump.** Jump resolution (step 3) is unchanged and runs
+    regardless of ATTACK — you can jump-cancel a swing's recovery (genre-standard mobility). The
+    swing's hitbox is independent of the body's vertical state, so a jumping swing is intentional.
+
+**26. Hit-stop dt boundary for the swing that CAUSED it (review BLOCKER — "freeze freezes its own swing")**
+- Problem: a hit-stop is requested from inside the overlap callback DURING a swing's active window;
+  on the next frame `gdt=0` freezes the very `attackTimer`/hitbox-release/enemy-hitstun timers that
+  the swing depends on. The boundary must be pinned (option a: split dt, or option b: freeze all).
+- Decision: **option (b) — EVERYTHING combat-gameplay freezes together on the gameplay dt.** The
+  hitbox release timer, `attackTimer`, `comboWindowTimer`, AND enemy hurt/hitstun timers ALL decay
+  by the SAME gameplay `gdt` (`= hitstopTimer>0 ? 0 : dt`). During a multi-frame hit-stop the live
+  hitbox stays put and its release is deferred — which is CORRECT and SAFE because the per-swing
+  `hitSet` (Decision 20) already recorded every enemy it hit, so a still-active frozen hitbox CANNOT
+  re-hit anyone (the filter rejects already-hit ids), and the victim's hit-iframe (also frozen) is
+  irrelevant while time is stopped. Only the **cosmetic** layer runs on REAL `dt`: sparks, floating
+  numbers, the player flash easing, and the hit-stop timer's OWN countdown (so the freeze lasts
+  exactly N real ms). This makes the "world freezes, impact pops" read, and guarantees the single
+  multi-frame freeze can't double-hit. (This is the Combat-phase analogue of Phase-1 BLOCKER #1's
+  dt-boundary pin, made equally explicit as the reviewer required.)
+
+**27. Pointer (left-click) attack edge + first-frame carry-over guard (review MAJOR)**
+- Problem: `pointer.isDown` is a HELD state, not an edge; and the click that pressed START on a menu
+  scene carries its held-down state across `scene.start('Game')`, so GameScene's first frame could
+  read `isDown` and fire a spurious attack.
+- Decision: Input tracks a private `_pointerWasDown` flag and computes the pointer edge as
+  `pointer.isDown && !_pointerWasDown` (a fresh up→down), updating `_pointerWasDown = pointer.isDown`
+  at the end of each `sample()`. The flag is **initialized from the CURRENT pointer state in the
+  Input constructor** (`_pointerWasDown = scene.input.activePointer.isDown`) so a START-click still
+  held on GameScene's first frame is seen as "already down" → no edge → no spurious first-frame
+  attack. `attackPressed` is then `JustDown(J) || pointerEdge`, computed once per frame alongside the
+  other JustDowns (still SOLE-owned here, review issue #5). Jump moves to Space-ONLY so J is free for
+  attack with no double-bind.
+
+**28. HitboxPool is PHASER-coupled → it lives in its OWN file, not pure `hitbox.js` (review MAJOR)**
+- Problem: a pool that creates Phaser rectangles + Arcade bodies is NOT headlessly importable, yet
+  the prior `hitbox.js` header claimed "PURE-of-render math + a thin Phaser-body POOL" — a
+  contradiction that would break `verify-gen.mjs`'s node-import convention if it ever touched the file.
+- Decision: **SPLIT the file.** `combat/hitbox.js` stays **100% PURE** (`SWINGS` table + `swingRect`)
+  and imports no Phaser — node-importable, unit-reasonable, safe for `verify-gen.mjs`. The
+  Phaser-coupled pool moves to a SEPARATE `combat/HitboxPool.js` (imports Phaser, owns the
+  rectangle+Arcade-body group). `damage.js` is likewise pure. The purity convention is then literally
+  true per-file: a `node` import of `hitbox.js` or `damage.js` succeeds; `HitboxPool.js` is
+  browser-only and `verify-gen.mjs` never imports it.
+
+**29. Enemy world-physics integration + pit safety (review MAJOR)**
+- Problem: the prior Enemy section never said the enemy collider is added to the world / collided vs
+  `solids`, never specified ledge-edge detection (Arcade gives no ground-ahead probe for free), and
+  never said what stops a chasing Brute from walking into the room's pit and falling out.
+- Decision:
+  - The enemy's `collider` body IS added to the Arcade world (`physics.add.existing`) with
+    `setCollideWorldBounds(true)`, and GameScene adds `physics.add.collider(enemy.collider, solids)`
+    so it stands on floors/ledges exactly like the player.
+  - **Patrol bounds are explicit world-x limits `[patrolMinX, patrolMaxX]` passed in the spec**, and
+    they are chosen to PRE-EXCLUDE the pit (the Brute spawns on the left floor span, bounds entirely
+    left of `GAP_X0`). Patrol turns at a bound. We ship the **bounds-clamp** form (no ground probe
+    needed because the bounds exclude the pit), and document the ground-ahead probe
+    (`scene.physics.overlapRect` a thin sensor just ahead+below the feet) as the generalization
+    Phase 4 will need for generated rooms.
+  - **Chase is ALSO clamped to the patrol bounds**: the Brute accelerates toward the player but its
+    target x is clamped to `[patrolMinX, patrolMaxX]` so it never walks off the span into the pit and
+    out of the room. This is the concrete fix for "what stops a chasing Brute from falling out".
+
+**30. Enemy attack hitbox shares the SAME pooled mechanism, with clear group ownership (review MAJOR)**
+- Decision: there are TWO `HitboxPool` instances, both Phaser-coupled (Decision 28): a
+  `playerHitboxes` pool (owner-tagged `'player'`) and an `enemyHitboxes` pool (owner-tagged by enemy
+  id). GameScene owns BOTH and wires TWO overlaps: `overlap(playerHitboxes.group, enemyHurtboxGroup, …)`
+  and `overlap(enemyHitboxes.group, player.collider, …)`. Each pool exposes its Arcade `group` for the
+  overlap registration. The enemy's hurtbox IS its `collider` body (added to an `enemyHurtboxGroup`);
+  the player's hurtbox IS its `collider` body. Contact damage is a SEPARATE
+  `overlap(player.collider, enemyHurtboxGroup, …)` on a short per-enemy cooldown (not a hitbox).
+
+**31. comboWindowTimer decays ONLY after recovery; reset site pinned (review MINOR)**
+- Decision: `comboWindowTimer` is SET at the moment a swing's `attackTimer` reaches 0 (swing end =
+  active+recovery done) — at that instant `state` returns to RUN (Decision 25) AND
+  `comboWindowTimer = SWINGS[comboIndex].comboWindow`. It then decays by `gdt` ONLY while `state ===
+  RUN && attackTimer <= 0` (i.e. only AFTER recovery, while you're free to move). When it hits 0 the
+  chain resets: `comboIndex = -1` (so the next `attack()` pre-increment lands on swing 0). During an
+  active swing (`attackTimer > 0`) the window does NOT decay. This makes AC20's "lapse resets to
+  swing 1" deterministic: the only place the index resets is the window-expiry branch in step (1).
+
+**32. Player hurt-knockback survives the per-frame vx write via a HURT lockout (review MINOR)**
+- Problem: `Player.update` writes `setVelocityX` every frame (dodge/run), so a knockback velocity set
+  in `onHit` is overwritten next frame and dies after one tick.
+- Decision: `onHit` sets a `hurtTimer` (knockback-lockout, ~the hit-iframe's first slice) and sets
+  the knockback velocity directly. While `hurtTimer > 0` the horizontal branch SKIPS run/dodge
+  integration (it leaves `vx` alone, letting the knockback carry, with gravity still on) — exactly
+  how DODGE overrides control. `hurtTimer` decays by `gdt`; when it expires, normal control resumes.
+  A dodge press (always allowed) can interrupt it. This mirrors the jump-consumption care the design
+  already took, applied to the player's own hit reaction. (Enemies use their own `hitstunTimer` for
+  the symmetric reason — their AI tick is frozen during hurt.)
 
 ---
 
@@ -605,7 +859,201 @@ are named constants in GameScene. Follow is clamped by the camera bounds set in 
 camera never shows outside the room.
 
 ### 6.2 Phase 2 — Procedural levels *(filled when Phase 2 is designed)*
-### 6.3 Phase 3 — Combat *(filled when Phase 3 is designed)*
+
+### 6.3 Phase 3 — Combat (THIS PHASE — built now, see the phase-order note in §3)
+
+**Goal.** Make the world *fight back* and give the player teeth. On top of the Phase-1 controller
+and the hand-made test room (§6.1), add: a **player melee** with a **2–3 hit light combo** via
+**transient pooled hitboxes**; a unified **damage pipeline** (hitbox vs hurtbox → damage,
+knockback, hitstun, hit-i-frames, **BACKSTAB** crit); **player HP** with damage i-frames + a flash
++ a placeholder death handoff; a **base `Enemy`** with an `idle/patrol/chase/attack/hurt/dead`
+**state machine** (telegraphed attack, contact damage, HP, knockback reaction, death-drop hook for
+Phase 4), with **one concrete enemy** wired live into the room; and a **pooled effects layer**
+(hit sparks, floating damage numbers, screen shake, **hit-stop**) for game feel. Everything is
+framerate-independent off the existing `dt` boundary and allocation-free per hit after warm-up.
+
+**Reuse of the established foundation (no re-architecture):**
+- The Player already exposes `body`, `collider` (body owner), `rect` (visual), `frontMarker`,
+  `facing`, `state` (`RUN|DODGE`), and `isInvulnerable()` (dodge i-frames). Combat ADDS to this,
+  it does not rewrite it: a new `ATTACK` state peer, HP fields, a `hurtIframeTimer`, an `onHit`,
+  and an `attack(...)`/combo tick. Dodge i-frames keep meaning "can't be hit".
+- GameScene already owns the **dt boundary** (`delta/1000`, clamped `MAX_DT`) and samples Input
+  once/frame (BLOCKER #1). Combat hooks into THAT same tick: it scales the gameplay-dt for
+  hit-stop (Decision 24) and ticks enemies + effects with the same clamped `dt`.
+- Colliders/overlaps target the **collider** body (never the squash-scaled visual) — same rule as
+  Phase 1's one-way `processCallback` (review issue #6).
+
+**New / changed modules this phase** (only what Combat needs — YAGNI):
+
+```
+src/combat/hitbox.js   — NEW, **100% PURE** (no Phaser import; Decision 28). Headlessly importable.
+                         · SWINGS table: per-swing tuning (reach, halfHeight, damage, knockback,
+                           active, recovery, comboWindow, lunge) for the 2–3 hit light combo.
+                         · swingRect(attacker, swing) → {x,y,w,h}: the world AABB of swing N placed
+                           in front of `attacker` by its `facing` (PURE — no Phaser; testable).
+src/combat/HitboxPool.js — NEW, Phaser-COUPLED (Decision 28 — split OUT of hitbox.js so the pure
+                         file stays node-importable). A fixed set of invisible rectangle+Arcade
+                         bodies in an overlap `group`; acquire() positions+enables one for a swing's
+                         active window carrying { ownerId, swing, hitSet:Set, releaseTimer },
+                         release() disables it back. tick(gdt) decays releaseTimers on the GAMEPLAY
+                         dt (Decision 26). ZERO per-hit allocation after construction (Decision 16/20).
+src/combat/damage.js   — NEW, PURE (no Phaser). resolveHit(attacker, victim, swing, opts) →
+                         { damage, knockbackX, knockbackY, isBackstab }. Owns the backstab predicate
+                         (Decision 19) + crit multiplier + knockback direction (away from attacker).
+                         Unit-testable; reused by player→enemy AND enemy→player (Decision 17).
+src/effects/ParticlePool.js — NEW. Fixed pool of reusable spark rectangles (+ a pooled set of
+                         floating damage-number Text objects). spawnSparks(x,y,opts) /
+                         spawnNumber(x,y,value,opts); each active item eases (move+fade) off dt and
+                         auto-returns to the pool. No allocation per hit after warm-up (convention).
+src/effects/Effects.js — NEW. The juice FAÇADE over ParticlePool + the camera: hit(x,y,opts) fires
+                         sparks + a number + camera.shake + requests hit-stop; tick(dt) advances the
+                         pools. Single call site per impact (Decision 23). Owns shake/hitstop params.
+src/entities/Enemy.js  — NEW. Base enemy: a plain class (Decision 10 shape) holding collider+visual,
+                         hp/maxHp, a string-enum FSM (idle/patrol/chase/attack/hurt/dead, Decision 22)
+                         ticked by the scene with a ctx {player, dt, effects}. Telegraphed melee +
+                         contact damage; onHit(result) → hurt(knockback+hitstun); die() → death pop +
+                         a dropCells() HOOK (no-op number now; Phase 4 spawns pickups). Configurable
+                         via a spec object; ships ONE concrete config (a "Brute" melee grunt).
+src/entities/Player.js — EXTEND (not rewrite). Add: hp/maxHp, hurtIframeTimer, knockback support, an
+                         ATTACK state + comboIndex/comboWindowTimer/attackTimer, attack() that spawns
+                         a swing hitbox from the pool, onHit(result) (flash + damage iframe + knockback
+                         + death edge), and an isHittable() (false while dodge-iframes OR hurt-iframes).
+                         Movement is reduced (not frozen) during ATTACK. Death fires a scene callback.
+src/core/Input.js      — EXTEND. Add attackPressed (edge) bound to J + left-click; KEEP jump on
+                         Space (jump moves OFF J to avoid the J double-bind). dodge stays Shift/K.
+                         JustDown stays SOLE-owned here (review issue #5); pointer down read once too.
+src/scenes/GameScene.js— EXTEND. Build the combat groups (player-hitbox pool overlap vs enemy
+                         hurtboxes; enemy-attack/contact vs player), spawn ≥1 Enemy into the room,
+                         construct Effects, route overlaps → resolveHit → onHit + effects.hit, apply
+                         the hit-stop dt scale in update(), wire player-death → placeholder transition.
+src/scenes/HUDScene.js — EXTEND. Read player HP from the scene registry / an event and draw a HP bar
+                         (+ a combo/cells readout placeholder). Stays decoupled (Decision 2).
+src/config/constants.js— (maybe extend) only truly cross-site combat constants (e.g. a shared
+                         KNOCKBACK feel scalar) land here; per-entity tuning stays co-located in its
+                         owner (Player swing table, Enemy spec) — DRY, not a config dumping ground.
+```
+
+**dt / framerate (unchanged contract).** Every new timer (combo window, attack active/recovery,
+hurt i-frames, enemy telegraph/patrol/attack timers, spark/number life, hit-stop) is in **SECONDS**
+and decays by the same clamped `dt` GameScene already produces. Eases use `1−exp(−k·dt)`. No
+`setTimeout`/`setInterval` anywhere in the gameplay loop (Decision 24).
+
+**Hit pipeline (the spine of the phase).** One direction shown; the reverse (enemy→player) reuses
+the same pieces:
+1. Player presses attack → `Player.attack()`: if not in `DODGE` and `attackTimer<=0`, advance
+   `comboIndex` (or start at 0 if the combo window lapsed), enter `ATTACK`, set `attackTimer =
+   active+recovery`, and **acquire a hitbox from the pool** for `SWINGS[comboIndex]`, placed via
+   `swingRect(player, swing)` in front of `player.facing`, tagged `{ownerId:'player', swing,
+   hitSet:new Set()}`, enabled for the swing's `active` window then released.
+2. Arcade `overlap(playerHitboxGroup, enemyHurtboxGroup, onOverlap, processFilter)` fires while the
+   hitbox is active. `processFilter` returns false if `hitbox.hitSet.has(enemy.id)` (per-swing dedup,
+   Decision 20) **or** the enemy is `dead`/not `isHittable()`.
+3. `onOverlap(hitbox, enemyHurtbox)` → `result = resolveHit(player, enemy, hitbox.swing)`
+   (`damage.js`, pure). Add `enemy.id` to `hitbox.hitSet`. Call `enemy.onHit(result)` (subtract HP,
+   knockback via `body.setVelocity`, set hitstun, arm enemy hit-iframe, → `hurt` state; if HP≤0 →
+   `die()`/drop hook). Call `effects.hit(enemy.x, enemy.y, {damage, isBackstab})` (sparks + number +
+   shake + hit-stop request).
+4. Enemy→player is the mirror: the enemy's **attack strike** (or **contact**) overlaps the player
+   hurtbox; gated by `player.isHittable()` (false during dodge-iframes OR hurt-iframes); resolves
+   through the SAME `resolveHit` + `player.onHit` (flash, damage-iframe, knockback, death edge).
+   Enemy attacks get crit OFF by config (Decision 19) for fairness; contact damage is a flat tick on
+   a short internal cooldown so standing in an enemy doesn't shred HP every frame.
+
+**Player additions (in `Player.js`).**
+- **State:** add `ATTACK` (and `HURT` lockout, Decision 32) to the enum. Precedence:
+  `DODGE` > `ATTACK` > `RUN`; `HURT` is a brief knockback-lockout overlaid on whichever state you
+  were in. You cannot attack mid-dodge; a dodge press still works during attack recovery (defensive
+  option always available — Decision 25 relaxes the dodge-start guard to `state !== DODGE`).
+- **Combo (Decision 31):** `comboIndex` (which swing, `-1` = chain reset), `comboWindowTimer` (decays
+  ONLY while `RUN && attackTimer<=0`; when it hits 0 → `comboIndex = -1`), `attackTimer` (active+
+  recovery lock; next `attack()` allowed only at ≤0). When `attackTimer` reaches 0 the swing ends:
+  `state → RUN` and `comboWindowTimer = SWINGS[comboIndex].comboWindow` so a follow-up press chains;
+  if the window lapses first the chain resets. Movement during ATTACK: `vx` integrates but with
+  accel/top-speed scaled by `ATTACK_MOVE_SCALE` (committed but mobile); a small forward "lunge" nudge
+  on the heavier finisher (applied once at `attack()` time).
+- **`update` integration (Decision 25 — the exact control-flow edits):** step (1) timers now ALSO
+  decay `attackTimer`/`comboWindowTimer`/`hurtTimer` and run the symmetric ATTACK→RUN exit; the
+  dodge-start guard is `state !== DODGE` (and a dodge cancels an in-progress attack); NEW step (1.5)
+  fires the buffered `attack()` edge; step (2) horizontal branch is `DODGE→dash · HURT→leave vx
+  (knockback carries) · ATTACK→scaled run · else→run`; steps (3)-(6) unchanged (jump is NOT cancelled
+  by attacking).
+- **HP / reaction (Decisions 32):** `hp`, `maxHp`, `hurtIframeTimer`, `hurtTimer`. `isHittable()` ⇔
+  `!isInvulnerable() && hurtIframeTimer<=0`. `onHit(result)`: if not hittable, ignore; else subtract
+  HP, set knockback velocity directly + arm `hurtTimer` (the lockout that lets it survive the
+  per-frame vx write), arm `hurtIframeTimer`, kick a **flash** (reuse the existing tint path — flash
+  red while hurt-iframed, distinct from the dodge yellow), and if `hp<=0` fire the death edge
+  **once** (guard with a `dead` flag) via a scene callback. Emit HP to the registry/event for the HUD
+  each change.
+- **Visuals:** a brief swing telegraph — flash the existing `frontMarker` to the swing reach + a
+  color pop for the swing's active window (primitives only; the hitbox body itself stays invisible).
+
+**Enemy (`entities/Enemy.js`) — the FSM (Decision 22).** Plain class, same shape as Player: an
+invisible `collider` (Arcade body, the hurtbox/contact source) + a visible `rect` + a `frontMarker`,
+`hp/maxHp`, `facing`, `id`, and `state`. Built from a **spec** (`{maxHp, speed, detectRange,
+attackRange, telegraph, attackActive, attackRecovery, contactDamage, swing, color, patrol}`); ships
+ONE concrete spec, a melee **Brute**. `update(dt, ctx)` runs a `switch(state)`:
+- **idle** → after a beat, → `patrol`.
+- **patrol** — walk between patrol bounds (or until a wall/ledge edge); if the player is within
+  `detectRange` (and roughly same height), → `chase`.
+- **chase** — accelerate toward the player (capped); face the player; if within `attackRange` and
+  off attack-cooldown → `attack`; if the player escapes detect range for a grace period → `patrol`.
+- **attack** — a **telegraph** sub-phase first (freeze, color-shift wind-up for `telegraph` seconds
+  — readable + dodgeable), then a **strike** that enables a transient attack-hitbox (pooled, same
+  mechanism) for `attackActive`, then `attackRecovery`, then → `chase`. Contact damage is separate
+  (always-on while touching, on its own cooldown).
+- **hurt** — entered by `onHit(result)`: apply knockback + a `hitstunTimer`; movement/AI frozen
+  until it expires, then → `chase` (re-aggro). Interrupts a telegraph/strike (cancels the pending
+  hitbox) — so a well-timed hit beats the enemy's attack.
+- **dead** — at `hp<=0`: disable bodies, play a short death pop (scale + fade via the effects/own
+  tween), call `dropCells()` (HOOK: logs/no-ops the count now; Phase 4 spawns Cell pickups), then
+  remove from the scene's enemy list. Guarded so it runs once.
+`onHit(result)` is the SAME entry the player uses (DRY): subtract HP, arm a short enemy hit-iframe
+(so one swing's dedup + the iframe both protect against re-hit), knockback, → `hurt` or `dead`.
+
+**Effects (`effects/Effects.js` + `effects/ParticlePool.js`) — pooled juice (Decision 23).**
+- `ParticlePool`: pre-creates `N` small spark rectangles (alpha 0, disabled) and `M` floating
+  damage-number `Text` objects. `spawnSparks(x,y,{count,color,speed})` acquires sparks, gives each a
+  random velocity + life; `spawnNumber(x,y,value,{color})` acquires a number that floats up + fades.
+  `tick(dt)` advances every active item (move by `v·dt`, fade, shrink) and **returns** it to the pool
+  at end-of-life. A high-water pool sized for worst-case on-screen hits; if exhausted, the oldest is
+  recycled (never allocates mid-combat).
+- `Effects` (façade): holds a `ParticlePool` + the `camera`. `hit(x,y,{damage,isBackstab})`:
+  `spawnSparks` (more + crit-color on backstab), `spawnNumber(value)` (crit-color + bigger on
+  backstab), `camera.shake(durMs, intensity)` (scaled to `damage`/crit), and `requestHitstop(secs)`
+  (scaled, crit→longer). `tick(dt)` forwards to the pool. The scene owns ONE `Effects`.
+
+**Hit-stop (Decision 24).** GameScene holds `hitstopTimer` (seconds, REAL time). `effects.hit`
+sets it (capped, no stacking). In `update(time, delta)`: compute the real `dt = min(delta/1000,
+MAX_DT)`; decay `hitstopTimer` by real `dt`; the **gameplay dt** handed to Player/Enemies/Effects is
+`hitstopTimer>0 ? 0 : dt` (a hard micro-freeze) — or a small scaled value if we want a "slow" rather
+than "stop" (start with hard stop; one constant flips it). Sparks/numbers can keep ticking on real
+`dt` so the freeze reads as the *world* pausing while the impact "pops" (tunable). Input is still
+sampled once on real `dt` so buffered presses aren't lost during the freeze.
+
+**GameScene wiring (extend §6.1, no room-geometry change).**
+- Construct `this.effects = new Effects(this)`; build the player-hitbox `HitboxPool` and the enemy
+  groups (enemy hurtbox group, enemy-attack hitbox pool). Spawn ≥1 `Enemy` (Brute) on a floor span /
+  ledge with patrol bounds; keep an `this.enemies` array.
+- Overlaps (all on collider bodies): `overlap(playerHitboxes, enemyHurtboxes, onPlayerHitEnemy,
+  dedupFilter)`; `overlap(enemyAttackHitboxes, playerHurtbox, onEnemyHitPlayer, hittableFilter)`;
+  and an enemy **contact** overlap (player vs enemy bodies) on a damage cooldown.
+- `update(time, delta)`: real `dt`; decay hit-stop; `gdt = hitstopTimer>0 ? 0 : dt`; sample Input
+  once; `player.update(gdt, input)`; `for (e of enemies) e.update(gdt, {player, effects})`;
+  `effects.tick(dt)`; emit HP to HUD; release expired hitboxes.
+- **Player death edge:** `player.onDeath = () => { /* placeholder */ }` — a short freeze + flash,
+  then `this.scene.start('Title')` (placeholder per AC26; real GameOver is a later phase). Guard so
+  it fires exactly once (the Player's `dead` flag + a scene `gameOver` flag).
+- HUD: push `hp/maxHp` (+ combo, cells-placeholder) via `registry.set` / an event each change;
+  HUDScene draws a HP bar reading it (Decision 2 keeps them decoupled).
+
+**Why this is the minimum that satisfies the ACs without over-reaching (YAGNI):** no ranged weapon
+yet (the task scopes Phase-3 to MELEE + the combo; ranged/projectile pooling is naturally a later
+weapon-variety pass — the `HitboxPool` already proves the pooling pattern it would reuse); no
+loot/affixes; one enemy type (the base class is built to be configured, but only one spec ships);
+Cells drop is a HOOK (Phase 4 owns pickups + the economy); death is a placeholder edge (Phase 4/later
+owns real GameOver + permadeath). Each deferral is a clean seam, not a stub that needs rewriting.
+
+
 ### 6.4 Phase 4 — Enemies *(filled when Phase 4 is designed)*
 ### 6.5 Phase 5 — Run economy + biome flow *(filled when Phase 5 is designed)*
 ### 6.6 Phase 6 — Bosses *(filled when Phase 6 is designed)*
@@ -672,7 +1120,42 @@ camera never shows outside the room.
 - `src/config/constants.js` — unchanged in value (still owns `GRAVITY`/`DESIGN_*`); per-entity
   feel constants are co-located in `Player.js` (owned by one consumer → DRY, not a config leak).
 
-**Phases 2–7:** files listed in each phase's `Design` section when it is implemented.
+**Phase 3 — Combat (this phase; §6.3 — built before §6.2 per the phase-order note):**
+
+- `src/combat/hitbox.js` — NEW. **100% PURE** swing geometry (`SWINGS` table +
+  `swingRect(attacker, swing)`); no Phaser import → node-importable by `verify-gen.mjs` (Decision 28).
+- `src/combat/HitboxPool.js` — NEW. Phaser-COUPLED pool of reusable invisible rectangle+Arcade bodies
+  in an overlap `group` (acquire/release, per-swing `hitSet` dedup, `releaseTimer` decayed on the
+  GAMEPLAY dt per Decision 26). Split OUT of `hitbox.js` so the pure file stays headless (Decision 28).
+  Zero per-hit allocation after warm-up (Decisions 16/20).
+- `src/combat/damage.js` — NEW. PURE (no Phaser) `resolveHit(attacker, victim, swing, opts)` →
+  `{damage, knockbackX, knockbackY, isBackstab}`; owns the backstab predicate + crit multiplier +
+  knockback direction (Decisions 17/19). Reused both attack directions; unit-reasonable.
+- `src/effects/ParticlePool.js` — NEW. Fixed pool of spark rectangles + floating damage-number
+  Texts; `spawnSparks`/`spawnNumber`/`tick(dt)`; eases off `dt`, auto-returns to pool (Decision 23).
+- `src/effects/Effects.js` — NEW. Juice façade: `hit(x,y,opts)` → sparks + number + `camera.shake` +
+  hit-stop request; `tick(dt)` advances pools. One instance owned by GameScene (Decision 23).
+- `src/entities/Enemy.js` — NEW. Base enemy: collider+visual+frontMarker, hp/maxHp, string-enum FSM
+  `idle/patrol/chase/attack/hurt/dead` (Decision 22) with telegraphed melee + contact damage,
+  `onHit(result)` (shared `damage.js` reaction), `die()` + `dropCells()` HOOK (Phase 4). Built from a
+  spec; ships ONE concrete config (Brute). Ticked by the scene with `{player, effects}` + `dt`.
+- `src/entities/Player.js` — EXTEND. Add `ATTACK` state, `comboIndex/comboWindowTimer/attackTimer`,
+  `attack()` (pooled swing hitbox), `hp/maxHp/hurtIframeTimer`, `isHittable()`, `onHit(result)`
+  (flash + damage-iframe + knockback + death edge), HUD HP emit. Movement reduced (not frozen) in
+  ATTACK. Dodge-iframes (Phase 1) unchanged; death fires a scene callback once.
+- `src/core/Input.js` — EXTEND. Add `attackPressed` (edge: J + left-click); move JUMP to Space-only
+  to free J for attack; dodge stays Shift/K. JustDown/pointer read once, still SOLE-owned (issue #5).
+- `src/scenes/GameScene.js` — EXTEND. Build combat groups + overlaps (player-hitbox vs enemy-hurtbox
+  with per-swing dedup filter; enemy-attack/contact vs player with `isHittable` filter), spawn ≥1
+  Enemy, construct `Effects`, apply the **hit-stop dt scale** in `update()` (gameplay `dt`→0 while
+  frozen, real `dt` for FX), route overlaps → `resolveHit` → `onHit` + `effects.hit`, wire
+  player-death → placeholder Title transition (guarded once). Room geometry unchanged.
+- `src/scenes/HUDScene.js` — EXTEND. Draw a player HP bar (+ combo/cells placeholder) from the
+  registry/event; stays decoupled from gameplay (Decision 2).
+- `src/config/constants.js` — POSSIBLY extend with a shared knockback feel scalar only; per-entity
+  combat tuning stays co-located in its owner (Player swing table / Enemy spec) — DRY.
+
+**Phases 2, 4–7:** files listed in each phase's `Design` section when it is implemented.
 
 ---
 
@@ -714,4 +1197,33 @@ camera never shows outside the room.
    it flattens — direction + state read clearly. `npm run build` still exits 0; `npm run verify`
    still passes (Phase 1 adds no generator, so the determinism check is unchanged).
 
-**Phases 2–7:** verification steps appended per phase when implemented.
+**Phase 3 — Combat (this phase; §6.3):** `npm run dev`, Start → GameScene, then by observation
+(plus the headless determinism check still passing):
+
+1. [AC20] Press J (or left-click): the player swings; pressing again within the window chains
+   swing 1 → 2 → finisher (2–3 hits), each visibly distinct; letting the window lapse resets to
+   swing 1. You cannot spam infinite hits in one frame (per-swing active+recovery lock).
+2. [AC21] A swing that overlaps the enemy deals damage ONCE per swing (no multi-hit from one
+   swing); the enemy is knocked back, briefly stunned (hitstun), and flashes its hit i-frame.
+3. [AC22] Hit the enemy **from behind** (flank / dodge through it): the damage number + spark are
+   crit-colored and the damage/knockback are clearly larger than a frontal hit (BACKSTAB).
+4. [AC23] Let the enemy hit you (contact or its telegraphed strike): HP on the HUD drops, the
+   player flashes + is knocked back, and is briefly invulnerable (no second hit during the window).
+   **Dodge through** the enemy's strike → no damage taken (dodge i-frames negate it).
+5. [AC24] The enemy patrols, **detects + chases** when you approach, **telegraphs** (a readable
+   wind-up) then strikes in range, **reacts** to your hits (knockback interrupts its action), and
+   **dies** at 0 HP (death pop); the `dropCells()` hook fires (logged) — Phase 4 spawns pickups.
+6. [AC25] Every damaging hit shows hit **sparks**, a floating **damage number**, a short screen
+   **shake**, and a brief **hit-stop** (the world freezes a few ms on impact). Throttle FPS in
+   devtools — the feel/timing is unchanged (framerate-independent); sustained combat shows no GC
+   stutter (pooled, no per-hit allocation).
+7. [AC26] Reduce player HP to 0 (let the enemy hit you repeatedly): the death edge fires EXACTLY
+   ONCE (a short freeze/flash) → returns to Title (placeholder). No double-fire, no soft-lock.
+8. Regression: `npm run build` still exits 0; `npm run verify` still passes. The determinism pin is
+   unchanged (Combat adds no generator), and `verify-gen.mjs` ALSO now imports `combat/hitbox.js` +
+   `combat/damage.js` under plain node — which PROVES they are headlessly importable (Decision 28:
+   a Phaser-coupled module would throw on import) — and pins `swingRect`'s in-front geometry + the
+   backstab predicate (crit ON/OFF, away-knockback) so a regression in the pure combat math fails
+   loudly in CI.
+
+**Phases 2, 4–7:** verification steps appended per phase when implemented.

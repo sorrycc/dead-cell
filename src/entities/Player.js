@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
+import { SWINGS, COMBO_LEN } from '../combat/hitbox.js'
 
-// ── Player controller (design §6.1, Decisions 10/11/12/13/14, AC11–AC18) ──
+// ── Player controller (design §6.1 + §6.3, Decisions 10/11/12/13/14 + 18/25/31/32, AC11–AC18 + AC20/AC23) ──
 // A plain class (Decision 10) that HOLDS a Phaser.GameObjects.Rectangle + its Arcade body
 // and owns ALL feel constants + the tiny RUN|DODGE state machine. GameScene news it up and
 // ticks it each frame — same shape as crowd-runner's plain entities (Crowd/Obstacle) the
@@ -77,16 +78,28 @@ const JUMP_STRETCH_Y = 1.28 // scaleY on jump-launch (tall + thin reads "up").
 const LAND_SQUASH_Y = 0.7 // scaleY impulse on landing (short + wide reads "impact").
 const DODGE_SQUASH_Y = 0.6 // scaleY while dodging (flat + long reads "roll").
 const BASE_COLOR = 0x58d68d // resting fill (green).
-const IFRAME_COLOR = 0xf4d03f // tint while invulnerable (yellow flash).
+const IFRAME_COLOR = 0xf4d03f // tint while invulnerable (dodge — yellow flash).
+const HURT_COLOR = 0xe74c3c // tint while hurt-iframed (red flash — distinct from dodge yellow).
+const ATTACK_COLOR = 0xaed6f1 // brief swing color pop (light blue) so the swing reads.
 
-// Tiny state enum: DODGE is the ONLY state that overrides horizontal control. Everything
-// else (idle / running / airborne) is the RUN state simply reading the body each frame.
-const STATE = { RUN: 'run', DODGE: 'dodge' }
+// ── Combat (design §6.3, Decisions 18/25/31/32, AC20/AC23) ──
+const MAX_HP = 100 // player hit points (shown on the HUD).
+const ATTACK_MOVE_SCALE = 0.45 // accel + top-speed scale while attacking (committed but mobile).
+const HURT_KNOCKBACK_LOCKOUT = 0.16 // s — how long onHit's knockback overrides control (Decision 32).
+const HURT_IFRAME = 0.6 // s — invulnerability after taking a hit (no second hit during it, AC23).
+
+// Tiny state enum: DODGE and ATTACK override normal horizontal control; HURT is a brief knockback
+// lockout overlaid on whichever state you were in. RUN is the default (idle / running / airborne is
+// just RUN reading the body each frame). Precedence (Decision 25): DODGE > ATTACK > RUN.
+const STATE = { RUN: 'run', DODGE: 'dodge', ATTACK: 'attack' }
 
 export class Player {
-  // scene: the GameScene; (x, y): spawn position in world coords.
-  constructor(scene, x, y) {
+  // scene: the GameScene; (x, y): spawn position in world coords. hitboxPool: a HitboxPool tagged
+  // 'player' whose acquire() the attack swings draw from (Combat phase; null in a Phase-1 context).
+  constructor(scene, x, y, hitboxPool = null) {
     this.scene = scene
+    this.hitboxPool = hitboxPool
+    this.id = 'player' // stable id for the per-swing hitSet dedup + ownerId tag (Decision 20).
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
     // `collider` owns the Arcade body and is INVISIBLE (alpha 0). Arcade owns its position;
@@ -115,6 +128,21 @@ export class Player {
     this.iframeTimer = 0 // > 0 while invulnerable (subset of the dodge).
     this.dodgeCooldownTimer = 0 // > 0 while dodge is gated.
 
+    // ── Combat state (design §6.3, Decisions 18/31/32) ──
+    this.hp = MAX_HP
+    this.maxHp = MAX_HP
+    this.dead = false // death edge guard (fires the scene callback exactly once, AC26).
+    this.onDeath = null // scene-supplied callback fired once when hp reaches 0.
+    // Combo: comboIndex is which swing (−1 = chain reset; next attack() pre-increments to 0).
+    this.comboIndex = -1
+    this.comboWindowTimer = 0 // decays ONLY while RUN && attackTimer<=0; 0 → chain resets (Decision 31).
+    this.attackTimer = 0 // active+recovery lock; next attack() allowed only at ≤0.
+    this.attackColorTimer = 0 // > 0 while the swing color pop shows (cosmetic, on the visual).
+    // Hurt reaction (Decision 32): hurtTimer is the knockback lockout; hurtIframeTimer the i-frame.
+    this.hurtTimer = 0 // > 0 while knockback overrides control (so it survives the vx write).
+    this.hurtIframeTimer = 0 // > 0 while invulnerable after a hit.
+    this._pendingAttack = false // set by attack() (scene calls it on the edge); consumed in update.
+
     // Squash/stretch easing target. We track a current scaleY that eases toward 1 and is
     // KICKED by jump/land/dodge events; scaleX is derived to preserve apparent volume.
     this.scaleY = 1
@@ -125,17 +153,58 @@ export class Player {
     this.frontMarker = scene.add.rectangle(x, y, 6, BODY_H * 0.5, 0x2c3e50)
   }
 
-  // Public for Phase 3 combat (Decision 14): true during the dodge i-frame window.
+  // Public for combat (Decision 14): true during the DODGE i-frame window.
   isInvulnerable() {
     return this.iframeTimer > 0
   }
 
-  // ── Per-frame tick. `dt` is SECONDS (GameScene converts delta/1000 + clamps MAX_DT). ──
-  // Update order (design §6.1): (1) timers, (2) horizontal control (dodge override OR
-  // run accel/friction), (3) resolve jump (buffer ∧ (grounded ∨ coyote) → launch;
-  // release-cut), (4) fall-gravity juice + (Y cap is on the body), (5) facing, (6) visuals.
-  // Arcade has ALREADY run the physics step + collisions before this, so body.blocked.* and
-  // body.velocity are fresh.
+  // ── Combat: can an incoming hit land? (design §6.3, Decisions 21/32, AC23) ──
+  // False while EITHER the dodge i-frames (dodge-through is safe) OR the post-hit hurt i-frames are
+  // active — incoming damage is blocked if either is true.
+  isHittable() {
+    return !this.dead && !this.isInvulnerable() && this.hurtIframeTimer <= 0
+  }
+
+  // ── Request an attack (the scene calls this on the attack edge). ──
+  // It only LATCHES intent (`_pendingAttack`); update() resolves it in step (1.5) so the control-
+  // flow order is deterministic (dodge-start can pre-empt it that same frame — Decision 25). We do
+  // NOT spawn the hitbox here so a hit-stop's frozen frame can't double-fire it.
+  attack() {
+    this._pendingAttack = true
+  }
+
+  // ── Take a hit (design §6.3, Decisions 21/32, AC23). `result` from combat/damage.js resolveHit. ──
+  // Ignored if not hittable (dodge/hurt i-frames). Otherwise: subtract HP, set the knockback velocity
+  // directly AND arm `hurtTimer` (the lockout that lets the knockback survive update()'s per-frame vx
+  // write — Decision 32), arm the hurt i-frame, flash red, and fire the death edge ONCE at hp≤0.
+  onHit(result) {
+    if (!this.isHittable()) return
+    this.hp = Math.max(0, this.hp - result.damage)
+    this.body.setVelocity(result.knockbackX, result.knockbackY)
+    this.hurtTimer = HURT_KNOCKBACK_LOCKOUT
+    this.hurtIframeTimer = HURT_IFRAME
+    // Getting hit cancels an in-progress attack (interrupt) — release the live swing + clear timers.
+    if (this.state === STATE.ATTACK) {
+      if (this.hitboxPool) this.hitboxPool.releaseAll()
+      this.state = STATE.RUN
+      this.attackTimer = 0
+    }
+    this._kickScaleY(0.7) // a quick squash on impact.
+    if (this.hp <= 0 && !this.dead) {
+      this.dead = true
+      if (this.onDeath) this.onDeath() // scene fires the placeholder death handoff (AC26).
+    }
+  }
+
+  // ── Per-frame tick. `dt` is the GAMEPLAY dt in SECONDS (GameScene converts delta/1000, clamps
+  // MAX_DT, and drives it to 0 during a hit-stop — Decisions 24/26, so combo/attack/hurt timers
+  // freeze with the world). ──
+  // Update order (design §6.1 + §6.3 Decision 25): (1) timers + combat-timer decay + ATTACK→RUN
+  // exit + combo-window decay/reset, dodge-start edge (cancels a live attack); (1.5) resolve the
+  // pending attack() edge (start a swing if allowed); (2) horizontal control
+  // (DODGE dash · HURT knockback-carry · ATTACK scaled-run · RUN); (3) resolve jump (NOT cancelled
+  // by attacking); (4) fall-gravity juice; (5) facing; (6) visuals. Arcade has ALREADY run the
+  // physics step + collisions, so body.blocked.* / body.velocity are fresh.
   update(dt, input) {
     const body = this.body
     const onFloor = body.blocked.down || body.touching.down
@@ -156,15 +225,47 @@ export class Player {
     this.dodgeTimer = Math.max(0, this.dodgeTimer - dt)
     this.iframeTimer = Math.max(0, this.iframeTimer - dt)
     this.dodgeCooldownTimer = Math.max(0, this.dodgeCooldownTimer - dt)
+    // Hurt-reaction timers (Decision 32): the knockback lockout + the post-hit i-frame.
+    this.hurtTimer = Math.max(0, this.hurtTimer - dt)
+    this.hurtIframeTimer = Math.max(0, this.hurtIframeTimer - dt)
+    this.attackColorTimer = Math.max(0, this.attackColorTimer - dt)
 
-    // ── Dodge START (edge) ── can begin from RUN when off cooldown. Direction = held moveX
-    // if any, else current facing (roll the way you point). Gravity stays on during the roll
-    // so you can dodge off ledges (Decision 14).
+    // ── Attack lock + SYMMETRIC ATTACK→RUN exit (Decision 25). Decrement the active+recovery lock;
+    // when a swing ends, return to RUN and OPEN the combo window so a follow-up press chains
+    // (Decision 31 — the window is set HERE, at swing end). ──
+    if (this.attackTimer > 0) {
+      this.attackTimer = Math.max(0, this.attackTimer - dt)
+      if (this.attackTimer <= 0 && this.state === STATE.ATTACK) {
+        this.state = STATE.RUN
+        this.comboWindowTimer = SWINGS[this.comboIndex].comboWindow
+        // A swing whose comboWindow is 0 (the FINISHER) ends the chain immediately: reset the index
+        // now so there is no lingering state (Decision 31). Non-zero windows decay below instead.
+        if (this.comboWindowTimer <= 0) this.comboIndex = -1
+      }
+    }
+    // ── Combo window (Decision 31) — decays ONLY after recovery (RUN && attackTimer<=0); when it
+    // lapses the chain resets so the next attack() starts at swing 0. During an active swing it does
+    // NOT decay. This (+ the finisher reset above) is the ONLY place comboIndex resets → AC20's
+    // "lapse resets to swing 1" is deterministic. ──
+    if (this.state === STATE.RUN && this.attackTimer <= 0 && this.comboWindowTimer > 0) {
+      this.comboWindowTimer = Math.max(0, this.comboWindowTimer - dt)
+      if (this.comboWindowTimer <= 0) this.comboIndex = -1
+    }
+
+    // ── Dodge START (edge) ── relaxed guard `state !== DODGE` (Decision 25) so a dodge is honored
+    // DURING attack recovery (defensive option always available; precedence DODGE > ATTACK > RUN).
+    // Starting a dodge CANCELS any in-progress attack (release the live hitbox, clear timers) so the
+    // two states never overlap. Direction = held moveX if any, else facing (roll the way you point).
     if (
       input.dodgePressed &&
-      this.state === STATE.RUN &&
+      this.state !== STATE.DODGE &&
       this.dodgeCooldownTimer <= 0
     ) {
+      if (this.state === STATE.ATTACK) {
+        if (this.hitboxPool) this.hitboxPool.releaseAll()
+        this.attackTimer = 0
+        this.comboWindowTimer = 0
+      }
       this.state = STATE.DODGE
       this.facing = input.moveX !== 0 ? Math.sign(input.moveX) : this.facing
       this.dodgeTimer = DODGE_DURATION
@@ -173,19 +274,32 @@ export class Player {
       this._kickScaleY(DODGE_SQUASH_Y)
     }
 
+    // ── (1.5) Resolve the pending attack() edge (Decision 25). Fires only if NOT dodging (a
+    // dodge-start above pre-empts it this frame) and the active+recovery lock is clear. ──
+    if (this._pendingAttack) {
+      this._pendingAttack = false
+      if (this.state !== STATE.DODGE && this.attackTimer <= 0) this._startSwing()
+    }
+
     // ── (2) Horizontal control ──
     if (this.state === STATE.DODGE) {
       // Override normal control: HOLD the dash speed, ignore moveX. Exit when the timer ends.
       body.setVelocityX(this.facing * DODGE_SPEED)
       if (this.dodgeTimer <= 0) this.state = STATE.RUN
+    } else if (this.hurtTimer > 0) {
+      // HURT lockout (Decision 32): leave vx ALONE so onHit's knockback carries (the per-frame vx
+      // write would otherwise overwrite it after one frame). Gravity still applies. Mirrors DODGE.
+      // (No setVelocityX call here — the body keeps the knockback velocity.)
     } else {
-      // RUN: integrate vx toward the target by accel, or decay toward 0 by friction. Ground
-      // vs. air picks the accel/friction pair (weaker air control = weighty jumps).
-      const accel = onFloor ? RUN_ACCEL : AIR_ACCEL
+      // RUN (or ATTACK with reduced mobility): integrate vx toward the target by accel, or decay
+      // toward 0 by friction. ATTACK scales accel + top-speed (committed but mobile, Decision 18).
+      const moveScale = this.state === STATE.ATTACK ? ATTACK_MOVE_SCALE : 1
+      const accel = (onFloor ? RUN_ACCEL : AIR_ACCEL) * moveScale
       const friction = onFloor ? RUN_FRICTION : AIR_FRICTION
+      const topSpeed = RUN_SPEED * moveScale
       let vx = body.velocity.x
       if (input.moveX !== 0) {
-        const target = input.moveX * RUN_SPEED
+        const target = input.moveX * topSpeed
         // Move vx toward target by accel·dt, never overshooting the target.
         if (vx < target) vx = Math.min(target, vx + accel * dt)
         else if (vx > target) vx = Math.max(target, vx - accel * dt)
@@ -224,8 +338,15 @@ export class Player {
     body.setGravityY(body.velocity.y > 0 ? FALL_GRAVITY_EXTRA : 0)
 
     // ── (5) Facing ── follows horizontal intent (or dash dir); preserved when idle so the
-    // marker doesn't snap to a default. Body stays symmetric — facing is cosmetic + dodge dir.
-    if (this.state !== STATE.DODGE && input.moveX !== 0) {
+    // marker doesn't snap to a default. Body stays symmetric — facing is cosmetic + dodge/swing dir.
+    // Frozen during DODGE (dash dir is locked) and ATTACK (so the swing's facing stays consistent
+    // for the whole swing — important for the backstab geometry, Decision 19) and HURT (knockback).
+    if (
+      this.state !== STATE.DODGE &&
+      this.state !== STATE.ATTACK &&
+      this.hurtTimer <= 0 &&
+      input.moveX !== 0
+    ) {
       this.facing = Math.sign(input.moveX)
     }
 
@@ -247,12 +368,56 @@ export class Player {
     this.rect.y = this.body.center.y - (BODY_H * this.scaleY - BODY_H) * 0.5
     this.rect.x = this.body.center.x
 
-    // Tint flashes while invulnerable so the i-frame window is visible NOW (Phase 1 testable).
-    this.rect.setFillStyle(this.isInvulnerable() ? IFRAME_COLOR : BASE_COLOR)
+    // Tint priority (most-urgent-first): HURT flash (red) > dodge i-frame (yellow) > swing pop
+    // (blue) > base. The hurt-iframe flash is DISTINCT from the dodge tint (design §6.3) so a hit
+    // reads differently from a dodge.
+    let tint = BASE_COLOR
+    if (this.hurtIframeTimer > 0) tint = HURT_COLOR
+    else if (this.isInvulnerable()) tint = IFRAME_COLOR
+    else if (this.attackColorTimer > 0) tint = ATTACK_COLOR
+    this.rect.setFillStyle(tint)
 
-    // Facing cue: park the front marker on the leading edge of the body.
-    this.frontMarker.x = this.body.center.x + this.facing * (BODY_W * 0.5 - 3)
+    // Facing cue: park the front marker on the leading edge. During the swing's active window it
+    // EXTENDS to the swing reach + pops color so the swing telegraph reads (primitives only — the
+    // hitbox body itself stays invisible; this is a cosmetic stand-in).
+    const swingActive = this.attackColorTimer > 0
+    const markerLen = swingActive ? SWINGS[this.comboIndex].reach : 6
+    this.frontMarker.width = markerLen
+    this.frontMarker.setFillStyle(swingActive ? ATTACK_COLOR : 0x2c3e50)
+    // Anchor the marker so it grows FORWARD from the body's leading edge along facing.
+    this.frontMarker.x = this.body.center.x + this.facing * (BODY_W * 0.5 + markerLen * 0.5 - 3)
     this.frontMarker.y = this.body.center.y
+  }
+
+  // ── Start a swing (Decision 18/25/31, AC20). Advances the combo, enters ATTACK, arms the
+  // active+recovery lock, applies the lunge nudge, and acquires the pooled hitbox for this swing. ──
+  _startSwing() {
+    // Advance the chain: wrap −1→0→1→2→(window-gated reset). The comboWindow timer reset (Decision
+    // 31) sends comboIndex back to −1 when it lapses, so a fresh chain always starts at swing 0.
+    this.comboIndex = (this.comboIndex + 1) % COMBO_LEN
+    const swing = SWINGS[this.comboIndex]
+    this.state = STATE.ATTACK
+    this.attackTimer = swing.active + swing.recovery // the lock; reset to RUN at 0 (step 1).
+    this.comboWindowTimer = 0 // window opens at swing END, not now (Decision 31).
+    this.attackColorTimer = swing.active // cosmetic swing pop duration (the visual telegraph).
+
+    // Forward lunge nudge (juice): a one-shot velocity bump along facing, biggest on the finisher.
+    const body = this.body
+    body.setVelocityX(body.velocity.x + this.facing * swing.lunge)
+    this._kickScaleY(1.12) // a small stretch on the swing.
+
+    // Acquire the transient hitbox from the pool (Decision 16/20). It lives for swing.active then
+    // the pool releases it; its per-swing hitSet dedups multi-hit (Decision 20). The pool may be
+    // null in a non-combat (Phase-1) context — then the swing is cosmetic only.
+    if (this.hitboxPool) {
+      const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
+      this.hitboxPool.acquire(attacker, swing, this.id)
+    }
+  }
+
+  // Expose a plain attacker shape for damage.js (cx + facing — the pure resolveHit input).
+  get attackerShape() {
+    return { cx: this.body.center.x, facing: this.facing }
   }
 
   // Kick the squash/stretch toward a target scaleY (the easing pulls it back to 1).

@@ -28,17 +28,20 @@ npm run preview  # serve the built dist/
 npm run verify   # headless determinism check (scripts/verify-gen.mjs)
 ```
 
-## Controls (Phase 1)
+## Controls (through the Combat phase)
 
 - **Title:** SPACE / ENTER / click → Start
 - **Move:** Arrow keys or **WASD** (run with acceleration + friction)
-- **Jump:** **Space** or **J** — variable height (tap = short hop, hold = full jump), with
-  coyote time + jump buffer
+- **Jump:** **Space** — variable height (tap = short hop, hold = full jump), with coyote time +
+  jump buffer. (Jump moved off `J` in the Combat phase so `J` can be the attack key.)
+- **Attack:** **J** or **left-click** — a 2–3 hit light melee combo; chain the input within the
+  combo window to advance swing 1 → 2 → finisher; hit an enemy from behind for a **BACKSTAB** crit
 - **Dodge-roll:** **Shift** or **K** — horizontal dash with i-frames (flashes yellow) and a
-  brief cooldown
+  brief cooldown; dodge-through an enemy's strike to take no damage
 - **ESC** → Title
 
-Attack controls arrive in Phase 3.
+The HUD shows the player **HP bar**. Reduce HP to 0 and a placeholder death handoff returns you to
+Title (real GameOver / permadeath is a later phase).
 
 ## Architecture
 
