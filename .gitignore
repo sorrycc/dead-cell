@@ -2,3 +2,9 @@ node_modules
 dist
 .DS_Store
 *.local
+
+# npm is the single package manager of record (design Decision 81b): keep
+# package-lock.json tracked so CI's `npm ci` works, and ignore any stray bun
+# lockfile so a local `bun install` can never desync CI from local.
+bun.lock
+bun.lockb

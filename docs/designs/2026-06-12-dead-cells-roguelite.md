@@ -1399,6 +1399,35 @@ a future per-biome curve reset.
   `canReachStep`, so the verifier BFS reaches it BY CONSTRUCTION), never touching the critical entrance→exit
   staircase. The verifier asserts the treasure ledge is standable + reachable; the main path BFS still holds.
 
+**81. CI / Deploy — Actions → GitHub Pages, with a `npm run verify` quality gate (Phase 7, §6.7 / §6.15).**
+  A `.github/workflows/deploy.yml` (mirroring sibling `crowd-runner`'s) builds the Vite bundle on every push
+  to `master` and publishes `dist/` to GitHub Pages. Four sub-decisions resolve the review issues, each chosen
+  to make a green LOCAL build/verify a green CI deploy (no reliance on luck):
+- **(a) Gate on `npm run verify` BEFORE `npm run build`.** Options: A) mirror crowd-runner VERBATIM (no test
+  job — it has none) · B) ADD a `run: npm run verify` step ahead of the build. **B)** — the whole project
+  convention is keeping generators/config PURE so `scripts/verify-gen.mjs` can prove determinism/bounds/
+  traversability across 200 seeds headlessly in node; a pipeline that ships without it would happily deploy a
+  broken generator. "Mirror crowd-runner" governs STRUCTURE (jobs / perms / actions / concurrency), not its
+  ACCIDENTAL omission of a gate this project actually has. Cost: one fast node step (no browser, no Phaser).
+- **(b) `npm ci` lockfile precondition — `package-lock.json` MUST stay git-tracked; `bun.lock` MUST stay
+  absent.** `npm ci` HARD-FAILS without a committed lockfile. This repo has `package-lock.json`
+  (`lockfileVersion 3`) tracked and NO `bun.lock` (good). Decision: KEEP `package-lock.json` committed
+  (AC asserts it) and add `bun.lock` / `bun.lockb` to `.gitignore` so a stray local `bun install` can never
+  commit a second lockfile that desyncs CI (`npm ci`) from local. crowd-runner carries a `bun.lock`; we do NOT
+  adopt it — npm is the single package manager of record here.
+- **(c) Node delta is explicit, not lucky.** The dev machine runs Node v24; the workflow pins `node-version: 20`
+  (matching crowd-runner) and `package.json` has no `engines` field. Options: A) pin CI to 24 to match local ·
+  B) keep 20 + document the delta. **B)** — Vite 5 + this pure-ESM, dependency-light build run identically on
+  20 and 24 (no native addons, no v24-only syntax), so 20 is a safe, widely-supported floor; pinning it (not
+  `latest`) keeps CI reproducible. The local↔CI Node delta is recorded HERE so the "green locally" build is
+  reproducibly green in CI by design, not coincidence. (If a future dep needs ≥22 we add `engines` + bump the
+  pin together.)
+- **(d) Pages enablement is a documented MANUAL precondition.** `actions/deploy-pages@v4` FAILS until the repo's
+  **Settings → Pages → Source = "GitHub Actions"** is set — a one-time human step. Given the hard "no remote /
+  no `gh` command" boundary, the workflow file ALONE cannot make the first deploy succeed; the repo-create +
+  Pages-enable steps are documented in §6.15 + README so an expected first-run failure (before Pages is on) is
+  not misread as a workflow bug. The agent adds ONLY the local config files.
+
 ---
 
 ## 6. Design
@@ -2771,7 +2800,66 @@ enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `sc
 `scripts/verify-gen.mjs` (section 6: enemy-pool/archetype + boss-table + 4-weapon + boss-arena checks),
 `README.md`. Each is a clean extension of an existing seam — no rewrites.
 
-### 6.7 Phase 7 — *(SUBSUMED into the §6.5 meta-loop — Hub + localStorage meta shipped there)*
+### 6.7 Phase 7 — GitHub CI/deploy (THIS PHASE — the orchestrator's "GitHub CI/deploy" step)
+
+> NOTE: the *original* roadmap Phase 7 ("Hub + localStorage meta") was pulled forward and shipped
+> in §6.5. The orchestrator REDEFINES Phase 7 as the CI/deploy pipeline, designed here. This is a
+> CONFIG-ONLY phase — it adds no game code and no runtime behavior; it only adds the build/deploy
+> plumbing so a push publishes the game to GitHub Pages.
+
+**Goal.** On a push to `master` (or a manual "Run workflow"), GitHub Actions runs the Vite build
+and publishes `dist/` to GitHub Pages. The workflow MIRRORS the sibling `crowd-runner`'s
+`.github/workflows/deploy.yml` verbatim in structure (read first to match), since both projects
+share the same Vite-static-build → Pages shape (DRY across the two repos).
+
+- **`.github/workflows/deploy.yml` (NEW).** A two-job workflow, identical in shape to crowd-runner:
+  - **Triggers:** `push` to `branches: [master]` (this repo's default branch — same as crowd-runner)
+    + `workflow_dispatch` (the manual "Run workflow" button).
+  - **Permissions:** `contents: read`, `pages: write`, `id-token: write` — the minimum the Pages
+    deploy action needs (OIDC token to deploy).
+  - **Concurrency:** `group: pages`, `cancel-in-progress: false` — one deploy at a time; never cancel
+    an in-flight publish (matches crowd-runner).
+  - **`build` job** (ubuntu-latest): `actions/checkout@v4` → `actions/setup-node@v4`
+    (`node-version: 20`, `cache: npm`) → `npm ci` → **`npm run verify`** → `npm run build` →
+    `actions/upload-pages-artifact@v3` with `path: dist`. The `npm run verify` step is the CI QUALITY
+    GATE (Decision 81a) — it runs the headless determinism/bounds/traversability sweep BEFORE the build so
+    a broken pure generator/config is caught in CI instead of being deployed; this is the ONE structural
+    addition over crowd-runner's verbatim shape (which has no such gate). Pinned `node-version: 20` (NOT the
+    local v24 — Decision 81c) to match crowd-runner's CI; the pure-ESM build + verify run identically on 20
+    and 24, so 20 is a safe, reproducible floor. `npm ci` requires a committed `package-lock.json`
+    (Decision 81b — kept git-tracked; `bun.lock` stays gitignored so it can't desync CI from local).
+  - **`deploy` job** (`needs: build`, ubuntu-latest): `environment: { name: github-pages, url: ${{
+    steps.deployment.outputs.page_url }} }` → `actions/deploy-pages@v4` (id `deployment`).
+- **`vite.config.js` — VERIFY (no change).** `base: './'` is ALREADY set (Decision 7 / §6.0), so the
+  hashed bundle resolves from a Pages project sub-path (`https://<user>.github.io/dead-cell/`). The
+  relative base makes the SAME `dist/` work from the sub-path, a `file://` preview, OR a custom domain
+  — no env-specific build. This phase only re-confirms it; it adds nothing.
+- **`.gitignore` — UPDATE.** Already excludes `node_modules` and `dist`, so the repo stays source-only
+  and CI rebuilds `dist/` fresh from `npm ci` + `npm run build` (the artifact is never committed). This
+  phase ADDS `bun.lock` / `bun.lockb` (Decision 81b) so a stray local `bun install` can never commit a
+  second lockfile that desyncs CI's `npm ci` from local — `package-lock.json` stays the single tracked
+  lockfile of record.
+- **`README.md` — UPDATE.** A "Deploy / CI" section with a concrete content contract (Decision 81d, no
+  hand-waving): (1) state that Pages AUTO-DEPLOYS on every push to `master` (and via the manual "Run
+  workflow" button), running `npm ci → npm run verify → npm run build → upload → deploy`; (2) link the
+  relative-base rationale back to Decision 7 (`base: './'` so the bundle resolves from the
+  `…github.io/dead-cell/` sub-path); (3) a LIVE-URL placeholder filled in AFTER Pages is enabled; (4) the
+  ONE-TIME MANUAL steps the USER must perform OUT-OF-BAND (explicitly OUTSIDE this automated scope — the
+  agent MUST NOT do them): create the GitHub repo (`gh repo create sorrycc/dead-cell --public --source .
+  --push`, or the website + `git remote add origin … && git push -u origin master`), then **Settings →
+  Pages → Source = "GitHub Actions"**; (5) the explicit note that until that Pages "Source" is set,
+  `actions/deploy-pages@v4` FAILS, so a first-run failure before enablement is the precondition, not a
+  workflow bug. After enablement, every push to `master` auto-deploys via the workflow above.
+
+**Hard boundary (explicit non-goals).** The agent does NOT create a git remote, push, create any
+GitHub repo, enable Pages, or run any `gh` command — it only adds/commits the local config files.
+The repo wiring + Pages enablement are documented for the user to perform themselves.
+
+**Explicit deferrals (YAGNI).** No build matrix (single pinned node 20, Decision 81c), no lint job, no
+caching beyond npm, no preview/PR deploys, no custom domain / CNAME, no manual-chunk split for the
+>500 kB warning (cosmetic; the build is green). NOTE: the determinism gate `npm run verify` is NOT
+deferred — it is wired into the build job (Decision 81a) because this project, unlike crowd-runner,
+maintains a headless verifier and shipping past it would defeat the whole pure-config discipline.
 
 ### 6.8 Error handling / edge cases (Phase 0)
 
@@ -2862,6 +2950,34 @@ enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `sc
 - **GameScene `_placeBranchReward`** places a GUARANTEED reward (gold / scroll / weapon / heal, seeded off the
   level seed) on the ledge — the risk/reward payoff. The verifier (`checkDescription` + `bfsReaches`) asserts
   the treasure is standable + reachable from the entrance; the main entrance→exit path is unchanged.
+
+### 6.15 CI / Deploy — Actions → GitHub Pages (Decision 81; expands §6.7)
+
+> The pipeline ITSELF is designed in §6.7; this subsection records the OPERATIONAL contract — the gate, the
+> lockfile/Node preconditions, and the MANUAL prerequisites the agent must NOT perform — so the four review
+> issues map to one place. This is a CONFIG-ONLY phase: NO game code, NO runtime behavior changes.
+
+- **The pipeline (`.github/workflows/deploy.yml`, NEW).** On push to `master` + `workflow_dispatch`:
+  `checkout@v4 → setup-node@v4 (node 20, npm cache) → npm ci → npm run verify → npm run build →
+  upload-pages-artifact@v3 (path dist)`, then a `deploy` job (`needs: build`, `github-pages` environment) runs
+  `deploy-pages@v4`. Perms `contents:read / pages:write / id-token:write`; concurrency `group: pages,
+  cancel-in-progress: false`. Mirrors crowd-runner's STRUCTURE; the ONE addition is the verify gate.
+- **The quality gate (Decision 81a).** `npm run verify` runs BEFORE `npm run build`, so the 200-seed
+  determinism/bounds/traversability + pure-config/contract sweep must pass for a deploy to proceed. A broken
+  generator fails CI instead of shipping. It is fast (node-only, no browser/Phaser) — a cheap insurance step.
+- **Lockfile precondition (Decision 81b).** `npm ci` requires a committed `package-lock.json`
+  (`lockfileVersion 3`, already git-tracked). `.gitignore` excludes `bun.lock` / `bun.lockb` so npm stays the
+  single package manager of record and a stray `bun install` can't desync CI from local. ACTION on the agent:
+  keep `package-lock.json` tracked; do NOT introduce a `bun.lock`.
+- **Node delta (Decision 81c).** Local dev = Node v24; CI pins `node-version: 20`. The pure-ESM build + verify
+  are engine-agnostic across 20/24, so the local-green build is reproducibly CI-green by design. Recorded here
+  so the delta is explicit rather than incidental; `package.json` carries no `engines` field (none needed yet).
+- **MANUAL prerequisites the agent MUST NOT perform (Decision 81d / hard boundary).** The agent adds ONLY the
+  local config files (workflow, `.gitignore`, README, this doc). The USER, out-of-band, must: (1) create the
+  GitHub repo (`gh repo create sorrycc/dead-cell --public --source . --push`, or website + `git remote add
+  origin … && git push -u origin master`); (2) set **Settings → Pages → Source = "GitHub Actions"**. Until (2)
+  is done, `deploy-pages@v4` FAILS — an EXPECTED precondition, NOT a workflow bug. The agent does NOT create a
+  remote, push, create a repo, enable Pages, or run any `gh` command.
 
 ---
 
@@ -3132,6 +3248,22 @@ enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `sc
 - `README.md` — UPDATE. The round-2 systems (shop / elites / 2nd boss / status / branches / deeper meta), the
   Q/E controls.
 
+**Phase 7 — GitHub CI/deploy (this phase; §6.7):**
+
+- `.github/workflows/deploy.yml` — NEW. Two-job (build → deploy) GitHub Actions workflow that runs
+  `npm ci` → `npm run verify` → `npm run build` and publishes `dist/` to GitHub Pages on push to
+  `master` + `workflow_dispatch`. Mirrors crowd-runner's deploy.yml in structure (node 20 + npm cache,
+  `upload-pages-artifact@v3` / `deploy-pages@v4`, contents/pages/id-token perms, `pages` concurrency),
+  with the one ADDED `npm run verify` quality gate before the build (Decision 81a).
+- `vite.config.js` — VERIFY only (no change). `base: './'` already present (Decision 7).
+- `.gitignore` — UPDATE. `node_modules` + `dist` already excluded; ADD `bun.lock` / `bun.lockb` so npm's
+  `package-lock.json` stays the single tracked lockfile of record (Decision 81b).
+- `README.md` — UPDATE. A "Deploy / CI" section: auto-deploys on push to `master`; the
+  `npm ci → verify → build → upload → deploy` flow; the relative-base rationale (link Decision 7); a
+  live-URL placeholder; the ONE-TIME MANUAL user steps (create the GitHub repo + Settings → Pages →
+  Source = "GitHub Actions") + the Pages-enablement-first-or-deploy-fails note. The agent performs NONE
+  of the GitHub-side steps.
+
 ---
 
 ## 8. Verification
@@ -3330,7 +3462,27 @@ observation of the boss fight + variety:
    the archetype/boss additions are pure-config extensions; the staircase generator output + the curve's
    intra-run values are unchanged (the boss-arena mode is a separate branch, separately pinned).
 
-**Phase 7:** SUBSUMED into Phase 5 — no separate verification.
+**Phase 7 — GitHub CI/deploy (this phase; §6.7 / §6.15; Decision 81):** a CONFIG-ONLY phase — verified
+locally (the agent does NOT push, create a repo, or enable Pages):
+
+1. `npm run verify` AND `npm run build` both still exit 0 locally — the exact two commands the build job
+   runs (in that order: verify gates the build), so green locally proves the gate + build pass in CI.
+2. `.github/workflows/deploy.yml` is valid YAML (parses) and mirrors crowd-runner's structure: `push`
+   on `branches: [master]` + `workflow_dispatch`; `contents/pages/id-token` permissions; `pages`
+   concurrency with `cancel-in-progress: false`; a `build` job (checkout@v4 → setup-node@v4 node 20 +
+   npm cache → `npm ci` → `npm run verify` → `npm run build` → upload-pages-artifact@v3 path `dist`) and
+   a `deploy` job (`needs: build`, `github-pages` environment, deploy-pages@v4). The `npm run verify`
+   step is the ADDED quality gate (Decision 81a) — the one structural delta from crowd-runner.
+3. `vite.config.js` has `base: './'` (Decision 7 — the bundle resolves from a Pages sub-path).
+4. The lockfile precondition holds (Decision 81b): `package-lock.json` (`lockfileVersion 3`) is
+   git-tracked (so `npm ci` works), and `.gitignore` excludes `node_modules`, `dist`, AND `bun.lock` /
+   `bun.lockb` (no second lockfile can desync CI's `npm ci` from local; the artifact is never committed).
+5. `README.md` has a "Deploy / CI" section that: states Pages auto-deploys on push to `master`; documents
+   the `npm ci → verify → build → upload → deploy` flow; links the relative-base rationale to Decision 7;
+   carries a live-URL placeholder; and documents the ONE-TIME MANUAL user steps (create the repo +
+   Settings → Pages → Source = "GitHub Actions") INCLUDING the note that `deploy-pages@v4` fails until
+   Pages "Source" is set (a precondition, not a bug — Decision 81d). The agent performs NONE of the
+   GitHub-side steps; the local↔CI Node delta (v24 vs pinned 20) is recorded in Decision 81c.
 
 **Enrichment round 2 (§6.10–§6.14; AC63–AC67):** the HEADLESS pure-config/contract sweep plus `npm run dev`
 observation of the new systems:

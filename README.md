@@ -130,3 +130,52 @@ combat/ effects/ util/`. Procedural generation is **seeded + pure** (`util/rng.j
 (a shareable run id), the **healing flask** (Q) refilled per biome, and a found-heal pickup.
 
 See `docs/designs/2026-06-12-dead-cells-roguelite.md` for the full design (§6.9–§6.14, Decision 71–80).
+
+## Deploy / CI
+
+This repo ships to **GitHub Pages** via GitHub Actions (`.github/workflows/deploy.yml`). On every
+**push to `master`** (and via the manual **Run workflow** button), CI runs:
+
+```
+npm ci  →  npm run verify  →  npm run build  →  upload dist/  →  deploy to Pages
+```
+
+`npm run verify` is a **quality gate** (design Decision 81a): the headless determinism / bounds /
+traversability + pure-config sweep (`scripts/verify-gen.mjs`) must pass before the bundle is built and
+published, so a broken procedural generator fails CI instead of shipping.
+
+The build uses **`base: './'`** in `vite.config.js` (design Decision 7) so the hashed bundle resolves
+from a Pages **project sub-path** (`https://<user>.github.io/dead-cell/`) — the same `dist/` also works
+from a `file://` preview or a custom domain, with no environment-specific build.
+
+`npm` is the single package manager of record: `package-lock.json` is committed (so `npm ci` is
+reproducible) and `bun.lock` is `.gitignore`d (Decision 81b). CI pins **Node 20**; local dev may run a
+newer Node (e.g. v24) — the pure-ESM build/verify run identically on both (Decision 81c).
+
+**Live URL:** _TODO — fill in after Pages is enabled (e.g. `https://sorrycc.github.io/dead-cell/`)._
+
+### One-time setup (manual — done by the repository owner)
+
+The workflow file alone cannot publish until the repo exists and Pages is enabled. These are
+**manual, one-time** steps performed by the owner (not by the build):
+
+1. **Create the GitHub repo and push** — either:
+
+   ```bash
+   gh repo create sorrycc/dead-cell --public --source . --push
+   ```
+
+   or create it on the website, then:
+
+   ```bash
+   git remote add origin git@github.com:sorrycc/dead-cell.git
+   git push -u origin master
+   ```
+
+2. **Enable Pages** — in the repo, go to **Settings → Pages → Build and deployment → Source =
+   "GitHub Actions"**.
+
+> Until step 2 is done, the `deploy` job (`actions/deploy-pages@v4`) **fails** — that is an expected
+> precondition, **not** a workflow bug. Once Pages "Source" is set to "GitHub Actions", every push to
+> `master` auto-deploys, and the live URL appears in the workflow run's `deploy` job summary (paste it
+> into the **Live URL** placeholder above).
