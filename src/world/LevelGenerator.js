@@ -324,6 +324,21 @@ export function generateLevel(seed, biomeConfig) {
   const entrance = cellAbove(first)
   const exit = cellAbove(last)
 
+  // ── 4.5) Optional TREASURE BRANCH (design §6.14, Decision 80, AC67) ── a seeded off-critical-path
+  // detour: 1–2 SOLID platforms hung UP off a mid-critical platform (each step reach-bounded by the SHARED
+  // canReachStep, so the branch is reachable BY CONSTRUCTION — the verifier BFS proves it), ending in a
+  // treasure platform whose standable top is `branchTreasure`. The MAIN entrance→exit staircase is
+  // UNTOUCHED (the branch only ADDS nodes), so the reachability guarantee for the critical path holds — the
+  // branch is a risk/reward side path, not a gate. GameScene places a guaranteed reward (gold/scroll/weapon/
+  // heal) at branchTreasure (sourced SCENE-SIDE off the seed, like the weapon pickup — so it's NOT a
+  // generator pickup and the level pin stays intact). Uses a SEPARATE seeded sub-RNG (off the main `rng`
+  // thread) so the main draw sequence — and thus the regression pin — is byte-unchanged, AND it is GATED on
+  // a min grid width so the tiny 40-col PIN config emits NO branch (the pinned tiles are unaffected — the
+  // pin's cols:40 < BRANCH_MIN_COLS). Stamped BEFORE the decoration scatter so the branch tiles are part of
+  // the occupied mask (decoration never overwrites the branch).
+  const branchRng = mulberry32((seed ^ 0xb2a4c11) >>> 0) // off-the-main-thread (pin-safe) branch RNG.
+  const branchTreasure = placeBranch(tiles, cols, rows, critical, branchRng, lenMin, lenMax, entrance, exit)
+
   // ── 5) Off-critical-path decoration (Decision: step 5) ── scatter ONEWAY ledges + HAZARD tiles at
   // seeded positions that are NOT on the critical path, so they never block the guaranteed route. We
   // additionally keep HAZARDs out of the swept JUMP CORRIDOR between consecutive critical platforms
@@ -331,6 +346,11 @@ export function generateLevel(seed, biomeConfig) {
   // guarantee holds for the actual path the player walks, not merely the BFS abstraction.
   const occupied = buildOccupiedMask(tiles, cols, rows) // SOLID/ONEWAY/HAZARD cells (can't decorate).
   const corridor = buildJumpCorridorMask(critical, cols, rows) // airspace the player flies through.
+
+  // §6.14 (Decision 80, AC67) — RESERVE the branch treasure cell from decoration: it's EMPTY (so not in the
+  // occupied mask), but a scattered ledge/hazard could otherwise land ON it and make the treasure ledge
+  // un-standable (the verifier's standable check would fail). Mark it occupied so decoration skips it.
+  if (branchTreasure) occupied[branchTreasure.row][branchTreasure.col] = true
 
   scatterOneWayLedges(tiles, cols, rows, rng, biomeConfig.oneWayLedges, occupied, corridor, lenMin, lenMax)
   scatterHazards(tiles, cols, rows, rng, biomeConfig.hazardPatches, occupied, corridor)
@@ -340,7 +360,9 @@ export function generateLevel(seed, biomeConfig) {
   // excluding cells too near the entrance (no frame-1 ambush) and the exit. Enemy count is clamped
   // to the biome band. ENEMY spawns additionally require a MIN-WIDTH platform run under them so the
   // enemy has room to patrol (Decision 41 / review MAJOR) — see standableForEnemies().
-  const standableAll = collectStandable(tiles, cols, rows, entrance, exit)
+  // collectStandable excludes the entrance band + the exit cell + the branch TREASURE cell (so a normal
+  // enemy/pickup never spawns ON the treasure spot — GameScene reserves it for the branch reward, §6.14).
+  const standableAll = collectStandable(tiles, cols, rows, entrance, exit, branchTreasure)
   const standableEnemy = standableAll.filter((s) => s.runLen >= MIN_ENEMY_PLATFORM_TILES)
 
   const enemyCount = clampInt(randInt(rng, biomeConfig.minEnemies, biomeConfig.maxEnemies), 0, standableEnemy.length)
@@ -385,6 +407,7 @@ export function generateLevel(seed, biomeConfig) {
     enemies, // standable world spawn points + patrol bounds + spec.
     spawnCandidates, // SURPLUS enemy spawns for the depth-scaled enemyCountBonus (Decision 45).
     pickups, // standable world spawn points + kind.
+    branchTreasure, // §6.14 (Decision 80) — the optional branch's treasure standable point, or null.
     seed,
     biomeId: biomeConfig.id,
   }
@@ -474,6 +497,7 @@ function generateBossArena(seed, biomeConfig) {
     enemies: [], // the boss replaces the normal pool (AC57).
     spawnCandidates: [],
     pickups: [],
+    branchTreasure: null, // §6.14 — the boss arena has no branch (the boss is the room).
     bossSpawn, // GameScene spawns the Boss here (Decision 66/67).
     isBossArena: true, // GameScene branches on this (no Door; wire the hazard overlap).
     seed,
@@ -490,6 +514,85 @@ const ENTRANCE_SAFE_TILES = 5 // no enemy/pickup within this many tiles of the e
 // requiring 5 never starves spawns (verified: every seed still has enemies).
 const MIN_ENEMY_PLATFORM_TILES = 5
 const ENEMY_PATROL_INSET = 6 // px — inset the patrol bounds from the run edges so it never clamps into a wall.
+
+// ── Treasure-branch constants (design §6.14, Decision 80, AC67) ──
+// BRANCH_MIN_COLS gates the branch on grid WIDTH: the tiny 40-col PIN config (cols:40) is BELOW it, so the
+// pin emits NO branch (its tiles are byte-unchanged — the pin holds). Every real biome (PRISON 64 / SEWERS
+// 76 / RAMPARTS 88) is above it, so they get branches. BRANCH_STEPS is how many platforms the detour adds
+// (a short 1–2 step climb to a treasure ledge — KISS, never a maze).
+const BRANCH_MIN_COLS = 50 // skip the branch on narrow grids (the pin is 40 → unaffected).
+const BRANCH_STEP_UP_MIN = 2 // tiles — the branch climbs UP (a reward you must work for), within reach.
+const BRANCH_STEP_UP_MAX = MAX_STEP_UP // never exceed the jump-reach envelope (canReachStep enforces it).
+
+// ── placeBranch(tiles, cols, rows, critical, rng, lenMin, lenMax) → branchTreasure | null (Decision 80) ──
+// Hang a short UPWARD detour off a MID critical platform: 1–2 SOLID branch platforms, each a reach-bounded
+// jump above the previous (validated by the SHARED canReachStep — so the verifier's BFS reaches them BY
+// CONSTRUCTION), ending in a treasure ledge. Returns the treasure's standable cell (cellAbove the last
+// branch platform) or null if no branch was placed (narrow grid / no room). The MAIN staircase is never
+// touched — the branch only ADDS platforms — so the critical entrance→exit path stays traversable. PURE +
+// deterministic (off the passed sub-RNG). Stamps SOLID runs into `tiles` (clamped to the interior).
+function placeBranch(tiles, cols, rows, critical, rng, lenMin, lenMax, entrance, exit) {
+  if (cols < BRANCH_MIN_COLS) return null // narrow grid (the pin) → no branch (pin tiles unchanged).
+  if (critical.length < 3) return null // need a mid platform to hang off of (not the entrance/exit).
+
+  const interiorMax = cols - 2
+  // Pick a MID critical platform (not the first/entrance or last/exit) as the branch base.
+  const baseIdx = 1 + Math.floor(rng() * (critical.length - 2))
+  const base = critical[baseIdx]
+
+  // Build 1–2 branch platforms climbing UP from the base. Each step: a seeded UP step + a small gap, the
+  // run placed to one side of the base. Validate reach with canReachStep; abort cleanly on a bad draw.
+  let prev = base
+  let last = null
+  const steps = 1 + (rng() < 0.5 ? 1 : 0) // 1 or 2 branch platforms (KISS — a short detour).
+  for (let i = 0; i < steps; i++) {
+    const up = BRANCH_STEP_UP_MIN + Math.floor(rng() * (BRANCH_STEP_UP_MAX - BRANCH_STEP_UP_MIN + 1))
+    const nextRow = clampInt(prev.row - up, 2, rows - 2)
+    const gap = randInt(rng, MIN_GAP, MAX_GAP)
+    const len = randInt(rng, lenMin, lenMax)
+    // Place the branch run to the RIGHT of the base's near edge (or left if it would spill past the wall).
+    let col = prev.col + prev.len - 1 + gap
+    if (col + len - 1 > interiorMax) col = clampInt(prev.col - gap - len, 1, interiorMax)
+    const run = makeRun(col, nextRow, len, interiorMax)
+    // The branch must be REACHABLE from prev (the SHARED predicate — the BFS will agree). Bad draw → stop
+    // with whatever we've placed so far (a 1-step branch is still a valid reward; none placed → null).
+    if (!canReachPlatform(prev, run) || run.col <= prev.col + prev.len - 1) break
+    // The branch must NOT stamp over (or sit its treasure-clear zone over) the entrance/exit cells — a SOLID
+    // there would bury the exit's standable cell (a verifier "exit cell is not EMPTY" failure). Reject such
+    // a run (stop the branch). Checked against BOTH the run's own row and its top-clear row, across its span.
+    if (runOverlapsCell(run, entrance) || runOverlapsCell(run, exit)) break
+    // The branch's TOP must be CLEAR: every cell directly above the run (where the player stands + where
+    // the treasure goes) must be EMPTY (no critical platform / wall overlapping it), else the treasure ledge
+    // wouldn't be standable (the verifier's standable check). A bad overlap → stop (skip this + later steps).
+    if (run.row - 1 < 0 || !runTopClear(tiles, run)) break
+    stampRun(tiles, cols, rows, run.col, run.row, run.len, TILE.SOLID)
+    last = run
+    prev = run
+  }
+  if (!last) return null // no branch platform placed (a degenerate draw) → no treasure.
+  return cellAbove(last) // the treasure stands on the LAST (highest) branch platform.
+}
+
+// True iff a run's SOLID body (run.row) OR its top-clear row (run.row-1) covers `cell` — used to keep a
+// branch run from burying the entrance/exit standable cells (§6.14, Decision 80). Guards against a SOLID
+// stamped over a goal cell AND against the branch's footing/treasure zone landing on one.
+function runOverlapsCell(run, cell) {
+  if (!cell) return false
+  if (cell.col < run.col || cell.col >= run.col + run.len) return false
+  return cell.row === run.row || cell.row === run.row - 1
+}
+
+// True iff every cell directly ABOVE the run (row-1, across its span) is EMPTY — so the run's top is a
+// clear standable surface (no overlapping platform/wall). Used so a branch platform's treasure ledge (and
+// the player's footing on it) is guaranteed standable (§6.14, Decision 80).
+function runTopClear(tiles, run) {
+  const r = run.row - 1
+  if (r < 0) return false
+  for (let c = run.col; c < run.col + run.len; c++) {
+    if (tiles[r][c] !== TILE.EMPTY) return false
+  }
+  return true
+}
 
 // Build a SOLID platform run clamped to the interior band [1, interiorMax] so its emitted {col,len}
 // matches EXACTLY what stampRun writes (no record/grid drift). If the requested run would spill past
@@ -538,7 +641,7 @@ function enemySpawnFromCell(cell) {
 // 38). Records the OWNING run's col/len (so enemy patrol bounds derive from it, Decision 41) by
 // scanning the contiguous SOLID/ONEWAY span beneath. Excludes cells within ENTRANCE_SAFE_TILES of
 // the entrance and the exit cell itself (no ambush, keep the goal clear).
-function collectStandable(tiles, cols, rows, entrance, exit) {
+function collectStandable(tiles, cols, rows, entrance, exit, treasure = null) {
   const out = []
   for (let row = 0; row < rows - 1; row++) {
     for (let col = 1; col < cols - 1; col++) {
@@ -551,6 +654,9 @@ function collectStandable(tiles, cols, rows, entrance, exit) {
         Math.abs(col - entrance.col) <= ENTRANCE_SAFE_TILES && Math.abs(row - entrance.row) <= ENTRANCE_SAFE_TILES
       if (nearEntrance) continue
       if (col === exit.col && row === exit.row) continue
+      // §6.14 (Decision 80) — the branch TREASURE cell is RESERVED for the branch reward (GameScene places
+      // it there); exclude it so a normal enemy/pickup never lands on the treasure spot.
+      if (treasure && col === treasure.col && row === treasure.row) continue
       // Find the OWNING run beneath: extend left/right while the cell below stays the same support.
       let runCol = col
       while (runCol > 1 && isSupport(tiles[row + 1][runCol - 1]) && tiles[row][runCol - 1] === TILE.EMPTY) runCol--

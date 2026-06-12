@@ -45,6 +45,10 @@ export const HAMMER = {
   id: 'hammer',
   name: 'Hammer',
   type: 'melee',
+  // ── STATUS (design §6.13, Decision 79, AC66) ── the Hammer STUNS on hit: a brief crowd-control freeze
+  // on the struck enemy (the genre's "heavy weapon staggers"). A short window so it's a tempo tool, not a
+  // lock. status is read by GameScene's melee-hit handler → applied to the enemy's statuses[] (status.js).
+  status: { kind: 'stun', duration: 0.6 },
   swings: [
     // Swing 1 — heavy overhead. Slow active, big hit + shove, a brief chain window into the finisher.
     { reach: 50, halfHeight: 34, forward: 16, damage: 22, knockback: 520, active: 0.16, recovery: 0.30, comboWindow: 0.40, lunge: 60 },
@@ -63,6 +67,10 @@ export const BOW = {
   id: 'bow',
   name: 'Bow',
   type: 'ranged',
+  // ── STATUS (design §6.13, Decision 79, AC66) ── the Bow POISONS on a projectile hit: weak but longer DoT
+  // than the spear's bleed (a "tag and kite" identity for the ranged build). Applied by GameScene's
+  // projectile-hit handler to the struck enemy's statuses[] (status.js), so the ranged path has identity too.
+  status: { kind: 'poison', duration: 3.0, tickInterval: 0.5, tickDmg: 2 },
   swings: [
     // The single "draw" row: a short active (the loose) then a committed recovery (the nock) — this
     // IS the fire-rate gate. damage/knockback here are unused (the projectile hits); kept > 0 so the
@@ -92,6 +100,10 @@ export const SPEAR = {
   id: 'spear',
   name: 'Spear',
   type: 'melee',
+  // ── STATUS (design §6.13, Decision 79, AC66) ── the Spear BLEEDS on hit: damage-over-time that rewards
+  // poking + repositioning (its identity — low per-hit, but the bleed adds up). A few ticks of small damage
+  // over a couple seconds. status is applied to the struck enemy by GameScene's melee-hit handler (status.js).
+  status: { kind: 'bleed', duration: 2.4, tickInterval: 0.4, tickDmg: 3 },
   swings: [
     // Thrust 1 — a long low-commit poke. Big reach, small damage, snappy, a strong forward lunge so it
     // closes/spaces. Generous chain window into the next thrust.

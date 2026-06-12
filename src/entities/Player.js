@@ -460,7 +460,9 @@ export class Player {
       // Its hit is resolved by GameScene's projectile-specific overlap (its own attacker shape = the
       // SHOT's position + dir — NOT the player's, review MAJOR). The pool may be null (cosmetic-only).
       if (this.projectilePool && weapon.projectile) {
-        this.projectilePool.acquire(attacker, weapon.projectile, this.id)
+        // Stamp the weapon's status (§6.13, Decision 79 — the bow's poison) on the shot so the hit handler
+        // applies it to the struck enemy. null for a no-status weapon → no effect (the identity).
+        this.projectilePool.acquire(attacker, weapon.projectile, this.id, weapon.status)
       }
     } else {
       // MELEE (Decision 16/20): acquire the transient hitbox; it lives for swing.active then the pool

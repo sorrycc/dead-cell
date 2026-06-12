@@ -5,6 +5,8 @@ import { Player } from '../entities/Player.js'
 import { Enemy } from '../entities/Enemy.js'
 import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
+import { Shop } from '../entities/Shop.js'
+import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
 import { Effects } from '../effects/Effects.js'
@@ -16,9 +18,10 @@ import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
 import { WEAPONS } from '../config/weapons.js'
-import { ENEMY_SPECS } from '../config/enemies.js'
+import { ENEMY_SPECS, ELITE_AFFIX, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
+import { SHOP_ITEMS } from '../config/shop.js'
 import { mulberry32 } from '../util/rng.js'
 
 // ── GameScene (design §6.1 + §6.2 + §6.3 + §6.4, AC11–AC18 + AC19/AC27–AC30 + AC20–AC26 + AC42–AC47) ──
@@ -107,6 +110,13 @@ const WEAPON_PICKUP_CHANCE = 0.5 // ~half of levels carry a weapon to try.
 // in runs (it's a found weapon, not a meta unlock — Decision 69).
 const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword', 'spear']
 
+// ── In-run shop placement (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── a per-level FIXED chance to
+// place ONE Shop vendor, rolled off a fresh seeded RNG (off the generator's pinned draw — the same level-
+// pin discipline as the weapon pickup, so the regression pin + determinism deep-equal stay intact). Sized
+// so a vendor appears often enough that hoarded gold has a regular outlet, but not EVERY level (so the
+// "spend now vs save for the next vendor" decision is real). A given run seed always places the same shops.
+const SHOP_LEVEL_CHANCE = 0.55 // ~half-plus of normal levels carry a vendor (a reliable gold outlet).
+
 export class GameScene extends Phaser.Scene {
   constructor() {
     super('Game')
@@ -174,9 +184,11 @@ export class GameScene extends Phaser.Scene {
     this.isBossRoom = false
     this._hazardCollider = null
     this._hazardCooldown = 0
-    // ── In-run shop state (§6.9, Decision 74) — null/false until a level places a vendor (_buildLevel). ──
-    this.shop = null // the live Shop entity (a door-gated vendor) for THIS level, or null.
+    // ── In-run shop state (§6.10, Decision 74/76) — null/false until a level places a vendor (_buildLevel). ──
+    this.shop = null // the live Shop entity (a stand-on vendor) for THIS level, or null (most boss/some levels).
+    this._shopCollider = null // the player×vendor in-range overlap (removed on teardown).
     this.shopOpen = false // true while the shop overlay is up (gameplay is paused beneath it).
+    this.shopOverlay = null // the live ShopOverlay UI while open, else null.
     this.effects = new Effects(this, (secs) => {
       this.hitstopTimer = Math.min(HITSTOP_CAP, Math.max(this.hitstopTimer, secs))
     })
@@ -367,10 +379,16 @@ export class GameScene extends Phaser.Scene {
     // bounds come FROM the generator (Decision 41 — the OWNING run's world span).
     const scale = scaleAtDepth(this.runState.depth)
     const archetypeRng = mulberry32((desc.seed ^ 0xa11ce5 ^ this.runState.depth) >>> 0) // off-the-pin RNG.
+    // ── ELITE roll RNG (§6.11, Decision 77, AC64) ── a SEPARATE off-the-pin seeded RNG (a distinct mix
+    // constant so the elite roll doesn't correlate with the archetype pick) — a run replays the same
+    // elites. _rollElite returns the ELITE_AFFIX or null; _spawnEnemy folds it into the enemy (more HP,
+    // a gold body, a tighter telegraph, a death burst). The elite is applied AFTER the depth scaleSpec, so
+    // a deep elite is depth-scaled THEN affix-multiplied (tankier with depth AND elite — the right stacking).
+    const eliteRng = mulberry32((desc.seed ^ 0xe117e0 ^ this.runState.depth) >>> 0)
     for (const e of desc.enemies) {
       const base = this._pickArchetype(biome, archetypeRng)
       const spec = scaleSpec(base, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc })
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollElite(eliteRng) })
     }
 
     // ── enemyCountBonus (design §6.4, Decision 45 / review MAJOR — IMPLEMENTABLE source) ── at depth,
@@ -385,7 +403,7 @@ export class GameScene extends Phaser.Scene {
       const e = desc.spawnCandidates[i]
       const base = this._pickArchetype(biome, archetypeRng) // same off-the-pin RNG (Decision 68).
       const spec = scaleSpec(base, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc })
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollElite(eliteRng) })
     }
 
     // ── Pickups (§6.5, Decision 54, AC48) ── the generator's desc.pickups (cell/gold) become REAL
@@ -400,6 +418,17 @@ export class GameScene extends Phaser.Scene {
     // whether + which (so a replay places the same weapon). Placed at the level's first pickup spot (or
     // the entrance if none) so it's reachable on the critical path.
     this._maybePlaceWeaponPickup(desc)
+
+    // ── Sparse in-run shop (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── a low FIXED per-level chance
+    // to place ONE vendor, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the level pin
+    // intact, the same discipline as the weapon pickup). Placed at a standable spot off the entrance/exit.
+    this._maybePlaceShop(desc)
+
+    // ── Branch treasure reward (§6.14, Decision 80, AC67) ── if the generator emitted an optional treasure
+    // branch (desc.branchTreasure), place a GUARANTEED reward (gold/scroll/weapon/heal) on its standable
+    // ledge — the risk/reward payoff for taking the detour. Sourced SCENE-SIDE off the level seed (NOT a
+    // generator pickup — the level pin stays intact, the weapon-pickup discipline). No-op if no branch.
+    this._placeBranchReward(desc)
 
     // ── Door (the exit, Decision 40) ── overlap fires _onDoorOverlap → _nextLevel (guarded).
     this.door = new Door(this, desc.exit, biome.colors.exit, () => this._nextLevel())
@@ -490,11 +519,16 @@ export class GameScene extends Phaser.Scene {
       .setAlpha(0.55)
     this._levelObjects.push(entMarker)
 
+    // ── Resolve WHICH boss (§6.12, Decision 78, AC65) ── biome.boss is now an ARRAY of ids (a single-id
+    // string is still accepted — back-compat). Pick one off the RUN seed (a fresh off-the-pin mulberry32)
+    // so a given run always faces the SAME boss (determinism — AC47) but different runs face a different
+    // fight (the variety win). _pickBossId falls back to the Warden for an empty/unknown list (KISS).
+    const bossId = this._pickBossId(biome.boss)
     // ── Spawn the Boss (depth-scaled — the boss biome is the DEEPEST, so this is the hardest, AC61). ──
     // scaleBossSpec (NOT the enemy scaleSpec) folds maxHp + every attack's damage by the curve so a
     // deeper boss is tankier AND hits harder (review MAJOR — the honest boss-scaling fold). The boss
     // draws its slam/dash from enemyHitboxes + its volley from enemyProjectilePool (Decision 64/65).
-    const bossSpec = scaleBossSpec(BOSSES[biome.boss], scaleAtDepth(this.runState.depth))
+    const bossSpec = scaleBossSpec(BOSSES[bossId], scaleAtDepth(this.runState.depth))
     this.boss = new Boss(this, desc.bossSpawn.x, desc.bossSpawn.y, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
       minX: TILE_SIZE * 1.5,
       maxX: desc.worldWidth - TILE_SIZE * 1.5,
@@ -682,6 +716,22 @@ export class GameScene extends Phaser.Scene {
       this.door.destroy()
       this.door = null
     }
+    // Shop teardown (§6.10) — close any open overlay (a transition can fire while shopping is impossible,
+    // but be defensive), remove the in-range overlap + destroy the vendor so it never dangles into the next
+    // level. shopOpen is forced false so the update() gate re-opens gameplay on the rebuilt level.
+    if (this.shopOverlay) {
+      this.shopOverlay.close()
+      this.shopOverlay = null
+    }
+    this.shopOpen = false
+    if (this._shopCollider) {
+      this.physics.world.removeCollider(this._shopCollider)
+      this._shopCollider = null
+    }
+    if (this.shop) {
+      this.shop.destroy()
+      this.shop = null
+    }
     if (this.tileMap) {
       this.tileMap.destroy()
       this.tileMap = null
@@ -742,12 +792,32 @@ export class GameScene extends Phaser.Scene {
     return ENEMY_SPECS[pool[pool.length - 1].id] || ENEMY_SPECS.grunt
   }
 
+  // ── _rollElite(rng) (design §6.11, Decision 77, AC64) ── roll the ELITE affix off the passed seeded RNG:
+  // ELITE_CHANCE of the time return ELITE_AFFIX (Enemy folds it — more HP, a gold body, a tighter telegraph,
+  // a death burst), else null (a normal enemy — the identity). KISS: ONE affix this slice (a future set is a
+  // weighted pick here — YAGNI). Off the seeded eliteRng so a run replays the same elites (determinism).
+  _rollElite(rng) {
+    return rng() < ELITE_CHANCE ? ELITE_AFFIX : null
+  }
+
+  // ── _pickBossId(bossField) (design §6.12, Decision 78, AC65) ── resolve the boss biome's `boss` field to
+  // ONE boss id. Accepts an ARRAY of ids (the multi-boss form) — picks one off the RUN seed (a fresh
+  // off-the-pin mulberry32) so a run replays the same boss but different runs vary — OR a single string
+  // (back-compat). Falls back to the Warden for an empty/unknown list (KISS, never throws). Only known ids
+  // (present in BOSSES) are eligible, so a typo degrades gracefully to the first valid id, else the Warden.
+  _pickBossId(bossField) {
+    const ids = (Array.isArray(bossField) ? bossField : [bossField]).filter((id) => BOSSES[id])
+    if (ids.length === 0) return 'rampartsBoss' // defensive default (always present).
+    const rng = mulberry32((this.runSeed ^ 0xb055ed) >>> 0) // off-the-pin: a run replays the same boss.
+    return ids[Math.floor(rng() * ids.length)]
+  }
+
   // Spawn an Enemy: build it (its melee strike draws from the shared enemyHitboxes pool, Decision 30;
   // the SHOOTER fires from the enemyProjectilePool, Decision 65), register its collider body as a
   // hurtbox, wire the kill-count + Cells-DROP hooks, and track it. A FLYER (spec.noGravity) opts OUT of
   // the per-level solids/oneWay colliders (review MINOR — it isn't pulled by the group default + doesn't
   // stand on the floor; its body gravity is off in the Enemy ctor) and patrols the WHOLE arena width.
-  _spawnEnemy(x, y, spec, { patrolMinX, patrolMaxX, worldDesc } = {}) {
+  _spawnEnemy(x, y, spec, { patrolMinX, patrolMaxX, worldDesc, elite = null } = {}) {
     // A flyer ignores the pit — its patrol bounds are the whole interior width (Decision 68/AC59).
     if (spec.noGravity && worldDesc) {
       patrolMinX = TILE_SIZE * 1.5
@@ -757,6 +827,7 @@ export class GameScene extends Phaser.Scene {
       patrolMinX,
       patrolMaxX,
       projectilePool: this.enemyProjectilePool,
+      elite, // §6.11 (Decision 77) — null for a normal enemy, the ELITE_AFFIX for an elite spawn.
     })
     enemy.onDeath = () => {
       this.runState.kills += 1 // bump the run's kill count for the GameOver summary (free; AC46).
@@ -792,6 +863,67 @@ export class GameScene extends Phaser.Scene {
     this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId })
   }
 
+  // ── _maybePlaceShop(desc) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── deterministically (off the
+  // level seed) maybe place ONE Shop vendor so collected gold has a regular outlet. Off a fresh mulberry32
+  // (a DIFFERENT mix constant than the weapon pickup's, so the two rolls don't correlate) — NOT on the
+  // generator's pinned draw, so the level pin stays intact. Placed at a standable spawn candidate AWAY from
+  // the entrance/exit (so the player can't sit on it at spawn / clip the door), else the level midpoint.
+  // Wires the in-range overlap so pressing E opens the buy menu (_tryOpenShop → _openShop). this.shop is
+  // null on levels without a vendor (the _tryOpenShop guard handles that) + on the boss arena (no shop).
+  _maybePlaceShop(desc) {
+    const rng = mulberry32((desc.seed ^ 0x5409ca5) >>> 0) // distinct mix from the weapon-pickup RNG.
+    if (rng() >= SHOP_LEVEL_CHANCE) return
+    // Pick a standable spot off the critical-path ends: a generator spawn candidate (already away from the
+    // entrance by ENTRANCE_SAFE_TILES + never the exit cell) keeps the vendor reachable but not underfoot.
+    // Fall back to a pickup point, then the level midpoint, so a vendor is always placeable.
+    const spot =
+      desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
+      desc.pickups[0] ||
+      { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.shop = new Shop(this, spot)
+    this._shopCollider = this.physics.add.overlap(
+      this.player.collider,
+      this.shop.rect,
+      () => this.shop && this.shop.markInRange(), // flag the in-range frame (reset each tick — see update).
+      () => !this.shopOpen && !this.transitioning && !this.gameOver,
+      this,
+    )
+  }
+
+  // ── _placeBranchReward(desc) (§6.14, Decision 80, AC67) ── place a GUARANTEED reward on the optional
+  // treasure branch's ledge (desc.branchTreasure), if the generator emitted one. Sourced SCENE-SIDE off a
+  // fresh seeded RNG (off the generator's pinned draw — the level-pin discipline) so the reward TYPE is
+  // deterministic per seed (a run replays the same loot). The reward is a real pooled pickup (the same pool
+  // every drop uses — DRY): a guaranteed gold/scroll/weapon/heal, weighted toward the run-only economy so
+  // the detour pays into the run. No-op when there is no branch (narrow grids / the boss arena → null).
+  _placeBranchReward(desc) {
+    const spot = desc.branchTreasure
+    if (!spot) return // no branch this level (narrow grid / boss arena) → nothing to place.
+    const rng = mulberry32((desc.seed ^ 0x7ea5e0) >>> 0) // off-the-pin reward RNG (a run replays the loot).
+    const roll = rng()
+    // The treasure ledge sits a tile above the platform top; spawn the pickup just above it so it arcs +
+    // settles onto the ledge (the pool's gravity + the solids collider — same as every other pickup).
+    const x = spot.x
+    const y = spot.y - TILE_SIZE
+    if (roll < 0.34) {
+      // A weapon to try (the build-defining reward) — a weapon NOT currently equipped (a real swap).
+      const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
+      const pool = choices.length ? choices : WEAPON_PICKUP_POOL
+      const weaponId = pool[Math.floor(rng() * pool.length)]
+      this.pickupPool.acquire(x, y, 'weapon', { weaponId })
+    } else if (roll < 0.58) {
+      // A run-only scroll boost (build power) — picks a deterministic scroll id off the same RNG.
+      const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
+      this.pickupPool.acquire(x, y, 'scroll', { scrollId })
+    } else if (roll < 0.8) {
+      // A fat gold payout (5× a normal gold pickup) — feeds the in-run shop economy (the gold sink).
+      this.pickupPool.acquire(x, y, 'gold', { amount: 25 })
+    } else {
+      // A heal pickup (a fountain/heart) — survivability for a damaged run that risked the detour.
+      this.pickupPool.acquire(x, y, 'heal')
+    }
+  }
+
   // ── Combat overlap callbacks (design §6.3 — unchanged from the Combat phase) ──
 
   _dedupFilter(hitboxRect, enemyRect) {
@@ -813,6 +945,9 @@ export class GameScene extends Phaser.Scene {
       damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
+    // ── STATUS (§6.13, Decision 79, AC66) ── apply the EQUIPPED melee weapon's status (spear → bleed,
+    // hammer → stun) to the struck enemy. Null for a weapon with no status tag (sword) → no-op (identity).
+    enemy.applyStatus(this.player.equippedWeapon.status)
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
@@ -838,6 +973,10 @@ export class GameScene extends Phaser.Scene {
       damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
+    // ── STATUS (§6.13, Decision 79, AC66) ── apply the firing weapon's status stamped on the shot (the
+    // bow's poison) to the struck enemy. null for a no-status weapon → no-op (identity). It's read off the
+    // PROJECTILE (pj.status, stamped at fire) so a mid-flight weapon swap doesn't change what the shot does.
+    enemy.applyStatus(pj.status)
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
@@ -932,12 +1071,86 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.flash(160, 46, 204, 113) // a faint green pulse so the heal reads.
   }
 
-  // ── _tryOpenShop() (§6.9, Decision 74) ── open the in-run shop if the player is standing on the vendor
-  // (implemented with the shop entity in this same enrichment). Defined here so the update() interact-edge
-  // wiring has a single call site; the shop overlay logic lives in _openShop / the ShopOverlay.
+  // ── _tryOpenShop() (§6.10, Decision 74/76, AC63) ── open the in-run shop if the player is standing on
+  // the vendor. Defined here so the update() interact-edge wiring has a single call site; the buy menu UI
+  // lives in the ShopOverlay (_openShop news it up). Guards: no vendor on this level (this.shop null), not
+  // in range, already open, or a death/transition in flight → no-op (the phantom-stub crash is gone — a
+  // real Shop entity + a real _openShop now exist).
   _tryOpenShop() {
-    if (this.gameOver || this.transitioning) return
-    if (this.shop && this.shop.playerInRange && !this.shopOpen) this._openShop()
+    if (this.gameOver || this.transitioning || this.shopOpen) return
+    if (this.shop && this.shop.playerInRange) this._openShop()
+  }
+
+  // ── _openShop() (§6.10, Decision 74/76, AC63) ── freeze gameplay (shopOpen gates update) + raise the
+  // buy overlay. The overlay is DECOUPLED (SOLID): it reads gold via getGold + attempts a buy via onBuy
+  // (_buyShopItem deducts + applies) + resumes via onClose — so the economy logic stays in the scene. The
+  // E press that opened it was consumed by Input.sample this frame, so the overlay's own keydown-E (buy)
+  // fires only on the NEXT press (no instant-buy-on-open). Player velocity is zeroed so it doesn't drift
+  // under the frozen overlay (gameplay update is gated, but the body would otherwise keep its momentum).
+  _openShop() {
+    if (this.shopOpen) return
+    this.shopOpen = true
+    this.player.body.setVelocity(0, 0)
+    this.shopOverlay = new ShopOverlay(this, {
+      getGold: () => this.runState.gold,
+      onBuy: (item) => this._buyShopItem(item),
+      onClose: () => this._closeShop(),
+    })
+  }
+
+  // ── _closeShop() (§6.10) ── the overlay's onClose callback: drop the overlay handle + un-freeze gameplay.
+  // (The overlay already destroyed its own GameObjects + removed its keyboard handlers in close().) Idempotent.
+  _closeShop() {
+    this.shopOpen = false
+    this.shopOverlay = null
+  }
+
+  // ── _buyShopItem(item) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── attempt a purchase: if the run
+  // can't afford item.price gold → false (the overlay re-renders the row red). Otherwise DEDUCT the gold
+  // and APPLY the effect by `kind` (a small known set, like the Pickup handler — DRY: it reuses the SAME
+  // heal/scroll/weapon paths). Run-only: gold + the bought boosts all die on death (permadeath). Returns
+  // true on a successful buy. ONE place owns the economy (the overlay never touches RunState/Player).
+  _buyShopItem(item) {
+    if (!item || this.runState.gold < item.price) return false // can't afford → silent no-op (red row).
+    // The flask cap (a touch above maxFlasks so a bought charge isn't instantly clamped, but bounded).
+    const FLASK_BUY_CAP = this.runState.maxFlasks + 1
+    // A heal/flask item only "sticks" if it does something (don't burn gold at full HP / a full flask) —
+    // check BEFORE deducting so a no-op buy never charges (the same guard the flask DRINK uses).
+    if (item.kind === 'heal') {
+      const healed = this.player.heal(Math.round(this.player.maxHp * (item.healFrac || 0)))
+      if (healed <= 0) return false // already full → don't charge for nothing.
+    }
+    if (item.kind === 'flask' && this.runState.flasks >= FLASK_BUY_CAP) return false // already capped → no charge.
+    this.runState.gold -= item.price // deduct the run-only currency.
+    switch (item.kind) {
+      case 'heal':
+        // (already applied above, before the deduct, so a no-heal never charges) — pop a green heal FX.
+        this.cameras.main.flash(140, 46, 204, 113)
+        break
+      case 'flask':
+        // +1 flask charge for THIS run (the genre's vendor flask refill) — bounded by FLASK_BUY_CAP (the
+        // guard above already rejected a buy at the cap, so this always grants a charge).
+        this.runState.flasks = Math.min(FLASK_BUY_CAP, this.runState.flasks + 1)
+        break
+      case 'scroll': {
+        // Arm a random run-only scroll (same effect a scroll pickup grants — DRY via the SCROLLS table).
+        const scroll = SCROLLS[Math.floor(Math.random() * SCROLLS.length)]
+        if (scroll) scroll.apply(this.runState)
+        this._syncPlayerScrollStats() // reflect a vitality scroll's max-HP bump on the live player.
+        break
+      }
+      case 'weapon': {
+        const weapon = WEAPONS[item.weaponId]
+        if (weapon) {
+          this.player.equipWeapon(weapon) // swap moveset (resets the combo — same path as a weapon pickup).
+          this.runState.weaponId = item.weaponId // carried across level rebuilds.
+        }
+        break
+      }
+    }
+    // A small confirm pop at the player so the buy reads (reuse the spark pool — no new allocation).
+    this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 })
+    return true
   }
 
   // ── _applyStartingScrolls(n) (§6.9, Decision 73) ── apply `n` run-only scroll boosts at run start (a meta
@@ -1032,15 +1245,22 @@ export class GameScene extends Phaser.Scene {
   update(_time, delta) {
     const dt = Math.min(delta / 1000, MAX_DT)
     this.hitstopTimer = Math.max(0, this.hitstopTimer - dt)
-    const gdt = this.hitstopTimer > 0 ? 0 : dt
+    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop overlay is up (a modal
+    // pause) — so live hitboxes/projectiles/enemies all FREEZE together while shopping (§6.10), exactly as
+    // they freeze during a hit-stop. FX still tick on REAL dt so the overlay's flashes/pops play.
+    const gdt = this.hitstopTimer > 0 || this.shopOpen ? 0 : dt
 
     const inputState = this.input2.sample()
     // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
+    // ── Shop in-range RESET (§6.10) ── clear the vendor's in-range flag BEFORE the physics step runs its
+    // overlaps this frame (the overlap callback re-sets it true only while the bodies actually overlap). The
+    // reset also drives the "[E] SHOP" prompt off the PREVIOUS frame's flag so the tell tracks the player.
+    if (this.shop) this.shop.resetInRange()
 
-    // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight), but
-    // keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning) {
+    // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
+    // shop overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
+    if (!this.gameOver && !this.transitioning && !this.shopOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held

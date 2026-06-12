@@ -193,3 +193,41 @@ export const ENEMY_SPECS = {
 
 // The ordered list (for the verifier sweep + any list rendering).
 export const ENEMY_ARCHETYPES = [GRUNT, SHOOTER, CHARGER, FLYER]
+
+// ── ELITE affix (design §6.11, Decision 77, AC64) ──
+// An elite is a NORMAL archetype with a small bundle of MODIFIERS rolled at spawn — NOT a new archetype
+// or subclass (it reuses the ONE Enemy FSM, the Decision-68 philosophy): a bigger body, more HP, a gold
+// tint, a TIGHTER telegraph (faster wind-up → it punishes a lazy dodge), and a DEATH BURST (a radial fan
+// of pooled 'enemy' projectiles when it dies — a "don't melee it carelessly" tell). Cheap mid-run spikes
+// that materially raise encounter variety on the SAME scaffolding (the genre's elite pressure).
+//
+// PURE DATA (verifier-importable): the affix is a plain modifier object Enemy.js folds into its live spec
+// at construction (it never mutates the shared archetype spec — same aliasing safety as scaleSpec). The
+// roll CHANCE is data here too (GameScene rolls it off a fresh seeded RNG so a run replays the same elites).
+//   hpMult        — multiply the (already depth-scaled) maxHp (a tankier elite).
+//   bodyScale     — scale bodyW/bodyH (a visibly bigger threat — reads at a glance).
+//   tint          — the resting-fill colour override (gold — the elite tell, distinct from every archetype).
+//   telegraphMult — scale the attack wind-up (< 1 → faster telegraph: a tighter dodge window, AC56-aware).
+//   cellBonus     — extra Cells dropped on death (an elite is a priority kill → a richer reward).
+//   deathBurst    — { count, projectile } | null: a radial volley fired from the enemy ProjectilePool on
+//                   death (the affix's signature — a posthumous AoE you must respect). null = no burst.
+export const ELITE_AFFIX = {
+  hpMult: 2.2, // a chunky HP bump so an elite is a real time-sink (≈ a mini-spike mid-room).
+  bodyScale: 1.35, // a bigger body — the visual tell + a touch easier to hit (a fair trade for the HP).
+  tint: 0xf1c40f, // gold — the universal elite colour (over the archetype's resting fill).
+  telegraphMult: 0.7, // tighter wind-ups (faster attacks) — punishes a careless dodge (the elite pressure).
+  cellBonus: 4, // +4 Cells on death (a priority-kill reward — more meta currency for the harder fight).
+  // DEATH BURST: a 6-shot radial fan of weak 'enemy' projectiles on death (dodge the corpse). Uses the
+  // SAME projectile shape the SHOOTER/boss volley fire (Decision 65) so it rides the existing pool + the
+  // enemy-projectile→player overlap with NO new wiring. Low per-shot damage (it's a "step back" tell, not
+  // a one-shot). The fan is centred radially in Enemy._die.
+  deathBurst: {
+    count: 6, // projectiles in the radial ring (evenly spaced — a 360° fan).
+    projectile: { speed: 300, damage: 8, knockback: 200, lifetime: 1.0, w: 12, h: 12 },
+  },
+}
+
+// The per-spawn elite ROLL chance (design §6.11, Decision 77) — DATA so GameScene rolls it off a fresh
+// seeded RNG (a run replays the same elites). KISS: a flat chance (no depth ramp this slice — YAGNI; the
+// depth scaling already makes deeper elites tankier via scaleSpec running BEFORE the affix fold).
+export const ELITE_CHANCE = 0.16 // ~1 in 6 spawns is an elite (a spike every room-or-two, not every enemy).

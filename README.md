@@ -1,10 +1,11 @@
 # Dead Cell
 
 A 2D roguelite action-platformer in the spirit of **Dead Cells** — procedurally generated,
-multi-biome runs; **permadeath**; fast melee + ranged combat with a dodge-roll (i-frames);
-**4 enemy archetypes** with state-machine AI; a **multi-phase boss**; **4 weapons**; and persistent
-meta-progression between runs. Reach the boss arena at the end of the **Ramparts** and beat **The
-Warden** to win the run.
+multi-biome runs; **permadeath**; fast melee + ranged combat with a dodge-roll (i-frames) and
+**status effects** (bleed / poison / stun); **4 enemy archetypes** with state-machine AI plus
+**elite** variants; **two final bosses** (one chosen per run); **4 weapons**; an **in-run shop**;
+**optional treasure branches**; and a deep persistent meta-progression tree between runs. Reach the
+boss arena at the end of the **Ramparts** and beat the boss to win the run.
 
 Built with **Phaser 3 + Vite**, ES modules, **programmer-art primitives only** (colored
 rectangles / simple shapes via Phaser `Graphics` and generated textures) — no external sprite
@@ -19,7 +20,8 @@ or audio assets.
 Two currencies:
 
 - **Cells** — dropped by enemies; spent in the Hub on **PERMANENT** meta-upgrades (survive death).
-- **Gold / Scrolls** — **RUN-ONLY** boosts (lost on death).
+- **Gold / Scrolls** — **RUN-ONLY** boosts (lost on death). Gold is spent at the **in-run shop** (a
+  vendor that appears on some levels) on heals, flask refills, scrolls, or a vendor weapon.
 
 ## Run it
 
@@ -44,8 +46,13 @@ npm run verify   # headless determinism check (scripts/verify-gen.mjs)
   advance swings; hit an enemy from behind for a **BACKSTAB** crit
 - **Dodge-roll:** **Shift** or **K** — horizontal dash with i-frames (flashes yellow) and a
   brief cooldown; dodge-through an enemy's (or the boss's) **telegraphed** strike to take no damage
+- **Drink flask:** **Q** — heal a chunk of max HP from a limited-charge flask; charges **refill on
+  every biome transition** (a fountain at each new area). Don't waste a drink at full HP.
+- **Shop / interact:** **E** — when standing on a vendor (a `[E] SHOP` prompt appears) opens the
+  paused buy menu; **UP / DOWN** select, **E / SPACE / ENTER** buy or LEAVE
 - **Pickups:** walk over them — **Cells** (cyan, banked to permanent meta), **gold** (run-only),
-  **scrolls** (magenta, run-only stat boosts), **weapons** (white, swap the equipped weapon)
+  **scrolls** (magenta, run-only stat boosts), **weapons** (white, swap the equipped weapon),
+  **heals** (green fountains)
 - **ESC** → Title
 
 ## How to play
@@ -56,25 +63,32 @@ Cells → Hub**. A run descends through **3 biomes** of rising difficulty:
 - **Prison** (tier 0) — melee **Grunts**. The fair opener.
 - **Sewers** (tier 1) — adds ranged **Shooters** that kite you and fire bolts.
 - **Ramparts** (tier 2) — adds **Chargers** (telegraphed dashes) and **Flyers** (hovering swoops),
-  and **ends in a boss arena**: a flat, walled, spike-rimmed room where **The Warden** spawns.
+  and **ends in a boss arena**: a flat, walled, spike-rimmed room where the run's boss spawns.
 
-**The Warden** is a two-phase boss. Each attack — a **slam**, a **dash**, or a projectile **volley** —
-**telegraphs** (an amber wind-up) before it strikes, so every hit is dodgeable. At **≤50% HP** it
-enters **phase 2**: tighter telegraphs, faster movement, and it adds the volley to its rotation. Beat
-it to win the run. Watch the **arena spikes** — standing on them chips your HP.
+Along the way, watch for **elites** — gold-tinted, beefed-up enemies with tighter telegraphs that
+burst into a ring of projectiles when they die (don't melee one carelessly), and **treasure branches**
+— optional upward side detours that pay out a guaranteed reward (gold / scroll / weapon / heal). Your
+weapon now carries **status effects**: the **Spear bleeds**, the **Hammer stuns**, the **Bow poisons**.
 
-**Balance:** a skilled clean run — dodging telegraphs, backstabbing, managing HP, spending Cells on
-upgrades — can reach and beat The Warden; a careless run that face-tanks and ignores telegraphs dies.
-Difficulty scales with **depth** (deeper enemies are tankier and hit harder) and is the deepest at the
-boss. All of it is pure-config data, re-proven monotone by `npm run verify`.
+**The boss** is chosen per run from two: **The Warden** (a slow melee bruiser — slam / dash) or **The
+Hollow Sentinel** (a faster ranged-pressure boss — denser volleys). Each is two-phase: every attack
+**telegraphs** (an amber wind-up) before it strikes, so every hit is dodgeable, and at **≤50% HP** it
+enters **phase 2** (tighter telegraphs, faster, a denser rotation). Beat it to win the run. Watch the
+**arena spikes** — standing on them chips your HP.
+
+**Balance:** a skilled clean run — dodging telegraphs, backstabbing, managing HP, spending gold at the
+shop and Cells on upgrades — can reach and beat the boss; a careless run that face-tanks and ignores
+telegraphs dies. Difficulty scales with **depth** (deeper enemies are tankier and hit harder) and is
+the deepest at the boss. All of it is pure-config data, re-proven monotone by `npm run verify`.
 
 **Permadeath + meta:** on **death OR victory** the run's **Cells** are banked to permanent meta
-(gold/scrolls are lost), and you return to the **Hub** to spend them on **+Max HP**, **+Melee Damage**,
-**−Dodge Cooldown**, and a **Starting Weapon** unlock. Progress persists to `localStorage` and survives
-a relaunch.
+(gold/scrolls are lost), and you return to the **Hub** to spend them on a **9-row upgrade tree**:
+**+Max HP**, **+Melee Damage**, **+Ranged Damage**, **−Dodge Cooldown**, **+Dodge I-Frames**, a
+**Starting Weapon** unlock, a **Gold Head-Start**, **Starting Scrolls**, and a **Bigger Flask** (more
+charges + bigger heals). Progress persists to `localStorage` and survives a relaunch.
 
-The HUD shows the **HP bar**, live **Cells / gold** counters, the **equipped weapon**, the
-**depth · biome** readout, and — in the boss room — **The Warden's HP bar** across the top.
+The HUD shows the **HP bar**, live **Cells / gold** counters, the **equipped weapon**, the **flask
+charges**, the **depth · biome** readout, and — in the boss room — the **boss's HP bar** across the top.
 
 ## Architecture
 
@@ -107,4 +121,9 @@ combat/ effects/ util/`. Procedural generation is **seeded + pure** (`util/rng.j
    **balance pass** (winnable-but-punishing). *(this phase)*.
 7. *(subsumed into Phase 5 — the Hub + localStorage meta shipped there.)*
 
-See `docs/designs/2026-06-12-dead-cells-roguelite.md` for the full design.
+**Enrichment round 2** — closing the genre-loop gaps: an **in-run shop** (the gold sink), a **deeper
+9-row meta tree**, **elite** enemy affixes + a **second boss** chosen per run, **status effects**
+(bleed / poison / stun), and **optional treasure branches**. Plus round 1's entropy-minted run seeds
+(a shareable run id), the **healing flask** (Q) refilled per biome, and a found-heal pickup.
+
+See `docs/designs/2026-06-12-dead-cells-roguelite.md` for the full design (§6.9–§6.14, Decision 71–80).

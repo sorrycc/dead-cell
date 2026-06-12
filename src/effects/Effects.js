@@ -61,6 +61,18 @@ export class Effects {
     this._onHitstop(isBackstab ? HITSTOP_CRIT : HITSTOP_BASE)
   }
 
+  // ── statusTick(x, y, damage, kind) (design §6.13, Decision 79, AC66) ── a SMALL over-time-damage pop for
+  // a bleed/poison tick: a few kind-tinted sparks + a small floating number, NO shake / NO hit-stop (DoT is
+  // ambient chip damage, not an impact — it must not jitter the camera or freeze the world every tick). The
+  // tint reads the status: bleed = dark red, poison = sickly green. Reuses the SAME pooled sparks/number
+  // path (DRY, no new allocation). Called throttled by Enemy._tickStatus (~5/s) so it reads without churn.
+  statusTick(x, y, damage = 0, kind = 'bleed') {
+    const color = kind === 'poison' ? 0x2ecc71 : 0xc0392b
+    const numColor = kind === 'poison' ? '#2ecc71' : '#e74c3c'
+    this.pool.spawnSparks(x, y, { count: 4, color, speed: 150 })
+    this.pool.spawnNumber(x, y - 18, damage, { color: numColor, scale: 0.8 })
+  }
+
   // Forward the per-frame tick to the pool. REAL dt (the freeze must not pause the pop).
   tick(dt) {
     this.pool.tick(dt)

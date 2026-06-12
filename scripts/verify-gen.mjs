@@ -57,7 +57,13 @@ import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
 // pools, the boss table, and the boss-arena generator branch. All node-importable (no Phaser) — the
 // verifier asserts the enemy-pool/archetype + boss-table well-formedness + the boss-arena contract.
 import { ENEMY_SPECS, ENEMY_ARCHETYPES, GRUNT } from '../src/config/enemies.js'
-import { BOSS_ORDER, BOSS_ATTACK_KINDS } from '../src/config/bosses.js'
+import { BOSS_ORDER, BOSS_ATTACK_KINDS, BOSSES } from '../src/config/bosses.js'
+// Enrichment PURE modules (§6.10/§6.11/§6.12, Decision 76/77/78): the in-run shop catalog (the gold sink),
+// the elite-affix table, and the status-effect table. All node-importable (no Phaser) — a successful import
+// re-proves their purity, and the new sections below assert each table is well-formed (KISS guardrails).
+import { SHOP_ITEMS, SHOP_ITEM_KINDS } from '../src/config/shop.js'
+import { STATUS_KINDS, makeStatus, applyStatus, tickStatuses, hasStatus } from '../src/combat/status.js'
+import { WEAPONS } from '../src/config/weapons.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -275,7 +281,48 @@ function checkDescription(desc, biome) {
   const t = bfsTraversable(desc)
   if (!t.ok) return `not traversable: ${t.reason}`
 
+  // (f) §6.14 (Decision 80, AC67) — the OPTIONAL treasure branch: when present, its treasure ledge must be
+  // STANDABLE (re-derived from tiles — GameScene places the reward there) AND REACHABLE from the entrance
+  // (the branch only ADDS nodes, so the entrance→treasure BFS must succeed — the detour is takeable). The
+  // main entrance→exit path is already proven by (e), so the branch never breaks the critical route.
+  if (desc.branchTreasure) {
+    const bt = desc.branchTreasure
+    if (!isStandable(desc.tiles, bt.col, bt.row, desc.rows)) return `branch treasure (${bt.col},${bt.row}) not standable`
+    const r = bfsReaches(desc, desc.entrance, bt)
+    if (!r.ok) return `branch treasure not reachable from entrance: ${r.reason}`
+  }
+
   return null
+}
+
+// ── bfsReaches(desc, fromCell, toCell) (§6.14, AC67) ── a generalized entrance→cell BFS over the platform
+// graph (the SAME canReachPlatform metric the entrance→exit BFS uses — DRY). Used to prove the branch
+// treasure is reachable from the entrance (the detour is takeable). Returns { ok, reason }.
+function bfsReaches(desc, fromCell, toCell) {
+  const plats = desc.platforms.filter((p) => p.type === TILE.SOLID || p.type === TILE.ONEWAY)
+  const start = platformSupporting(plats, fromCell.col, fromCell.row)
+  const goal = platformSupporting(plats, toCell.col, toCell.row)
+  if (!start) return { ok: false, reason: 'from-cell has no supporting platform' }
+  if (!goal) return { ok: false, reason: 'to-cell has no supporting platform' }
+  if (start === goal) return { ok: true }
+  const n = plats.length
+  const adj = Array.from({ length: n }, () => [])
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i !== j && canReachPlatform(plats[i], plats[j])) adj[i].push(j)
+    }
+  }
+  const startIdx = plats.indexOf(start)
+  const goalIdx = plats.indexOf(goal)
+  const seen = new Uint8Array(n)
+  seen[startIdx] = 1
+  const queue = [startIdx]
+  while (queue.length) {
+    const u = queue.shift()
+    if (u === goalIdx) return { ok: true }
+    for (const v of adj[u]) if (!seen[v]) { seen[v] = 1; queue.push(v) }
+  }
+  return { ok: false, reason: 'goal platform not reachable' }
 }
 
 // ── 3a) Determinism (AC19): generateLevel twice → DEEP-EQUAL (element-wise over the int grid). ──
@@ -519,6 +566,16 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       fail(`upgrade ${upg.id}: dodgeCooldownMult increased (a longer cooldown is a weaken)`)
     }
     if (typeof maxed.startWeaponId !== 'string') fail(`upgrade ${upg.id}: startWeaponId is not a string`)
+    // ── ENRICHMENT (Decision 75) — the five deepened-table fields are ALL bigger-is-better (a meta tier
+    // never weakens them). A max-level fold must leave each ≥ base on every upgrade (the rows that don't
+    // touch a given field leave it at base = identity, which still satisfies ≥). This makes the new rows
+    // verifier-proven non-weakening exactly like the original four.
+    if (maxed.rangedDamageMult < BASE_PLAYER_STATS.rangedDamageMult) fail(`upgrade ${upg.id}: rangedDamageMult decreased`)
+    if (maxed.dodgeIframeBonus < BASE_PLAYER_STATS.dodgeIframeBonus) fail(`upgrade ${upg.id}: dodgeIframeBonus decreased`)
+    if (maxed.startGold < BASE_PLAYER_STATS.startGold) fail(`upgrade ${upg.id}: startGold decreased`)
+    if (maxed.startScrolls < BASE_PLAYER_STATS.startScrolls) fail(`upgrade ${upg.id}: startScrolls decreased`)
+    if (maxed.maxFlasks < BASE_PLAYER_STATS.maxFlasks) fail(`upgrade ${upg.id}: maxFlasks decreased`)
+    if (maxed.flaskHealFrac < BASE_PLAYER_STATS.flaskHealFrac) fail(`upgrade ${upg.id}: flaskHealFrac decreased`)
   }
 }
 
@@ -603,6 +660,14 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   if (bossBiomes.length !== 1) fail(`expected exactly 1 boss biome (endsInBoss), found ${bossBiomes.length} (AC57)`)
   if (bossBiomes[0] !== BIOME_ORDER[BIOME_ORDER.length - 1]) fail('the boss biome must be the LAST in BIOME_ORDER (AC57)')
   if (!bossBiomes[0].boss) fail(`boss biome ${bossBiomes[0].id} missing a boss id (AC57)`)
+  // §6.12 (Decision 78, AC65) — the boss biome's `boss` may be a SINGLE id OR an ARRAY of ids (the seeded
+  // multi-boss pick). EVERY id must resolve to a known boss in BOSSES (a typo / dangling id fails loudly,
+  // mirroring the enemyPool unknown-id check). At least one id must be present (the gate needs a fight).
+  const bossIds = Array.isArray(bossBiomes[0].boss) ? bossBiomes[0].boss : [bossBiomes[0].boss]
+  if (bossIds.length === 0) fail(`boss biome ${bossBiomes[0].id}: empty boss list (AC65)`)
+  for (const id of bossIds) {
+    if (!BOSSES[id]) fail(`boss biome ${bossBiomes[0].id}: boss id "${id}" not in BOSSES (AC65)`)
+  }
 }
 
 // ── 6c) Boss table well-formed (AC56/AC61): ≥1 boss; each has ≥2 phases with DESCENDING hpThresholds
@@ -677,13 +742,96 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 7) Enrichment pure contracts (§6.10, Decision 76, AC63). An INDEPENDENT proof of the in-run shop
+//    catalog (the GOLD SINK) that stays Phaser-free: a non-empty list, a positive gold price, a known
+//    kind per item, and the kind-specific param present (weaponId for 'weapon', healFrac for 'heal').
+//    Mirrors the upgrade-table / boss-table well-formedness checks — a malformed catalog fails loudly.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  if (!Array.isArray(SHOP_ITEMS) || SHOP_ITEMS.length === 0) fail('SHOP_ITEMS is empty (AC63 — the gold sink needs items)')
+  for (const it of SHOP_ITEMS) {
+    if (typeof it.id !== 'string' || !it.id) fail(`shop item missing id`)
+    if (typeof it.name !== 'string' || !it.name) fail(`shop item ${it.id}: missing name`)
+    if (!(typeof it.price === 'number') || it.price <= 0) fail(`shop item ${it.id}: price must be > 0 gold`)
+    if (!SHOP_ITEM_KINDS.includes(it.kind)) fail(`shop item ${it.id}: unknown kind "${it.kind}" (AC63)`)
+    // Kind-specific params (GameScene._buyShopItem reads these — assert the right one is present + sane).
+    if (it.kind === 'weapon' && (typeof it.weaponId !== 'string' || !it.weaponId)) fail(`shop item ${it.id}: 'weapon' needs a weaponId`)
+    if (it.kind === 'heal' && !(typeof it.healFrac === 'number' && it.healFrac > 0)) fail(`shop item ${it.id}: 'heal' needs a healFrac > 0`)
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 8) Combat status effects (§6.13, Decision 79, AC66). An INDEPENDENT proof of the PURE status tick
+//    math (bleed/poison/stun) + the weapon status tags. A successful import re-proves status.js is
+//    Phaser-free; the asserts pin the DoT accumulation, the stun flag, expiry, and refresh-on-re-hit.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 8a) Weapon status tags reference only KNOWN kinds, with sane params (a damaging status needs a
+  // positive tickInterval + tickDmg; a stun is non-damaging). A malformed tag fails loudly. ──
+  for (const w of Object.values(WEAPONS)) {
+    if (!w.status) continue // a weapon with no status (sword) is fine — the identity.
+    if (!STATUS_KINDS.includes(w.status.kind)) fail(`weapon ${w.id}: unknown status kind "${w.status.kind}" (AC66)`)
+    if (!(w.status.duration > 0)) fail(`weapon ${w.id}: status duration must be > 0`)
+    const damaging = w.status.kind === 'bleed' || w.status.kind === 'poison'
+    if (damaging && !(w.status.tickInterval > 0 && w.status.tickDmg > 0)) {
+      fail(`weapon ${w.id}: a damaging status needs tickInterval > 0 AND tickDmg > 0`)
+    }
+  }
+
+  // ── 8b) tickStatuses accumulates DoT correctly: a bleed of tickDmg=3 every 0.4s, ticked in 0.1s steps
+  // over 0.4s, emits EXACTLY 3 damage once (one full interval crossed), and is still live (timer > 0). ──
+  {
+    const list = []
+    applyStatus(list, { kind: 'bleed', duration: 2.4, tickInterval: 0.4, tickDmg: 3 })
+    let total = 0
+    for (let i = 0; i < 4; i++) total += tickStatuses(list, 0.1).damage // 4 × 0.1 = 0.4s → one interval.
+    if (total !== 3) fail(`status tick: 0.4s of a 0.4s/3 bleed should deal 3, got ${total}`)
+    if (!hasStatus(list, 'bleed')) fail('status tick: bleed should still be live after 0.4s of 2.4s duration')
+  }
+
+  // ── 8c) A status EXPIRES + is DROPPED when its timer elapses (the list shrinks); a non-damaging stun
+  // reports `stunned` true while live + false (and is gone) after it expires. ──
+  {
+    const list = []
+    applyStatus(list, { kind: 'stun', duration: 0.5 })
+    const mid = tickStatuses(list, 0.3) // 0.3 < 0.5 → still stunned.
+    if (!mid.stunned) fail('status tick: a 0.5s stun should be stunned at 0.3s')
+    const end = tickStatuses(list, 0.3) // total 0.6 > 0.5 → expired.
+    if (end.stunned) fail('status tick: a 0.5s stun should NOT be stunned after 0.6s')
+    if (list.length !== 0) fail(`status tick: an expired status should be dropped (list len ${list.length})`)
+  }
+
+  // ── 8d) applyStatus REFRESHES (does not stack) a same-kind status: two applies → ONE entry, with the
+  // timer refreshed to the longer duration (re-poking extends, never multiplies the list). ──
+  {
+    const list = []
+    applyStatus(list, { kind: 'poison', duration: 1.0, tickInterval: 0.5, tickDmg: 2 })
+    tickStatuses(list, 0.6) // decay below the fresh duration.
+    applyStatus(list, { kind: 'poison', duration: 1.0, tickInterval: 0.5, tickDmg: 2 }) // re-apply.
+    if (list.length !== 1) fail(`status apply: a re-applied poison must refresh, not stack (len ${list.length})`)
+    if (!(list[0].timer >= 1.0 - 1e-9)) fail(`status apply: re-apply should refresh the timer to the full duration`)
+  }
+
+  // ── 8e) makeStatus is pure (a fresh object) + identity-safe (a non-damaging stun has 0 tick params). ──
+  {
+    const a = makeStatus({ kind: 'stun', duration: 0.5 })
+    const b = makeStatus({ kind: 'stun', duration: 0.5 })
+    if (a === b) fail('makeStatus must return a fresh object each call')
+    if (a.tickDmg !== 0 || a.tickInterval !== 0) fail('makeStatus: a stun must default to non-damaging (0 tick)')
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
-    `traversable(AC27); level pin OK; curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
+    `traversable(AC27) + branch-treasure standable&reachable(AC67); level pin OK; ` +
+    `curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
     `identity/non-mutating/never-weaker (AC55); ${ENEMY_ARCHETYPES.length} enemy archetypes + per-biome ` +
     `pools (AC59); boss table well-formed + depth-scaling guardrail (AC56/AC61); ${WEAPON_ORDER.length} ` +
-    `weapons (AC60); boss-arena branch deterministic + valid over ${N} seeds (AC57)`,
+    `weapons (AC60); boss-arena branch deterministic + valid over ${N} seeds (AC57); ` +
+    `${SHOP_ITEMS.length} shop items well-formed (AC63); ${BOSS_ORDER.length} bosses well-formed (AC65); ` +
+    `status tick/expiry/refresh pure+pinned (${STATUS_KINDS.length} kinds, AC66)`,
 )
 process.exit(0)

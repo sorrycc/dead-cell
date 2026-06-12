@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { swingRect } from '../combat/hitbox.js'
 import { GRUNT } from '../config/enemies.js'
+import { applyStatus, tickStatuses, hasStatus } from '../combat/status.js'
 
 // ── Base Enemy with a state-machine AI (design §6.3 + §6.6.4, Decisions 22/29/30/68, AC24/AC59) ──
 // A plain class (Decision 10 shape, like the Player): it HOLDS an invisible `collider` (the Arcade
@@ -48,9 +49,16 @@ export class Enemy {
   // hitboxPool: a HitboxPool tagged for THIS enemy (its melee strike acquires from it). projectilePool:
   // the enemy ProjectilePool the 'ranged' behaviour fires from (Decision 65; null = no ranged). patrol
   // bounds default to a span around spawn but the scene passes explicit, pit-excluding ones (Decision 29).
-  constructor(scene, x, y, spec, hitboxPool, { patrolMinX = x - 160, patrolMaxX = x + 160, projectilePool = null } = {}) {
+  constructor(scene, x, y, spec, hitboxPool, { patrolMinX = x - 160, patrolMaxX = x + 160, projectilePool = null, elite = null } = {}) {
     this.scene = scene
-    this.spec = spec
+    // ── ELITE affix fold (design §6.11, Decision 77, AC64) ── if an elite modifier is passed in, build a
+    // NEW spec with the affix baked in (more HP, a bigger body, a gold tint) — NEVER mutating the caller's
+    // spec (the same aliasing safety scaleSpec keeps). A normal spawn (elite=null) is byte-identical to
+    // before the enrichment (the additive identity). The affix's telegraphMult + deathBurst are kept on
+    // `this.elite` and read by the attack/death code (so the FSM stays one switch — Decision 68).
+    this.elite = elite
+    this.spec = elite ? this._foldElite(spec, elite) : spec
+    spec = this.spec // use the folded spec for all the ctor reads below (body size/colour/HP).
     this.behavior = spec.behavior || 'melee' // archetype behaviour tag (Decision 68); default melee.
     this.id = `enemy${_nextEnemyId++}`
     this.hitboxPool = hitboxPool
@@ -112,6 +120,22 @@ export class Enemy {
     this.deathTimer = 0 // > 0 while the death pop plays before despawn.
     this.scaleX = 1
     this.scaleY = 1
+
+    // ── Status effects (design §6.13, Decision 79, AC66) ── the live list of {kind,timer,...} statuses
+    // (bleed/poison/stun) applied by weapon hits. Ticked in update() on the gameplay dt: damaging statuses
+    // (bleed/poison) drain HP over time; a 'stun' freezes the AI for its window. Empty by default (the
+    // identity — a weapon with no status tag never touches it). status.js owns the pure tick math.
+    this.statuses = []
+    this._statusFxTimer = 0 // > 0 while a status tick FX pop is on cooldown (so DoT doesn't spam particles).
+  }
+
+  // ── applyStatus(spec) (design §6.13, Decision 79, AC66) ── arm/refresh a status on this enemy from a
+  // weapon's status spec ({ kind, duration, tickInterval, tickDmg }). Called by GameScene's hit handlers.
+  // No-op if dead (a corpse can't bleed) or spec is null (a weapon with no status — the identity). Refresh-
+  // on-re-hit semantics live in status.js's applyStatus (re-poking extends, never stacks infinitely).
+  applyStatus(spec) {
+    if (this.dead || !spec) return
+    applyStatus(this.statuses, spec)
   }
 
   // Hurtbox status for the player's overlap filter: dead/not-yet-spawned enemies aren't hittable,
@@ -155,6 +179,26 @@ export class Enemy {
     this.attackCooldownTimer = Math.max(0, this.attackCooldownTimer - dt)
     this.contactCooldownTimer = Math.max(0, this.contactCooldownTimer - dt)
     this.hurtIframeTimer = Math.max(0, this.hurtIframeTimer - dt)
+
+    // ── Status tick (design §6.13, Decision 79, AC66) ── advance bleed/poison/stun on the gameplay dt:
+    // drain DoT damage from HP (which can KILL — handled in _tickStatus) and read the stun flag. A STUN
+    // freezes the AI: skip the FSM switch entirely this frame (the body is planted) so a hammered enemy is
+    // briefly helpless. The DEAD state still runs its pop (a status can't keep ticking a corpse). Returns
+    // early if the DoT killed us (the state is now DEAD and the visual tick below still plays the pop).
+    const stunned = this._tickStatus(dt, ctx)
+    if (this.dead && this.state === STATE.DEAD) {
+      // DoT may have just killed us → run only the death-pop visual this frame (the FSM is moot).
+      this._tickDead(dt)
+      this._updateVisual(dt)
+      return
+    }
+    if (stunned && this.state !== STATE.DEAD && this.state !== STATE.HURT) {
+      // STUNNED: plant the body + skip the FSM (no patrol/chase/attack). HURT already plants (knockback
+      // carries), so we leave it alone; the stun simply outlasts it. The visual still ticks (the tint cue).
+      this.body.setVelocityX(0)
+      this._updateVisual(dt)
+      return
+    }
 
     switch (this.state) {
       case STATE.IDLE:
@@ -248,7 +292,9 @@ export class Enemy {
       Math.abs(py - cy) <= this.spec.detectHeight
     if (inRange && this.attackCooldownTimer <= 0) {
       this.state = STATE.ATTACK
-      this.telegraphTimer = this.spec.telegraph
+      // ELITE (Decision 77): a tighter telegraph (telegraphMult < 1) → a faster wind-up that punishes a
+      // lazy dodge. A normal enemy (this.elite null) uses the base telegraph (the identity — mult 1).
+      this.telegraphTimer = this.spec.telegraph * (this.elite ? this.elite.telegraphMult ?? 1 : 1)
       this.strikeTimer = 0
       if (this.behavior !== 'fly') this.body.setVelocityX(0) // ground enemies plant; flyer keeps hovering.
       return
@@ -305,6 +351,36 @@ export class Enemy {
       this.strikeRect = null // strike fully resolved — drop our handle (defensive; the ownerId guard
       //                        in _releaseStrike already prevents releasing a re-acquired rect).
     }
+  }
+
+  // ── _tickStatus(dt, ctx) → stunned (design §6.13, Decision 79, AC66) ── advance the status list (the
+  // pure status.js math), apply any DoT damage to HP (which can KILL — fire _die() once at ≤0), pop a small
+  // status FX on a damaging tick (throttled so DoT doesn't spam particles), and return whether a stun is
+  // live. DoT BYPASSES the hit-iframe/knockback path on purpose: a bleed ticks while the enemy is otherwise
+  // un-re-hittable (that's the value of DoT), and it must NOT re-trigger the hurt-reaction each tick (no
+  // knockback/stagger from poison). _statusFxTimer gates the cue to ~5/s so it reads without churn.
+  _tickStatus(dt, ctx) {
+    if (this._statusFxTimer > 0) this._statusFxTimer = Math.max(0, this._statusFxTimer - dt)
+    if (this.statuses.length === 0) return false
+    const { damage, stunned } = tickStatuses(this.statuses, dt)
+    if (damage > 0 && !this.dead) {
+      this.hp -= damage
+      if (this._statusFxTimer <= 0 && ctx && ctx.effects) {
+        // A small DoT pop (the kind tints it: bleed red, poison green) so the over-time damage reads.
+        ctx.effects.statusTick(this.body.center.x, this.body.center.y, damage, this._dominantDotKind())
+        this._statusFxTimer = 0.18 // ~5 pops/s max — readable, not spammy.
+      }
+      if (this.hp <= 0) this._die() // DoT can finish a low-HP enemy (the genre's "they bled out").
+    }
+    return stunned
+  }
+
+  // The kind of the active damaging status for the FX tint (bleed vs poison). Bleed first (KISS — a single
+  // dominant cue; if both are present bleed wins the tint, which is fine for a primitive pop).
+  _dominantDotKind() {
+    if (hasStatus(this.statuses, 'bleed')) return 'bleed'
+    if (hasStatus(this.statuses, 'poison')) return 'poison'
+    return 'bleed'
   }
 
   // ── hurt: frozen by hitstun (knockback carries since we don't write vx here), then → chase ──
@@ -394,6 +470,9 @@ export class Enemy {
     this._releaseStrike() // release only OUR live strike (not the shared pool — review MAJOR).
     this.deathTimer = 0.35 // s — how long the pop plays before despawn.
     this._kickScale(1.5, 1.5)
+    // ELITE death burst (Decision 77/AC64): fire the radial projectile fan at the captured death center
+    // BEFORE the drop hook (order is cosmetic; the body is already disabled). No-op for a normal enemy.
+    this._fireDeathBurst(dropX, dropY)
     // Fire the drop hook ONCE with the captured coords + count (Decision 54). GameScene spawns pooled
     // pickups there; null in a non-economy context (the Enemy stays self-contained).
     const cells = this.dropCells()
@@ -449,7 +528,9 @@ export class Enemy {
     this.rect.setScale(this.scaleX, this.scaleY)
     this.rect.setPosition(this.body.center.x, this.body.center.y)
 
-    // State color: telegraph flash (yellow wind-up), hurt flash (white), else resting color.
+    // State color: telegraph flash (yellow wind-up), hurt flash (white), else resting color. A live STATUS
+    // tints the resting fill so bleed/poison/stun read at a glance (§6.13, Decision 79) — the telegraph/hurt
+    // flashes take PRECEDENCE (they're the urgent, timing-critical cues) so a status never hides a wind-up.
     let color = this.spec.color
     if (this.state === STATE.ATTACK && this.telegraphTimer > 0) {
       // Blink the telegraph so the wind-up is unmissable (AC24).
@@ -457,6 +538,11 @@ export class Enemy {
       color = blink ? this.spec.colorTelegraph : this.spec.color
     } else if (this.hurtIframeTimer > 0) {
       color = this.spec.colorHurt
+    } else if (this.statuses.length > 0) {
+      // Status tint (the resting cue): stun grey-blue, bleed dark red, poison sickly green.
+      if (hasStatus(this.statuses, 'stun')) color = 0x95a5a6
+      else if (hasStatus(this.statuses, 'bleed')) color = 0xa93226
+      else if (hasStatus(this.statuses, 'poison')) color = 0x27ae60
     }
     this.rect.setFillStyle(color)
 
@@ -468,6 +554,40 @@ export class Enemy {
   _kickScale(sx, sy) {
     this.scaleX = sx
     this.scaleY = sy
+  }
+
+  // ── _foldElite(spec, affix) → a NEW elite-folded spec (design §6.11, Decision 77, AC64) ── bake the
+  // affix's HP/body/tint modifiers into a fresh shallow-clone (NEVER mutating the caller's spec — the
+  // aliasing safety scaleSpec keeps). telegraphMult + deathBurst are NOT folded into the spec (they're
+  // read off this.elite by the attack/death code), so the spec shape the rest of Enemy reads is unchanged.
+  // cellDrop gains the affix bonus here so dropCells() (which reads spec.cellDrop) rewards the kill — DRY.
+  _foldElite(spec, affix) {
+    return {
+      ...spec,
+      maxHp: Math.round(spec.maxHp * (affix.hpMult ?? 1)),
+      bodyW: Math.round(spec.bodyW * (affix.bodyScale ?? 1)),
+      bodyH: Math.round(spec.bodyH * (affix.bodyScale ?? 1)),
+      color: affix.tint ?? spec.color, // the gold elite tell (over the archetype's resting fill).
+      cellDrop: (spec.cellDrop ?? 3) + (affix.cellBonus ?? 0), // a richer reward for the harder kill.
+    }
+  }
+
+  // ── _fireDeathBurst() (design §6.11, Decision 77, AC64) ── an ELITE's signature: on death, fire a radial
+  // fan of pooled 'enemy' projectiles (the SAME pool + overlap the SHOOTER/boss volley use — Decision 65, no
+  // new wiring) so the corpse is a "step back" tell. Evenly spaced over 360°. Called from _die() at the
+  // captured death center (the body is already disabled, so we pass the coords in). Null burst / null pool ⇒
+  // no-op (safe). The projectile spec's damage is low (a tell, not a one-shot).
+  _fireDeathBurst(cx, cy) {
+    const burst = this.elite && this.elite.deathBurst
+    if (!burst || !this.projectilePool || !burst.projectile) return
+    const count = Math.max(1, burst.count || 1)
+    for (let i = 0; i < count; i++) {
+      const ang = (i / count) * Math.PI * 2 // even spacing around the full ring.
+      const dir = Math.cos(ang) >= 0 ? 1 : -1 // the pool fires along ±facing (KISS — same as the volley).
+      // Offset the muzzle along the ring direction so the fan reads radially (the vy is via the spawn y).
+      const attacker = { cx, cy: cy + Math.sin(ang) * 24, facing: dir }
+      this.projectilePool.acquire(attacker, burst.projectile, this.id)
+    }
   }
 
   // Expose a plain attacker shape for damage.js (cx + facing — matches the pure resolveHit input).

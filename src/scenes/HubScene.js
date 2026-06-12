@@ -26,8 +26,11 @@ import { GameScene } from './GameScene.js'
 // so banked Cells are immediately spendable. START RUN does scene.start('Game', { seed }) (which re-loads
 // MetaState + folds the owned upgrades into the run-start stats — Decision 60 — and seeds the run, 71).
 
-const ROW_H = 44 // px — vertical spacing between list rows.
-const LIST_TOP = 220 // px — y of the first upgrade row.
+// The list grew from 4→9 upgrade rows (Decision 75 — the deepened meta tree), so rows are tighter +
+// start higher to fit all UPGRADES + the SEEDED RUN + START RUN rows above the footer help text (the
+// list height = (UPGRADES.length + 2) · ROW_H must clear DESIGN_HEIGHT − the footer band).
+const ROW_H = 38 // px — vertical spacing between list rows.
+const LIST_TOP = 188 // px — y of the first upgrade row.
 const COL_X = 200 // px — left x of the row text block.
 const CURSOR_COLOR = 0x2c3e50 // the highlight bar behind the selected row.
 

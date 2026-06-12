@@ -115,7 +115,11 @@ export const RAMPARTS = {
   name: 'Ramparts',
   difficultyTier: 2,
   endsInBoss: true, // §6.6.2 (Decision 66) — the boss biome: its FINAL level is a boss arena (no Door).
-  boss: 'rampartsBoss', // keys into config/bosses.js BOSSES (The Warden) — the run's final gate (AC57).
+  // §6.12 (Decision 78) — the boss biome's final gate is now a SEEDED PICK between TWO bosses (The Warden
+  // OR The Hollow Sentinel), so different runs face a different fight (the variety win). `boss` is an ARRAY
+  // of ids keyed into config/bosses.js BOSSES; GameScene picks one off the run seed (a run replays the same
+  // boss). A single-id string is still accepted by GameScene (back-compat) — the array is the multi-boss form.
+  boss: ['rampartsBoss', 'rampartsBoss2'], // The Warden | The Hollow Sentinel (AC57/AC65).
   levels: 3, // 2 normal generated levels + the boss arena as the last (levelInBiome === levels-1).
   // Enemy pool (Decision 68/AC59) — Ramparts adds CHARGERS + FLYERS (the full variety) over the base.
   enemyPool: [

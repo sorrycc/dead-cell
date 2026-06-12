@@ -112,14 +112,87 @@ export const RAMPARTS_BOSS = {
   },
 }
 
-// ── BOSSES (id → spec) ── the lookup GameScene reads (biome.boss → BOSSES[id]). ONE boss this slice;
-// a 2nd is a config add here + a `boss` id on another biome (Decision 67/§6.6.7 — a clean seam).
-export const BOSSES = {
-  rampartsBoss: RAMPARTS_BOSS,
+// ── RAMPARTS_BOSS_2 — "The Hollow Sentinel" (design §6.12, Decision 78, AC65 — the 2nd boss) ──
+// A DISTINCT fight from the Warden, gated on the SAME boss biome via a SEEDED pick (Decision 78 — different
+// runs face different bosses, the variety win): where the Warden is a slow melee bruiser (slam/dash), the
+// Sentinel is a faster RANGED-pressure boss — less HP, quicker telegraphs, a volley in BOTH phases (it
+// zones you out) plus a dash to punish camping. Phase 2 adds a slam + tightens further (the back-half ramp).
+// It satisfies the EXACT pure boss-table contract the verifier checks (≥2 descending phases, the first 1.0,
+// known attack kinds, every referenced attack present, telegraph/active > 0) so it is a pure-config add —
+// zero Boss.js change (the FSM dispatches by attack kind, which it already handles — slam/volley/dash).
+export const RAMPARTS_BOSS_2 = {
+  id: 'rampartsBoss2',
+  name: 'The Hollow Sentinel',
+  maxHp: 420, // less HP than the Warden (it pressures with ranged tempo, not a tank check).
+  bodyW: 76,
+  bodyH: 88,
+  color: 0x2980b9, // resting fill (steel blue — distinct from the Warden's purple).
+  colorTelegraph: 0xf5d76e, // wind-up colour (pale gold) — the dodge tell (AC56).
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.2, // heavy (barely nudged) — slightly less so than the Warden (a touch lighter).
+  contactDamage: 14,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    {
+      // ── Phase 1 (100% → 50%): a volley ↔ dash zoning rotation, quick readable telegraphs. ──
+      hpThreshold: 1.0,
+      telegraphMult: 0.9, // already a touch faster than the Warden's 1.0 (a tempo boss).
+      moveSpeed: 90, // px/s — it repositions faster between attacks (keeps its spacing).
+      attacks: ['volley', 'dash', 'volley'],
+    },
+    {
+      // ── Phase 2 (≤50%): adds the slam, tightens telegraphs, moves faster (the escalation, AC56). ──
+      hpThreshold: 0.5,
+      telegraphMult: 0.66,
+      moveSpeed: 130,
+      attacks: ['volley', 'slam', 'dash', 'volley'],
+    },
+  ],
+  attacks: {
+    // 'slam' — a melee swing (smaller than the Warden's — the Sentinel is a ranged boss, melee is a punish).
+    slam: {
+      kind: 'slam',
+      telegraph: 0.6,
+      active: 0.16,
+      recovery: 0.55,
+      swing: { reach: 100, halfHeight: 56, forward: 28, damage: 20, knockback: 480 },
+    },
+    // 'volley' — a WIDER, denser fan than the Warden's (its signature zoning tool — more shots, more spread).
+    volley: {
+      kind: 'volley',
+      telegraph: 0.5,
+      active: 0.12,
+      recovery: 0.5,
+      count: 5, // more shots than the Warden's 3 (a denser fan — its identity).
+      spreadDeg: 34, // a wider vertical spread (harder to weave through).
+      projectile: { speed: 460, damage: 13, knockback: 200, lifetime: 2.4, w: 16, h: 8 },
+    },
+    // 'dash' — a fast lunge to punish a player who camps at range (closes the gap the volley opens).
+    dash: {
+      kind: 'dash',
+      telegraph: 0.65,
+      active: 0.4,
+      recovery: 0.7,
+      speed: 760, // faster than the Warden's dash (it's a quicker boss).
+      contactDamage: 24,
+      knockback: 560,
+    },
+  },
 }
 
-// The ordered list (for the verifier's well-formedness sweep).
-export const BOSS_ORDER = [RAMPARTS_BOSS]
+// ── BOSSES (id → spec) ── the lookup GameScene reads (biome.boss → BOSSES[id]). TWO bosses now (§6.12,
+// Decision 78); the boss biome's `boss` is an ARRAY of ids, and GameScene picks one off the run seed so
+// different runs face a different fight (the variety win) — a clean extension of the Decision-67 seam.
+export const BOSSES = {
+  rampartsBoss: RAMPARTS_BOSS,
+  rampartsBoss2: RAMPARTS_BOSS_2,
+}
+
+// The ordered list (for the verifier's well-formedness sweep — BOTH bosses are checked).
+export const BOSS_ORDER = [RAMPARTS_BOSS, RAMPARTS_BOSS_2]
 
 // ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). ──
 export const BOSS_ATTACK_KINDS = ['slam', 'volley', 'dash']

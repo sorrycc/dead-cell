@@ -71,6 +71,78 @@ export const UPGRADES = [
       startWeaponId: START_WEAPON_BY_LEVEL[Math.min(level, START_WEAPON_BY_LEVEL.length - 1)],
     }),
   },
+
+  // ── ENRICHMENT (Decision 75) — the FIVE previously-phantom meta tiers (review MAJOR) ──────────────
+  // MetaState.BASE_PLAYER_STATS + Player.applyStartStats already DEFINE + CONSUME rangedDamageMult,
+  // dodgeIframeBonus, startGold, startScrolls, maxFlasks/flaskHealFrac — but NO upgrade row ever raised
+  // them, so the bow-damage / wider-dodge / gold-/scroll-head-start / bigger-flask tiers the comments
+  // describe were UNREACHABLE. These rows close that gap: pure DATA only (the Player reads the folded
+  // fields live, RunState seeds them — no engine change). Each `apply` returns a NEW object (never
+  // mutates — the §5b verifier pin) and only ever HELPS (bigger-is-better, so the §5c never-weaker sense
+  // holds trivially on the fields it touches — the verifier auto-validates cost-monotonicity + identity).
+
+  // ── +RANGED DAMAGE ── raises the bow/projectile damage multiplier (Player.rangedDamageMult, read at
+  // the projectile→enemy hit site, Decision 73). Mirrors +Melee Damage for the ranged build path so the
+  // Bow start-weapon tier has a damage tree to invest in (otherwise ranged scaled with NOTHING).
+  {
+    id: 'rangedDmg',
+    name: '+Ranged Damage',
+    desc: '+15% ranged (bow) damage per level',
+    maxLevel: 3,
+    costs: [20, 40, 70],
+    apply: (stats, level) => ({ ...stats, rangedDamageMult: stats.rangedDamageMult + 0.15 * level }),
+  },
+  // ── +DODGE I-FRAMES ── flat extra dodge invulnerability seconds (Player.dodgeIframeBonus, Decision 73).
+  // A more forgiving roll — the defensive complement to -Dodge Cooldown (dodge MORE OFTEN vs dodge through
+  // MORE). +0.03s per level (the base window is 0.18s, so +0.06s at max ≈ a third wider — meaningful but
+  // never trivialising; the cooldown still gates spam).
+  {
+    id: 'dodgeIframe',
+    name: '+Dodge I-Frames',
+    desc: '+0.03s dodge invuln per level',
+    maxLevel: 2,
+    costs: [30, 60],
+    apply: (stats, level) => ({ ...stats, dodgeIframeBonus: stats.dodgeIframeBonus + 0.03 * level }),
+  },
+  // ── GOLD HEAD-START ── run-only gold the run STARTS with (RunState seeds gold from startGold, §6.9).
+  // Lets a meta investment seed the in-run SHOP economy (Decision 74) — buy a boost on the first vendor
+  // without grinding gold first. Run-only (never banked — permadeath), so it's a per-run convenience, not
+  // a compounding advantage. +40 gold per level (≈ one cheap shop item's worth).
+  {
+    id: 'startGold',
+    name: 'Gold Head-Start',
+    desc: '+40 starting gold per level',
+    maxLevel: 2,
+    costs: [25, 50],
+    apply: (stats, level) => ({ ...stats, startGold: stats.startGold + 40 * level }),
+  },
+  // ── STARTING SCROLLS ── N run-only scroll boosts auto-applied at run start (GameScene._applyStartingScrolls
+  // off the RUN seed, §6.9). A head-start on BUILD VARIETY (a power/vitality scroll from level 1) without
+  // finding one mid-run. Run-only (the scrolls die with the run — permadeath). +1 scroll per level.
+  {
+    id: 'startScrolls',
+    name: 'Starting Scrolls',
+    desc: '+1 run-start scroll per level',
+    maxLevel: 2,
+    costs: [35, 70],
+    apply: (stats, level) => ({ ...stats, startScrolls: stats.startScrolls + level }),
+  },
+  // ── BIGGER FLASK ── grows BOTH the flask charge count (maxFlasks — more drinks per biome) AND the per-
+  // drink heal fraction (flaskHealFrac — each drink restores more). Together they turn the healing valve
+  // (Decision 72) into a real survivability tree: more HP recovered across a run. +1 charge and +0.1 heal-
+  // fraction per level (base 2 charges / 0.4 frac → 4 charges / 0.6 frac at max). Both bigger-is-better.
+  {
+    id: 'flaskTier',
+    name: 'Bigger Flask',
+    desc: '+1 charge & +10% heal per level',
+    maxLevel: 2,
+    costs: [30, 60],
+    apply: (stats, level) => ({
+      ...stats,
+      maxFlasks: stats.maxFlasks + level,
+      flaskHealFrac: stats.flaskHealFrac + 0.1 * level,
+    }),
+  },
 ]
 
 // id → row lookup (for MetaState.buy + the Hub's affordability/owned-level readout). DRY: one source.

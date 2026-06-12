@@ -43,4 +43,11 @@ const config = {
   scene: [BootScene, TitleScene, HubScene, GameScene, HUDScene, GameOverScene, VictoryScene],
 }
 
-new Phaser.Game(config)
+const game = new Phaser.Game(config)
+
+// DEV-ONLY debug handle (stripped from the production build — Vite tree-shakes the `import.meta.env.DEV`
+// branch out of `npm run build`). Exposes the live game on window so a dev/headless smoke test can inspect
+// the active scene without any production coupling. NEVER read by game code.
+if (import.meta.env && import.meta.env.DEV) {
+  window.__game = game
+}

@@ -47,6 +47,7 @@ export class ProjectilePool {
         ownerId: null,
         ownerTag,
         spec: null, // the weapon's projectile spec (damage/knockback/speed/lifetime/w/h).
+        status: null, // §6.13 (Decision 79) — the firing weapon's status spec (poison) stamped at acquire.
         facing: 1,
         vx: 0, // travel velocity along facing (px/s). We hand-integrate this on the GAMEPLAY dt so the
         //        shot FREEZES during hit-stop; the ARCADE body velocity stays 0 so Arcade's world step
@@ -69,7 +70,9 @@ export class ProjectilePool {
   // world-bound). ownerId tags WHO fired (so the shooter's own hurtbox is never self-hit, and the hit
   // handler can find the firer). Returns the rect (or null if the pool is momentarily exhausted —
   // sized so that never happens in normal play; a dropped shot is cosmetic, never a correctness bug). ──
-  acquire(attacker, spec, ownerId) {
+  // `status` (§6.13, Decision 79 — optional): the firing weapon's status spec, stamped on the shot so the
+  // hit handler applies it to the struck enemy (a poison bow shot carries its poison). null ⇒ no status.
+  acquire(attacker, spec, ownerId, status = null) {
     const rect = this._items.find((r) => !r.pj.active)
     if (!rect) return null
 
@@ -93,6 +96,7 @@ export class ProjectilePool {
     pj.ownerId = ownerId
     pj.ownerTag = this.ownerTag
     pj.spec = spec
+    pj.status = status // §6.13 — the firing weapon's status (or null); the hit handler applies it.
     pj.facing = attacker.facing
     pj.vx = attacker.facing * spec.speed // the travel velocity we integrate ourselves.
     pj.hitSet.clear() // reuse the SAME Set — clear, never re-allocate (the dedup convention).
@@ -141,6 +145,7 @@ export class ProjectilePool {
   _disable(rect) {
     rect.pj.active = false
     rect.pj.spec = null
+    rect.pj.status = null // §6.13 — drop the stamped status so a recycled shot never carries a stale one.
     const body = rect.body
     body.setVelocity(0, 0)
     body.enable = false

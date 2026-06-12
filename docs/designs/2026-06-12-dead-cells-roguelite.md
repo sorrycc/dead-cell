@@ -399,6 +399,37 @@ saves; level editor.
 parked here is delivered as part of the Phase-5 meta-loop above (AC50–AC53). This slot is retained for
 numbering continuity; no separate work remains.
 
+**Enrichment round 2 (§6.10–§6.14, Decision 74–80) — closing the genre-loop gaps:**
+
+63. **In-run shop = a real GOLD SINK.** Gold is dropped + collected + shown on the HUD but had ZERO sinks
+    (and `_tryOpenShop` referenced an undefined `_openShop` + a Shop that was never spawned — a latent
+    crash). A `Shop` vendor entity is placed on SOME levels (seeded off the level seed, off-the-pin), a
+    paused buy OVERLAY lets the player spend gold on RUN-ONLY boosts (heal / flask refill / scroll / a
+    vendor weapon), and `_openShop`/`_closeShop`/`_buyShopItem` are wired. Pressing **E** in range opens
+    it; the catalog is PURE data (`config/shop.js`) the verifier checks (positive prices, known kinds).
+    Gold becomes a "spend now vs save for the next vendor" decision instead of dead weight.
+
+64. **Elite enemy affix.** A seeded `elite` modifier rolled at spawn (off-the-pin RNG, so a run replays the
+    same elites) folds onto a NORMAL archetype (reusing the ONE Enemy FSM — no new class): +HP, a bigger
+    gold-tinted body, a TIGHTER telegraph, and a DEATH BURST (a radial fan of pooled `enemy` projectiles).
+    Cheap mid-run spikes that raise encounter variety on the existing scaffolding.
+
+65. **A 2nd boss, seeded per run.** `config/bosses.js` gains **The Hollow Sentinel** (a faster, ranged-
+    pressure boss distinct from the Warden's melee bruiser), `BOSSES`/`BOSS_ORDER` carry both, and the boss
+    biome's `boss` is now an ARRAY of ids GameScene picks ONE from off the run seed — different runs face a
+    different final fight. The verifier sweeps BOTH bosses for table well-formedness + the depth guardrail.
+
+66. **Combat status effects (bleed / poison / stun).** A PURE status layer (`combat/status.js`: tick
+    accumulation, expiry, refresh-on-re-hit, a stun flag) gives weapons identity beyond raw numbers:
+    Spear = BLEED (DoT), Hammer = STUN (a brief CC freeze), Bow = POISON (DoT). Status specs are weapon
+    DATA the hit handlers apply to the struck enemy's `statuses[]`; the verifier pins the tick math.
+
+67. **Optional treasure branches.** `LevelGenerator` emits an OPTIONAL reach-bounded upward detour (off a
+    mid-critical platform, gated on grid width so the regression pin is untouched, off a separate sub-RNG so
+    the main draw sequence is byte-unchanged) ending in a treasure ledge (`branchTreasure`). GameScene places
+    a GUARANTEED reward (gold/scroll/weapon/heal) there. The verifier asserts the treasure ledge is STANDABLE
+    + REACHABLE from the entrance; the MAIN entrance→exit path is unchanged (the branch only ADDS nodes).
+
 ---
 
 ## 4. Problem Analysis
@@ -1259,6 +1290,77 @@ a future per-biome curve reset.
   depths → the hardest), and the budget in the doc makes the numbers principled (a clean run kills the boss
   in ≈45–75s; a careless unupgraded player dies to scaled contact + dodged-telegraph DPS). No new
   verification machinery — the existing monotonicity check is the balance guardrail.
+
+**71. Entropy-minted run seeds + a shareable run id (the replayability fix).** The run seed was FROZEN to a
+  constant, so every launch replayed the same run. Fix: `HubScene` mints a fresh per-run seed from entropy
+  (`Date.now ⊕ random ⊕ perf.now`) at START RUN (or accepts a typed/pinned hex seed), passed via
+  `scene.start('Game', { seed })`; the GameOver/Victory summary echoes it as a shareable hex run id. Entropy
+  lives ONLY at the scene boundary — the PURE modules (RunState/generator) still take a seed in, so the
+  verifier's determinism walk is unaffected.
+
+**72. Healing flask (the HP-recovery valve) + between-biome refill.** HP was a one-way slide across 9
+  levels + boss with no recovery for an un-upgraded player. Fix: a limited-charge flask (Q to drink, heals
+  `flaskHealFrac` of max HP), REFILLED on every biome transition; charges/heal-fraction seeded from the meta
+  fold. HP management becomes a real per-biome resource decision. Plus found `heal` pickups (a fountain).
+
+**73. Deeper meta fields wired through (rangedDamageMult / dodgeIframeBonus / startGold / startScrolls /
+  maxFlasks / flaskHealFrac).** `BASE_PLAYER_STATS` + `Player.applyStartStats` + `RunState` were extended to
+  DEFINE + CONSUME these at NEUTRAL base values (the additive identity) — the plumbing for the deeper-meta
+  tiers, made buyable by Decision 75's upgrade rows.
+
+**74. In-run shop seam.** `_tryOpenShop` (E-interact) + the `shop`/`shopOpen` state reserved the vendor seam;
+  Decision 76 fills it in (the entity + overlay + buy logic) — closing the phantom-stub gap.
+
+**75. Deepen the meta table — the five phantom fields get upgrade rows.** `config/upgrades.js` grew from 4 to
+  9 rows: `+Ranged Damage`, `+Dodge I-Frames`, `Gold Head-Start`, `Starting Scrolls`, `Bigger Flask` — each
+  raising a previously-unreachable meta field (Decision 73). Pure DATA: the Player reads the folded fields
+  live, RunState seeds them. The verifier auto-validates cost-monotonicity + never-weaker (§5a–5c). The Hub
+  layout tightened (ROW_H/LIST_TOP) to fit the longer list.
+- Options: A) special-case each field in scene code · B) one data row per field honoring the existing pure
+  `apply` contract. **B)** — the meta table is already data-generic (the Hub renders it, the Player reads the
+  fold, the verifier checks the contract), so deepening it is pure data with near-zero risk.
+
+**76. In-run shop = a real GOLD SINK (the phantom-stub fix).** A `Shop` vendor entity (a stand-on sensor) is
+  placed on some levels (seeded off the level seed, off-the-pin — pin-safe), a paused `ShopOverlay` lists a
+  PURE catalog (`config/shop.js`: heal / flask refill / scroll / vendor weapon) bought with RUN-ONLY gold,
+  and `_openShop`/`_closeShop`/`_buyShopItem` apply the effect (reusing the heal/scroll/weapon paths — DRY).
+- Options: A) a separate Phaser Scene for the menu · B) a self-contained overlay object GameScene news up
+  while freezing gameplay via `shopOpen` (the same update gate as hit-stop). **B)** — a parallel Scene needs
+  its own input plumbing + a pause handshake; an overlay (camera-fixed primitives, its OWN keydown handlers
+  removed on close) is KISS + decoupled. ESC is NOT bound by the overlay (GameScene owns ESC→Title); LEAVE is
+  a cursor row. The verifier checks the catalog is well-formed (positive prices, known kinds).
+
+**77. Elite enemy affix (reuse the FSM, not a subclass).** A seeded `elite` modifier (off-the-pin RNG) folds
+  +HP / a bigger gold body / a tighter telegraph / a death burst onto a normal archetype.
+- Options: A) elite subclasses per archetype · B) a modifier object the existing Enemy folds at construction
+  (the Decision-68 philosophy). **B)** — subclasses duplicate patrol/chase/hurt/dead; a fold reuses the ONE
+  FSM (a telegraph-mult read + a death-burst call in `_die`). The affix never mutates the shared spec
+  (aliasing safety). The death burst reuses the enemy ProjectilePool + the enemy-shot→player overlap (no new
+  wiring). PURE data (`ELITE_AFFIX`/`ELITE_CHANCE`) — verifier-importable.
+
+**78. A 2nd boss, seeded per run (the bosses-table seam).** `config/bosses.js` adds **The Hollow Sentinel**
+  (a faster ranged-pressure boss); the boss biome's `boss` becomes an ARRAY of ids GameScene picks ONE from
+  off the run seed.
+- Options: A) make another biome `endsInBoss` (breaks the "exactly one boss biome" invariant the verifier
+  pins) · B) a seeded pick from a multi-id `boss` list on the SAME boss biome. **B)** — keeps the single-
+  boss-biome invariant, gives variety (different runs → different fight), and is a clean extension of the
+  Decision-67 seam (a string id is still accepted — back-compat). The verifier sweeps both bosses + checks
+  every id in the list resolves.
+
+**79. Combat status effects (a pure status layer).** `combat/status.js` (tick accumulation, expiry,
+  refresh-on-re-hit, a stun flag) + weapon `status` tags (Spear = bleed, Hammer = stun, Bow = poison).
+- Options: A) bespoke per-weapon DoT/CC code · B) a pure status list on the entity, ticked on the gameplay
+  dt, applied by a weapon DATA tag. **B)** — combat was instantaneous-hit only; a small pure layer gives
+  weapons identity (DoT/CC) + makes scrolls/shop boosts richer, all data + a per-frame tick (no new art). The
+  verifier pins the tick math (a 0.4s/3 bleed deals 3 over 0.4s; a stun expires; re-apply refreshes).
+
+**80. Optional treasure branches (pin-safe + reachability-proven).** `LevelGenerator` emits an OPTIONAL
+  reach-bounded upward detour ending in a `branchTreasure` ledge; GameScene places a guaranteed reward there.
+- Options: A) branch on the main RNG thread (perturbs the regression pin) · B) a SEPARATE seeded sub-RNG,
+  GATED on grid width so the tiny PIN config (40 cols) emits NO branch, with the main draw sequence
+  byte-unchanged. **B)** — the branch only ADDS platforms (each step reach-bounded by the SHARED
+  `canReachStep`, so the verifier BFS reaches it BY CONSTRUCTION), never touching the critical entrance→exit
+  staircase. The verifier asserts the treasure ledge is standable + reachable; the main path BFS still holds.
 
 ---
 
@@ -2652,6 +2754,78 @@ enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `sc
 - **No asset loads** — BootScene performs no network `load.*` for external files; any textures
   are generated in-code, so the game runs offline / from `file://`.
 
+### 6.9 Enrichment round 1 (Decision 71–73) — replayability + the HP-recovery valve
+
+- **Entropy-minted run seeds (Decision 71).** `HubScene` mints a fresh per-run seed from entropy at START
+  RUN (or accepts a typed/pinned hex seed), passed via `scene.start('Game', { seed })`; `GameScene._resolveSeed`
+  reads it (falling back to a fresh mint). The GameOver/Victory summary echoes the seed as a shareable hex run
+  id. Entropy lives ONLY at the scene boundary — the PURE modules still take a seed in (the verifier is
+  unaffected).
+- **Healing flask (Decision 72).** `RunState` carries `flasks`/`maxFlasks`/`flaskHealFrac` (seeded from the
+  meta fold); **Q** drinks one (heals a fraction of max HP, guarded so a full-HP drink never burns a charge);
+  charges REFILL on every biome transition (`_nextLevel`). Plus a `heal` Pickup kind (a found fountain/heart).
+- **Deeper meta fields (Decision 73).** `BASE_PLAYER_STATS` + `Player.applyStartStats` + `RunState` gained
+  `rangedDamageMult` / `dodgeIframeBonus` / `startGold` / `startScrolls` at NEUTRAL base values (the identity)
+  — the plumbing the round-2 upgrade rows (§6.11) make buyable.
+
+### 6.10 In-run shop — the GOLD SINK (Decision 74/76, AC63)
+
+- **`config/shop.js` (PURE).** A flat catalog of RUN-ONLY boosts bought with gold: `Healing Draught` (heal),
+  `Flask Refill` (+1 flask charge), `Mystic Scroll` (a random run scroll), `Vendor Spear` (a guaranteed weapon
+  swap). Each row is `{ id, name, desc, price, kind, …params }`; `SHOP_ITEM_KINDS` is the known set the
+  verifier asserts. KISS: items are repeatable (gold is the limiter — no per-item stock).
+- **`entities/Shop.js`.** A stand-on SENSOR vendor placed on some levels (`SHOP_LEVEL_CHANCE`, seeded off the
+  level seed — off-the-pin, pin-safe) at a standable spawn candidate. An overlap sets `playerInRange` (reset
+  each tick); a floating `[E] SHOP` prompt shows the tell.
+- **`entities/ShopOverlay.js`.** A camera-fixed paused buy menu (primitives + text), its OWN keydown handlers
+  (removed on close), DECOUPLED via `getGold`/`onBuy`/`onClose` callbacks. ESC is NOT bound (GameScene owns
+  ESC→Title); LEAVE is a cursor row. GameScene freezes gameplay via `shopOpen` (the gameplay-dt gate, so the
+  combat world freezes like a hit-stop) and `_buyShopItem` deducts gold + applies the effect (reusing the
+  heal/scroll/weapon/flask paths — DRY; guards a no-op heal/full-flask buy so gold is never wasted).
+
+### 6.11 Deepened meta table + elite affixes (Decision 75/77, AC64)
+
+- **`config/upgrades.js`** grew 4→9 rows so the previously-phantom meta fields (§6.9) are buyable: `+Ranged
+  Damage`, `+Dodge I-Frames`, `Gold Head-Start`, `Starting Scrolls`, `Bigger Flask`. Pure data; the verifier
+  auto-validates cost-monotonicity + never-weaker (§5a–5c, extended to the new fields). The Hub list tightened
+  (`ROW_H`/`LIST_TOP`) to fit.
+- **`config/enemies.js`** adds `ELITE_AFFIX` (`hpMult`/`bodyScale`/`tint`/`telegraphMult`/`cellBonus`/
+  `deathBurst`) + `ELITE_CHANCE`. `Enemy` accepts an `elite` option, folds it into a fresh spec (never
+  mutating the shared archetype — aliasing safety), tightens its telegraph, and fires the death burst (a
+  radial fan of pooled `enemy` projectiles, reusing the existing pool + overlap) in `_die`. GameScene rolls
+  it per spawn off a dedicated off-the-pin seeded RNG (`_rollElite`) so a run replays the same elites.
+
+### 6.12 Second boss, seeded per run (Decision 78, AC65)
+
+- **`config/bosses.js`** adds **The Hollow Sentinel** (faster, ranged-pressure — denser volleys, quicker
+  telegraphs) to `BOSSES`/`BOSS_ORDER`. `RAMPARTS.boss` is now an ARRAY of ids; `GameScene._pickBossId` picks
+  ONE off the run seed (a fresh off-the-pin RNG) — a run replays the same boss, different runs vary. A single
+  string id is still accepted (back-compat). The verifier checks every id in the list resolves to a known boss.
+
+### 6.13 Combat status effects (Decision 79, AC66)
+
+- **`combat/status.js` (PURE).** `STATUS_KINDS` (bleed/poison/stun), `makeStatus`/`applyStatus` (refresh-on-
+  re-hit, never stack), `tickStatuses(statuses, dt) → { damage, stunned }` (accumulate DoT, drop expired),
+  `hasStatus`. Ticked on the GAMEPLAY dt (freezes with hit-stop).
+- **Weapon tags.** `SPEAR.status` = bleed (DoT), `HAMMER.status` = stun (a brief CC freeze), `BOW.status` =
+  poison (DoT). `Enemy` owns a `statuses[]` list + `applyStatus`; `_tickStatus` drains DoT (can KILL), reads
+  the stun flag (freezes the FSM that frame), and pops a tinted FX (`Effects.statusTick`). A live status tints
+  the enemy (the telegraph/hurt flashes take precedence). GameScene's melee + projectile hit handlers apply
+  the equipped/fired weapon's status; the bow stamps its status on the shot (`pj.status`) so a mid-flight swap
+  doesn't change it.
+
+### 6.14 Optional treasure branches (Decision 80, AC67)
+
+- **`LevelGenerator`** emits an OPTIONAL `branchTreasure` ledge via `placeBranch`: 1–2 SOLID platforms hung
+  UP off a mid-critical platform, each step reach-bounded by the SHARED `canReachStep` (so the verifier BFS
+  reaches them BY CONSTRUCTION), with a `runTopClear` + entrance/exit-overlap guard so the treasure ledge is
+  guaranteed standable. It uses a SEPARATE seeded sub-RNG (the main draw sequence — and the regression pin —
+  is byte-unchanged) and is GATED on grid width (`BRANCH_MIN_COLS = 50`, so the 40-col PIN config emits no
+  branch). The treasure cell is reserved from decoration + enemy/pickup spawns.
+- **GameScene `_placeBranchReward`** places a GUARANTEED reward (gold / scroll / weapon / heal, seeded off the
+  level seed) on the ledge — the risk/reward payoff. The verifier (`checkDescription` + `bfsReaches`) asserts
+  the treasure is standable + reachable from the entrance; the main entrance→exit path is unchanged.
+
 ---
 
 ## 7. Files Changed
@@ -2887,6 +3061,40 @@ enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `sc
 
 **Phase 7:** SUBSUMED into Phase 5 — no separate files.
 
+**Enrichment round 2 (§6.10–§6.14, Decision 74–80):**
+
+- `src/config/shop.js` — NEW (PURE). The in-run shop catalog (heal / flask / scroll / vendor weapon);
+  `SHOP_ITEMS`/`SHOP_ITEM_KINDS`. Verifier-importable.
+- `src/entities/Shop.js` — NEW. A stand-on SENSOR vendor + `playerInRange` + the `[E] SHOP` prompt.
+- `src/entities/ShopOverlay.js` — NEW. The paused buy menu (camera-fixed primitives, its own keydown
+  handlers, decoupled via getGold/onBuy/onClose).
+- `src/combat/status.js` — NEW (PURE). bleed/poison/stun tick math (accumulate / expire / refresh / stun
+  flag); `STATUS_KINDS`/`makeStatus`/`applyStatus`/`tickStatuses`/`hasStatus`. Verifier-importable.
+- `src/config/upgrades.js` — EXTEND. +5 rows (rangedDmg / dodgeIframe / startGold / startScrolls / flaskTier)
+  so the deeper meta fields are buyable (Decision 75).
+- `src/config/enemies.js` — EXTEND. `ELITE_AFFIX` + `ELITE_CHANCE` (the elite modifier — Decision 77).
+- `src/config/bosses.js` — EXTEND. +`RAMPARTS_BOSS_2` (The Hollow Sentinel); `BOSSES`/`BOSS_ORDER` carry both
+  (Decision 78).
+- `src/config/biomes.js` — EXTEND (small). `RAMPARTS.boss` becomes an array of ids (the seeded boss pick).
+- `src/config/weapons.js` — EXTEND (small). `status` tags on Spear (bleed) / Hammer (stun) / Bow (poison).
+- `src/entities/Enemy.js` — EXTEND. The `elite` fold + telegraph-mult + death burst; a `statuses[]` list +
+  `_tickStatus` (DoT/stun) + the status tint.
+- `src/entities/Player.js` / `src/combat/ProjectilePool.js` — EXTEND (small). Stamp the bow's `status` on a
+  fired shot so the hit handler applies it.
+- `src/world/LevelGenerator.js` — EXTEND. `placeBranch` → an optional `branchTreasure` ledge (pin-safe,
+  reach-bounded — Decision 80).
+- `src/scenes/GameScene.js` — EXTEND. Shop spawn + overlay wiring (`_maybePlaceShop`/`_openShop`/`_closeShop`/
+  `_buyShopItem`); the elite roll (`_rollElite`) + the seeded boss pick (`_pickBossId`); the branch reward
+  (`_placeBranchReward`); apply weapon status on melee + projectile hits; the `shopOpen` gameplay-freeze gate.
+- `src/scenes/HubScene.js` — EXTEND (small). Tighter list layout for the 9-row upgrade tree.
+- `src/main.js` — EXTEND (small). A DEV-only `window.__game` handle (stripped from the production build) for
+  the headless smoke test.
+- `scripts/verify-gen.mjs` — GROW. Section 5c (the five new never-weaker meta fields); section 6b/6c (the 2nd
+  boss + boss-id resolution); section 7 (shop catalog); section 8 (status tick math); `checkDescription` +
+  `bfsReaches` (the branch treasure standable + reachable). No Phaser import.
+- `README.md` — UPDATE. The round-2 systems (shop / elites / 2nd boss / status / branches / deeper meta), the
+  Q/E controls.
+
 ---
 
 ## 8. Verification
@@ -3086,3 +3294,32 @@ observation of the boss fight + variety:
    intra-run values are unchanged (the boss-arena mode is a separate branch, separately pinned).
 
 **Phase 7:** SUBSUMED into Phase 5 — no separate verification.
+
+**Enrichment round 2 (§6.10–§6.14; AC63–AC67):** the HEADLESS pure-config/contract sweep plus `npm run dev`
+observation of the new systems:
+
+1. [AC63] `npm run verify` exits 0; its NEW section node-imports `config/shop.js` and asserts the catalog is
+   non-empty with positive gold prices + known item kinds + kind-specific params. In `npm run dev`: on a
+   level with a vendor a `[E] SHOP` prompt shows when you stand on it; pressing **E** opens a paused buy
+   overlay; buying `Healing Draught`/`Flask Refill`/`Mystic Scroll`/`Vendor Spear` deducts gold + applies the
+   effect; an unaffordable row reads red; LEAVE (or selecting it) closes + resumes. Gold now has a sink.
+2. [AC64] In `npm run dev`: roughly 1-in-6 enemies spawn as an ELITE — a bigger gold-tinted body, more HP, a
+   tighter telegraph, and a death burst (a radial projectile fan) on kill. The same run seed always produces
+   the same elites. `npm run verify` re-proves the deepened `config/upgrades.js` (9 rows) is cost-monotone +
+   never-weaker on EVERY field it touches (the five new fields included).
+3. [AC65] `npm run verify` sweeps BOTH bosses in `BOSS_ORDER` for table well-formedness + the depth guardrail,
+   and asserts every id in the boss biome's `boss` array resolves. In `npm run dev`: different run seeds reach
+   either **The Warden** OR **The Hollow Sentinel** at the boss arena (a different telegraphed fight).
+4. [AC66] `npm run verify` node-imports `combat/status.js` and pins the tick math (a 0.4s/3 bleed deals 3 over
+   0.4s + stays live; a 0.5s stun is stunned at 0.3s, gone after 0.6s; re-apply refreshes, not stacks). In
+   `npm run dev`: the Spear BLEEDS (red DoT numbers), the Hammer STUNS (the enemy freezes briefly, grey-blue),
+   the Bow POISONS (green DoT). DoT can finish a low-HP enemy.
+5. [AC67] In the 200-seed × 3-biome sweep, when a level emits a treasure branch its ledge is STANDABLE +
+   REACHABLE from the entrance (a generalized BFS), AND the regression pin is UNCHANGED (the 40-col pin config
+   emits no branch). In `npm run dev`: some levels have an upward side detour ending in a guaranteed reward
+   (gold/scroll/weapon/heal); the main entrance→exit route is unaffected.
+6. Regression: `npm run build` exits 0; every prior `verify-gen.mjs` pin (rng, combat purity/geometry, the
+   per-biome level sweep + the level regression pin, run-structure monotonicity/determinism, upgrade/weapon/
+   applyUpgrades contracts, the enemy/boss/boss-arena contracts) still passes — the enrichment additions are
+   pure-config/pure-module extensions + a pin-safe generator branch; a headless browser smoke (CDP) confirms
+   Boot→Title→Hub→Game→boss-arena run with zero console errors/exceptions.
