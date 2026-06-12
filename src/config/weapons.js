@@ -122,3 +122,116 @@ export const WEAPONS = { sword: SWORD, hammer: HAMMER, bow: BOW, spear: SPEAR }
 
 // The ordered list (for the verifier sweep + any list rendering). FOUR weapons ship now (§6.6.5, AC60).
 export const WEAPON_ORDER = [SWORD, HAMMER, BOW, SPEAR]
+
+// ── WEAPON AFFIXES (Enrichment round-2 — the build engine; mirrors config/enemies.js ELITE_AFFIXES) ──
+// A weapon found in a run can now ROLL a modifier at pickup, so a sword found at depth 1 is NOT identical
+// to one found at depth 11 — the affix is what makes late-run loot exciting (the genre's build engine). An
+// affix is PURE DATA folded into a FRESH weapon object by foldWeaponAffix (mirroring Enemy._foldElite for
+// elites) — NEVER mutating the shared WEAPONS config — so the Player equips the folded weapon and reads its
+// swings/type/projectile/status UNCHANGED (the fold preserves the weapon schema). GameScene rolls one off
+// the LEVEL seed at pickup (deterministic — a run replays the same affixes), stamps it on the pickup, and
+// equips the folded weapon; the HUD shows "Weapon ✦ AffixName".
+//
+// THE AFFIX FIELDS (foldWeaponAffix reads these; all optional — an absent field is the neutral default):
+//   id            — the affix id (for the verifier sweep + the HUD label).
+//   name          — the human label shown on the HUD next to the weapon name.
+//   damageMult    — ×damage on EVERY swing row AND the projectile (a flat power bump — the "+damage" roll).
+//   knockbackMult — ×knockback on every swing row + the projectile (a "concussive" roll — more shove).
+//   comboSpeedMult— ×active+recovery on every swing row (<1 → a FASTER combo; the "swift" roll). Clamped >0.
+//   lifestealFrac — WEAPON lifesteal: heal this fraction of damage dealt by THIS weapon (read at the hit
+//                   site like the Vampirism scroll, but tied to the weapon — a "vampiric" roll). Additive.
+//   addStatus     — a STATUS tag to ADD/OVERRIDE on the weapon ({kind,duration,...}) — e.g. put BLEED on a
+//                   sword that had none (an "envenomed/flaming" roll). Folded onto weapon.status, so the
+//                   existing GameScene status-on-hit path applies it with ZERO new wiring (DRY).
+// KISS: a small weighted set (YAGNI on more). Each leans on the EXISTING hit-site reads + the status path,
+// so the engine risk is near-zero and the verifier sweeps the table the same way it sweeps elite affixes.
+
+// KEEN — a flat +damage roll: every hit lands harder. The bread-and-butter power affix (the most common).
+export const WEAPON_KEEN = { id: 'keen', name: 'Keen', damageMult: 1.3 }
+
+// HEAVY — a concussive roll: more knockback (juggle/space enemies) at a small damage bump. Pairs with the
+// Hammer's stagger identity, but rolls on any weapon.
+export const WEAPON_HEAVY = { id: 'heavy', name: 'Heavy', damageMult: 1.1, knockbackMult: 1.6 }
+
+// SWIFT — a faster combo (shorter active+recovery) at a slight damage trade — the DPS/tempo affix (more
+// swings per second). comboSpeedMult < 1 shortens the lock; damage is unchanged so total DPS rises.
+export const WEAPON_SWIFT = { id: 'swift', name: 'Swift', comboSpeedMult: 0.78 }
+
+// VAMPIRIC — weapon LIFESTEAL: heal a fraction of the damage THIS weapon deals (a sustain build engine —
+// the bruiser's dream roll). Read at the hit site like the Vampirism scroll, additive with it.
+export const WEAPON_VAMPIRIC = { id: 'vampiric', name: 'Vampiric', lifestealFrac: 0.16 }
+
+// VENOMOUS — ADD a bleed DoT to the weapon (even a sword that had no status). Folded onto weapon.status so
+// the existing status-on-hit path applies it (DRY). For a weapon that ALREADY has a status, this OVERRIDES
+// it with the stronger bleed (KISS — one status slot). A DoT-stacking build engine.
+export const WEAPON_VENOMOUS = {
+  id: 'venomous',
+  name: 'Venomous',
+  damageMult: 1.05,
+  addStatus: { kind: 'bleed', duration: 2.6, tickInterval: 0.4, tickDmg: 4 },
+}
+
+// ── WEAPON_AFFIXES (the weighted roll set) ── GameScene picks one off the LEVEL seed via the weights (the
+// SAME weighted-pick idiom as ELITE_AFFIXES / enemyPool — DRY). Keen is the most common (the readable
+// baseline); the build-defining affixes (vampiric/venomous/swift) are rarer spice.
+export const WEAPON_AFFIXES = [
+  { affix: WEAPON_KEEN, w: 4 },
+  { affix: WEAPON_HEAVY, w: 3 },
+  { affix: WEAPON_SWIFT, w: 2 },
+  { affix: WEAPON_VAMPIRIC, w: 2 },
+  { affix: WEAPON_VENOMOUS, w: 2 },
+]
+
+// The ordered affix list (for the verifier sweep + any list rendering).
+export const WEAPON_AFFIX_ORDER = WEAPON_AFFIXES.map((e) => e.affix)
+
+// id → affix lookup (GameScene resolves a pickup's stamped affixId back to the affix to fold + equip — DRY,
+// one source). A run carries the affix id on RunState (a scalar) so a level rebuild re-folds the SAME weapon.
+export const WEAPON_AFFIXES_BY_ID = Object.fromEntries(WEAPON_AFFIX_ORDER.map((a) => [a.id, a]))
+
+// The per-pickup affix ROLL chance — a found weapon is affixed this often (else it's a plain weapon, the
+// identity). Sized so most found weapons carry SOME modifier (loot is exciting) but a plain weapon still
+// appears (so the affix reads as a bonus, not a default). DATA so GameScene rolls it off the level seed.
+export const WEAPON_AFFIX_CHANCE = 0.7
+
+// ── foldWeaponAffix(weapon, affix) → a NEW affixed weapon (PURE; mirrors Enemy._foldElite, Decision 77) ──
+// Bake the affix's multipliers/lifesteal/status into a FRESH weapon object (deep-cloning the swings rows +
+// projectile so the shared WEAPONS config is NEVER mutated — the aliasing safety every fold in this codebase
+// keeps). The folded weapon has the SAME schema (id/name/type/swings/projectile/status) so the Player equips
+// + reads it UNCHANGED; it gains `affixId`/`affixName` (the HUD label) + `affixLifestealFrac` (read at the
+// melee-hit site like the scroll). Every affix field is optional (?? the neutral default) so a missing field
+// leaves the base value — a Keen weapon keeps base knockback/speed/status, a Swift weapon keeps base damage.
+export function foldWeaponAffix(weapon, affix) {
+  if (!affix) return weapon // no affix → the plain weapon (identity — a fresh run plays exactly as before).
+  const dMult = affix.damageMult ?? 1
+  const kMult = affix.knockbackMult ?? 1
+  const sMult = affix.comboSpeedMult ?? 1
+  // Deep-clone each swing row with the multipliers applied (active/recovery clamped > 0 so the lock never
+  // collapses to 0 and re-fires the same frame — a real bug guard). damage rounds to a whole hp (resolveHit
+  // re-rounds anyway, but keep the table clean).
+  const swings = weapon.swings.map((s) => ({
+    ...s,
+    damage: Math.round(s.damage * dMult),
+    knockback: Math.round(s.knockback * kMult),
+    active: Math.max(0.02, s.active * sMult),
+    recovery: Math.max(0, s.recovery * sMult),
+  }))
+  const folded = {
+    ...weapon,
+    swings,
+    affixId: affix.id,
+    affixName: affix.name,
+    affixLifestealFrac: affix.lifestealFrac ?? 0, // weapon lifesteal (read at the melee-hit site; 0 = none).
+  }
+  // Ranged: scale the projectile damage/knockback by the same mults (a fresh projectile object — no mutation).
+  if (weapon.type === 'ranged' && weapon.projectile) {
+    folded.projectile = {
+      ...weapon.projectile,
+      damage: Math.round(weapon.projectile.damage * dMult),
+      knockback: Math.round(weapon.projectile.knockback * kMult),
+    }
+  }
+  // Status: an addStatus affix ADDS/OVERRIDES the weapon's status (one slot — KISS); else keep the base.
+  if (affix.addStatus) folded.status = { ...affix.addStatus }
+  return folded
+}

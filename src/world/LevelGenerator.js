@@ -221,6 +221,171 @@ function mergeRuns(tiles, cols, rows, type) {
   return runs
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// LAYOUT TEMPLATES (Enrichment round-2 — the level-shape variety) — see generateLevel step 3 header.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Each builder consumes the MAIN rng + a shared `ctx` ({cols,rows,floorRow,platformRows,interiorMax,
+// lenMin,lenMax}) and RETURNS a `critical[]` chain of {col,row,len,type:SOLID} platforms ordered
+// entrance … exit, where EVERY consecutive pair satisfies the SHARED canReachStep (so the verifier's
+// generic BFS proves traversability for ANY template — Decision 36/AC27). They reuse makeRun (interior
+// clamp) + canReachPlatform (the reach proof) so a new template can never emit an unreachable jump.
+
+// Below this grid width the template pick is FORCED to 'staircase' (the pinned 40-col config is below
+// it, so its tiles are byte-unchanged). Every real biome (≥64 cols) is above it → gets the variety.
+const LAYOUT_MIN_COLS = 50
+
+// The known layout-template ids (Enrichment round-2) — exported so the verifier asserts every generated
+// `template` is one of these AND that the SHAPE space is actually used (no dead template) across the sweep.
+export const LAYOUT_TEMPLATES = ['staircase', 'shaft', 'islands']
+
+// Default template WEIGHTS (Enrichment round-2). A biome may override via `layoutWeights` (config/biomes.js)
+// to flavour its shape mix; absent ⇒ this shared default. Staircase keeps the highest weight (it's the
+// readable baseline); shaft/islands add spatial surprise. Picked off the off-the-main-thread tplRng.
+const DEFAULT_LAYOUT_WEIGHTS = [
+  { id: 'staircase', w: 3 },
+  { id: 'shaft', w: 2 },
+  { id: 'islands', w: 2 },
+]
+
+// ── selectTemplate(cols, biomeConfig, rng) → a template id ── narrow grids (the pin) ALWAYS get the
+// staircase (byte-stable); otherwise a weighted seeded pick over the biome's (or the default) weights.
+// rng is the OFF-THE-MAIN-THREAD sub-RNG so the main draw sequence — and the pin — is untouched (header).
+function selectTemplate(cols, biomeConfig, rng) {
+  if (cols < LAYOUT_MIN_COLS) return 'staircase' // the pin grid + any tiny room → the stable default.
+  const weights = biomeConfig.layoutWeights && biomeConfig.layoutWeights.length ? biomeConfig.layoutWeights : DEFAULT_LAYOUT_WEIGHTS
+  const total = weights.reduce((s, e) => s + (e.w || 1), 0)
+  let r = rng() * total
+  for (const entry of weights) {
+    r -= entry.w || 1
+    if (r <= 0) return entry.id
+  }
+  return weights[weights.length - 1].id // float-rounding fallthrough → the last id (KISS).
+}
+
+// ── buildStaircase(rng, ctx) → critical[] ── the ORIGINAL left→right reach-bounded walk (verbatim, so a
+// staircase level's main-rng draw sequence — and thus the regression pin — is byte-identical). Start the
+// entrance platform on the left a couple rows up; repeatedly place the next platform a seeded (gap, step)
+// away that canReachStep accepts, until the walk passes the right margin (the last platform holds the exit).
+function buildStaircase(rng, { platformRows, interiorMax, lenMin, lenMax }) {
+  const rightMargin = 3 // stop the walk this many cols before the right wall.
+  const startRow = clampInt(platformRows - randInt(rng, 0, 2), 2, platformRows)
+  const critical = [makeRun(2, startRow, randInt(rng, lenMin, lenMax), interiorMax)]
+  let guard = 0
+  while (guard++ < 10000) {
+    const prev = critical[critical.length - 1]
+    const prevRight = prev.col + prev.len - 1
+    if (prevRight >= interiorMax - rightMargin) break // reached the right side → done.
+
+    const gap = randInt(rng, MIN_GAP, MAX_GAP)
+    const drawnStep = randInt(rng, -MAX_STEP_UP, MAX_STEP_DOWN)
+    const nextRow = clampInt(prev.row + drawnStep, 2, platformRows)
+    const next = makeRun(prevRight + gap, nextRow, randInt(rng, lenMin, lenMax), interiorMax)
+
+    // PROOF (defensive): the emitted pair must pass the SHARED predicate. With sane budgets this always
+    // holds; if a future widening breaks it, pull the gap to the minimum (always in-reach).
+    if (!canReachPlatform(prev, next)) {
+      const pulled = makeRun(prevRight + MIN_GAP, nextRow, next.len, interiorMax)
+      if (!canReachPlatform(prev, pulled)) break // truly stuck (cannot happen with sane budgets).
+      critical.push(pulled)
+      continue
+    }
+    if (next.col <= prevRight) break // clamp fused it flush against prev (at the wall) → stop.
+    critical.push(next)
+  }
+  return critical
+}
+
+// ── buildShaft(rng, ctx) → critical[] ── a VERTICAL descent: the entrance sits HIGH on the left; each
+// step drops DOWN a reach-bounded amount, zig-zagging left/right across the interior so the chain reads
+// as a switchback shaft rather than a wall of ledges. The exit lands LOW on the right. Falling is always
+// in reach (a downward step only grows air time), and every pair is re-proven via canReachPlatform, so
+// the shaft is traversable BY CONSTRUCTION (AC27). Walks until it reaches near the floor OR a step cap.
+function buildShaft(rng, { rows, platformRows, interiorMax, lenMin, lenMax }) {
+  const topRow = clampInt(2 + randInt(rng, 0, 1), 2, platformRows) // start near the ceiling.
+  // Entrance on the LEFT third so the player drops in up high; the chain switchbacks down-right.
+  const startCol = clampInt(2 + randInt(rng, 0, 3), 1, Math.max(2, Math.floor(interiorMax / 3)))
+  const critical = [makeRun(startCol, topRow, randInt(rng, lenMin, lenMax), interiorMax)]
+  const bottomRow = platformRows // the lowest a platform sits (one above the floor).
+  let dir = 1 // current horizontal travel direction (1 = right, -1 = left); flips at the walls.
+  let guard = 0
+  while (guard++ < 10000) {
+    const prev = critical[critical.length - 1]
+    if (prev.row >= bottomRow - 1) break // reached the bottom band → the exit platform is placed.
+
+    // Drop a seeded DOWN step (1..MAX_STEP_DOWN). Down steps are always reachable (more air time).
+    const drop = randInt(rng, 2, MAX_STEP_DOWN)
+    const nextRow = clampInt(prev.row + drop, 2, bottomRow)
+    // Move horizontally by a reach-bounded gap in the current direction; flip at the interior edges so
+    // the column zig-zags (a switchback). The gap is small (within MAX_GAP) so the diagonal is jumpable.
+    const gap = randInt(rng, MIN_GAP, MAX_GAP)
+    const len = randInt(rng, lenMin, lenMax)
+    const prevLeft = prev.col
+    const prevRight = prev.col + prev.len - 1
+    let col = dir > 0 ? prevRight + gap : prevLeft - gap - len + 1
+    // Flip direction if we'd spill past a wall; recompute the column on the new heading.
+    if (col + len - 1 > interiorMax || col < 1) {
+      dir = -dir
+      col = dir > 0 ? prevRight + gap : prevLeft - gap - len + 1
+    }
+    const next = makeRun(col, nextRow, len, interiorMax)
+    if (!canReachPlatform(prev, next)) {
+      // Pull horizontally to the minimum gap on the current heading (a steeper but still-reachable drop).
+      const pulledCol = dir > 0 ? prevRight + MIN_GAP : prevLeft - MIN_GAP - len + 1
+      const pulled = makeRun(pulledCol, nextRow, len, interiorMax)
+      if (!canReachPlatform(prev, pulled)) break // truly stuck (cannot happen with sane budgets).
+      critical.push(pulled)
+      continue
+    }
+    // Reject a no-advance clamp (the run fused onto prev's span at the same row) so the shaft progresses.
+    if (next.row === prev.row && next.col + next.len - 1 >= prevLeft && next.col <= prevRight) break
+    critical.push(next)
+  }
+  return critical
+}
+
+// ── buildIslands(rng, ctx) → critical[] ── a WIDE arena of floating islands at VARIED heights: the chain
+// hops left→right like the staircase BUT each platform's row swings freely up AND down within the reach
+// envelope (a bouncier, more open traverse than the monotone staircase), and the gaps trend a touch wider
+// so the room reads as scattered islands rather than a continuous stair. Entrance low-left, exit right.
+// Every hop is re-proven via canReachPlatform (AC27). The decoration scatter later hangs one-way ledges
+// in the open airspace, completing the "floating islands" read.
+function buildIslands(rng, { platformRows, interiorMax, lenMin, lenMax }) {
+  const rightMargin = 3
+  const startRow = clampInt(platformRows - randInt(rng, 0, 1), 2, platformRows) // low-left entrance.
+  const critical = [makeRun(2, startRow, randInt(rng, lenMin, lenMax), interiorMax)]
+  let guard = 0
+  while (guard++ < 10000) {
+    const prev = critical[critical.length - 1]
+    const prevRight = prev.col + prev.len - 1
+    if (prevRight >= interiorMax - rightMargin) break
+
+    // A WIDER gap bias (islands are scattered) but still ≤ MAX_GAP so it stays jumpable.
+    const gap = randInt(rng, Math.min(2, MAX_GAP), MAX_GAP)
+    // The height swings freely up/down within the envelope — try an up step OR a down step (a bouncy ride).
+    const drawnStep = randInt(rng, -MAX_STEP_UP, MAX_STEP_DOWN)
+    const nextRow = clampInt(prev.row + drawnStep, 2, platformRows)
+    const len = randInt(rng, lenMin, lenMax)
+    const next = makeRun(prevRight + gap, nextRow, len, interiorMax)
+    if (!canReachPlatform(prev, next)) {
+      // First try pulling the gap in; if the height swing itself is too steep, flatten the step toward prev.
+      const pulled = makeRun(prevRight + MIN_GAP, nextRow, len, interiorMax)
+      if (canReachPlatform(prev, pulled) && pulled.col > prevRight) {
+        critical.push(pulled)
+        continue
+      }
+      const flatRow = clampInt(prev.row - Math.min(MAX_STEP_UP, Math.abs(prev.row - nextRow)), 2, platformRows)
+      const flattened = makeRun(prevRight + MIN_GAP, flatRow, len, interiorMax)
+      if (!canReachPlatform(prev, flattened)) break
+      if (flattened.col <= prevRight) break
+      critical.push(flattened)
+      continue
+    }
+    if (next.col <= prevRight) break
+    critical.push(next)
+  }
+  return critical
+}
+
 // ── generateLevel(seed, biomeConfig) → level description (the contract — design §6.2) ──
 // PURE. ONE mulberry32(seed) threads the whole generation so the SAME (seed, biome) is byte-
 // identical (AC19). Returns plain data (no functions) so it serializes for the regression pin.
@@ -258,60 +423,44 @@ export function generateLevel(seed, biomeConfig) {
     tiles[r][cols - 1] = TILE.SOLID
   }
 
-  // ── 3) The reach-bounded STAIRCASE WALK (Decisions 34/35 — traversable by construction) ──
-  // Start the entrance platform on the floor at the left; repeatedly place the next platform a
-  // seeded (gap, step) away that platformStep+canReachStep ACCEPT, until the walk passes the right
-  // margin. Each platform is a short SOLID run (len within the biome's platformLenRange — min ≥ 3 so
-  // it's standable + patrol-able, Decision 41). The LAST platform holds the exit (AC27).
+  // ── 3) The reach-bounded CRITICAL PATH — picked from a seeded TEMPLATE set (Enrichment round-2) ──
+  // The single deterministic left→right staircase was the #1 replay gap: every room across all biomes
+  // had the SAME shape, only the enemy/colour mix varied. We now pick ONE of several LAYOUT TEMPLATES
+  // off the seed (selectTemplate), each of which builds a `critical[]` chain of {col,row,len} platforms
+  // (entrance … exit, in order) where EVERY consecutive pair satisfies the SHARED canReachStep predicate
+  // — so traversability holds BY CONSTRUCTION for every template (the verifier's BFS re-proves it
+  // generically, Decision 36, AC27). The templates are:
+  //   • 'staircase'  — the original left→right reach-bounded walk (the pinned default).
+  //   • 'shaft'      — a VERTICAL descent: a zig-zag column of ledges from a high entrance down to a low
+  //                    exit (each step within the down-reach; falling is always in reach).
+  //   • 'islands'    — a WIDE arena of floating one-way-topped SOLID islands at varied heights, chained
+  //                    near-edge-to-near-edge so each hop is reach-bounded (a bouncy traverse).
+  //
+  // PIN SAFETY (the load-bearing constraint): the regression pin uses cols:40 (< LAYOUT_MIN_COLS), and
+  // selectTemplate ALWAYS returns 'staircase' below that width — so the pinned 40-col grid is byte-
+  // identical (the template pick never even draws for it). The template SELECTION uses an OFF-THE-MAIN-
+  // THREAD sub-RNG (like the treasure branch) so it consumes NO draw from the main `rng` thread; each
+  // template then threads the SAME main `rng` it always did, so a staircase level's draw sequence — and
+  // thus the pin — is unchanged. New templates only widen the SHAPE space for real (≥ LAYOUT_MIN_COLS)
+  // biomes (PRISON 64 / SEWERS 76 / CATACOMBS 82 / RAMPARTS 88 all qualify).
   const [lenMin, lenMax] = biomeConfig.platformLenRange
-  const rightMargin = 3 // stop the walk this many cols before the right wall.
   const platformRows = floorRow - 1 // platforms live in rows [1 .. floorRow-1] (above the floor).
-
-  // The playable interior columns: [1, cols-2] sit BETWEEN the side walls (col 0 + col cols-1 are
-  // SOLID walls). Every platform run is clamped to this band so its emitted {col,len} record matches
-  // EXACTLY what gets stamped (no record/grid drift — that drift was a real bug: cellAbove read a
-  // pre-clamp len and emitted an out-of-bounds exit column). The clamp helper enforces it once.
   const interiorMax = cols - 2 // last interior column (cols-1 is the right wall).
+  const tplCtx = { cols, rows, floorRow, platformRows, interiorMax, lenMin, lenMax }
 
-  // Entrance platform: a run starting just inside the left wall, a couple rows up from the floor so
-  // the player stands above the floor with room to descend too. Clamped to the interior band.
-  const startRow = clampInt(platformRows - randInt(rng, 0, 2), 2, platformRows)
-  const critical = [] // the critical-path platforms (entrance … exit), in order.
-  critical.push(makeRun(2, startRow, randInt(rng, lenMin, lenMax), interiorMax))
+  // Pick the template off a seeded sub-RNG (off the main thread — pin-safe; see header). Below
+  // LAYOUT_MIN_COLS it is forced to 'staircase' so the narrow pin grid is byte-unchanged.
+  const tplRng = mulberry32((seed ^ 0x7e3415a7) >>> 0)
+  const template = selectTemplate(cols, biomeConfig, tplRng)
 
-  // Walk right. Each iteration draws a seeded (gap, step) INSIDE the budgets and places the next
-  // platform's NEAR edge a clear `gap` past the previous run's right edge, `step` rows away. Because
-  // the budgets are clamped to the reach envelope at module load, every in-budget pair satisfies
-  // canReachStep — so the placement is jumpable BY CONSTRUCTION (AC27); we still assert it per-step
-  // (defensive against a future budget widening). The walk stops once a platform reaches the right
-  // margin; that LAST platform holds the exit.
-  let guard = 0
-  while (guard++ < 10000) {
-    const prev = critical[critical.length - 1]
-    const prevRight = prev.col + prev.len - 1
-    if (prevRight >= interiorMax - rightMargin) break // reached the right side → done.
-
-    const gap = randInt(rng, MIN_GAP, MAX_GAP)
-    const drawnStep = randInt(rng, -MAX_STEP_UP, MAX_STEP_DOWN)
-    const nextRow = clampInt(prev.row + drawnStep, 2, platformRows)
-    // The next run's NEAR (left) edge = prev right edge + the clear gap. makeRun clamps the run to
-    // the interior, and we recompute the ACTUAL metric from the EMITTED record (Decision 36) so the
-    // reachability check sees exactly what's stamped — never a pre-clamp value.
-    const next = makeRun(prevRight + gap, nextRow, randInt(rng, lenMin, lenMax), interiorMax)
-
-    // PROOF (defensive): the emitted pair must pass the SHARED predicate. With sane budgets this
-    // always holds; if a future widening breaks it, pull the gap to the minimum (always in-reach).
-    if (!canReachPlatform(prev, next)) {
-      const pulled = makeRun(prevRight + MIN_GAP, nextRow, next.len, interiorMax)
-      if (!canReachPlatform(prev, pulled)) break // truly stuck (cannot happen with sane budgets).
-      critical.push(pulled)
-      continue
-    }
-    // If clamping fused the next run flush against the previous (no advance), stop — we're at the
-    // wall (prevents an infinite guard spin in a pathologically narrow room).
-    if (next.col <= prevRight) break
-    critical.push(next)
-  }
+  // Build the chosen template's critical chain off the MAIN rng (so the staircase path's draw sequence —
+  // and the pin — is identical). Each builder RETURNS the {col,row,len} chain (entrance … exit).
+  const critical =
+    template === 'shaft'
+      ? buildShaft(rng, tplCtx)
+      : template === 'islands'
+        ? buildIslands(rng, tplCtx)
+        : buildStaircase(rng, tplCtx)
 
   // Stamp every critical platform into the grid as a SOLID run (records already match the interior).
   for (const p of critical) stampRun(tiles, cols, rows, p.col, p.row, p.len, TILE.SOLID)
@@ -408,6 +557,7 @@ export function generateLevel(seed, biomeConfig) {
     spawnCandidates, // SURPLUS enemy spawns for the depth-scaled enemyCountBonus (Decision 45).
     pickups, // standable world spawn points + kind.
     branchTreasure, // §6.14 (Decision 80) — the optional branch's treasure standable point, or null.
+    template, // Enrichment round-2 — the layout template id chosen for this level ('staircase'|'shaft'|'islands').
     seed,
     biomeId: biomeConfig.id,
   }

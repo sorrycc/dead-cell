@@ -216,16 +216,261 @@ export const RAMPARTS_BOSS_2 = {
   },
 }
 
-// ── BOSSES (id → spec) ── the lookup GameScene reads (biome.boss → BOSSES[id]). TWO bosses now (§6.12,
-// Decision 78); the boss biome's `boss` is an ARRAY of ids, and GameScene picks one off the run seed so
-// different runs face a different fight (the variety win) — a clean extension of the Decision-67 seam.
+// ── RAMPARTS_BOSS_3 — "The Iron Tyrant" (Enrichment round-2 — the 3rd finale boss) ── a THIRD distinct
+// gate for the boss biome's seeded pick, so the climax varies even more run-to-run (the replay win). Where
+// the Warden is a slow melee bruiser and the Sentinel a ranged zoner, the Tyrant is a HYBRID AGGRESSOR: the
+// tankiest of the three, leaning on the DASH + the SWEEP ring (relentless pressure that closes AND zones),
+// with a slam to punish and a volley to cover gaps. Phase 2 chains dash→sweep→slam for a frantic back half.
+// It satisfies the EXACT pure boss-table contract the verifier checks (≥2 descending phases, the first 1.0,
+// known attack kinds, every referenced attack present, telegraph/active > 0) — a pure-config add, zero
+// Boss.js change (the FSM dispatches by attack kind, all four of which it already handles).
+export const RAMPARTS_BOSS_3 = {
+  id: 'rampartsBoss3',
+  name: 'The Iron Tyrant',
+  maxHp: 600, // the tankiest finale (a true endurance check — pairs with its relentless pressure).
+  bodyW: 92,
+  bodyH: 104,
+  color: 0xb03a2e, // resting fill (iron red — distinct from the Warden's purple + the Sentinel's blue).
+  colorTelegraph: 0xf5b041,
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.14, // the heaviest — practically immovable (the trade for its aggression).
+  contactDamage: 18,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    {
+      // ── Phase 1 (100% → 50%): a dash ↔ slam pressure rotation with a covering sweep, readable telegraphs. ──
+      hpThreshold: 1.0,
+      telegraphMult: 0.95,
+      moveSpeed: 100, // it advances faster than the Warden (a closer, more aggressive bruiser).
+      attacks: ['dash', 'slam', 'sweep'],
+    },
+    {
+      // ── Phase 2 (≤50%): the frantic back half — dash→sweep→slam chains, a volley to cover, tighter tells. ──
+      hpThreshold: 0.5,
+      telegraphMult: 0.68,
+      moveSpeed: 140,
+      attacks: ['dash', 'sweep', 'slam', 'volley', 'dash'],
+    },
+  ],
+  attacks: {
+    slam: {
+      kind: 'slam',
+      telegraph: 0.68,
+      active: 0.16,
+      recovery: 0.55,
+      swing: { reach: 130, halfHeight: 68, forward: 32, damage: 24, knockback: 560 },
+    },
+    volley: {
+      kind: 'volley',
+      telegraph: 0.5,
+      active: 0.12,
+      recovery: 0.5,
+      count: 4,
+      spreadDeg: 28,
+      projectile: { speed: 440, damage: 14, knockback: 220, lifetime: 2.3, w: 16, h: 8 },
+    },
+    dash: {
+      kind: 'dash',
+      telegraph: 0.62, // a quicker dash wind-up than the Warden's (the aggressor identity).
+      active: 0.46,
+      recovery: 0.7,
+      speed: 780,
+      contactDamage: 28,
+      knockback: 620,
+    },
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.72,
+      active: 0.14,
+      recovery: 0.65,
+      count: 12, // between the Warden's 10 and the Sentinel's 14 (a mid-density ring it uses constantly).
+      projectile: { speed: 330, damage: 15, knockback: 220, lifetime: 2.3, w: 14, h: 14 },
+    },
+  },
+}
+
+// ── MINIBOSS specs (Enrichment round-2 — the per-biome set-piece gate, §6.6.8) ── a run was ONE boss at the
+// very end; the rest was a flat slope of normal rooms. A MINIBOSS at each non-boss biome's LAST normal level
+// gives the run ESCALATING set-piece fights (a climax per biome), not just one finale. A miniboss is a
+// CUT-DOWN boss spec — fewer HP, a 2-phase kit drawn from the same four primitives — spawned by GameScene as a
+// Boss entity INTO the normal room (which keeps its exit Door — the miniboss guards the way out but isn't the
+// hard run-gate the finale is). It rides the EXISTING Boss.js FSM + scaleBossSpec depth fold + the boss HP bar
+// with ZERO engine change (it's just another boss spec). Each satisfies the verifier's boss-table contract.
+
+// PRISON_MINIBOSS — "The Jailer": a slow melee bruiser (a beefed grunt-feel), the gentle first set-piece.
+export const PRISON_MINIBOSS = {
+  id: 'prisonMiniboss',
+  name: 'The Jailer',
+  maxHp: 200, // a fraction of a finale boss (a real fight, not a wall — it's level ~3 of the run).
+  bodyW: 64,
+  bodyH: 80,
+  color: 0x6c3483, // resting fill (muted purple — a lesser cousin of the Warden).
+  colorTelegraph: 0xf5b041,
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.3,
+  contactDamage: 12,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    { hpThreshold: 1.0, telegraphMult: 1.0, moveSpeed: 70, attacks: ['slam', 'dash'] },
+    { hpThreshold: 0.5, telegraphMult: 0.8, moveSpeed: 100, attacks: ['slam', 'dash', 'slam'] },
+  ],
+  attacks: {
+    slam: {
+      kind: 'slam',
+      telegraph: 0.7,
+      active: 0.16,
+      recovery: 0.6,
+      swing: { reach: 100, halfHeight: 54, forward: 26, damage: 16, knockback: 440 },
+    },
+    dash: {
+      kind: 'dash',
+      telegraph: 0.7,
+      active: 0.4,
+      recovery: 0.75,
+      speed: 640,
+      contactDamage: 18,
+      knockback: 480,
+    },
+  },
+}
+
+// SEWERS_MINIBOSS — "The Drowned": a ranged zoner (a beefed shooter-feel), volley-led, with a sweep tell.
+export const SEWERS_MINIBOSS = {
+  id: 'sewersMiniboss',
+  name: 'The Drowned',
+  maxHp: 230,
+  bodyW: 62,
+  bodyH: 78,
+  color: 0x148f77, // resting fill (sickly teal — the Sewers palette).
+  colorTelegraph: 0xf5d76e,
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.28,
+  contactDamage: 12,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    { hpThreshold: 1.0, telegraphMult: 0.95, moveSpeed: 90, attacks: ['volley', 'dash'] },
+    { hpThreshold: 0.5, telegraphMult: 0.78, moveSpeed: 120, attacks: ['volley', 'sweep', 'dash'] },
+  ],
+  attacks: {
+    volley: {
+      kind: 'volley',
+      telegraph: 0.5,
+      active: 0.12,
+      recovery: 0.5,
+      count: 4,
+      spreadDeg: 30,
+      projectile: { speed: 440, damage: 12, knockback: 200, lifetime: 2.3, w: 16, h: 8 },
+    },
+    dash: {
+      kind: 'dash',
+      telegraph: 0.65,
+      active: 0.4,
+      recovery: 0.7,
+      speed: 700,
+      contactDamage: 20,
+      knockback: 520,
+    },
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.72,
+      active: 0.12,
+      recovery: 0.6,
+      count: 11,
+      projectile: { speed: 330, damage: 13, knockback: 200, lifetime: 2.3, w: 14, h: 14 },
+    },
+  },
+}
+
+// CATACOMBS_MINIBOSS — "The Bone Warden": a hybrid pressure fight (slam + dash + sweep), the toughest miniboss
+// (it gates entry into the final Ramparts biome — the last set-piece before the finale).
+export const CATACOMBS_MINIBOSS = {
+  id: 'catacombsMiniboss',
+  name: 'The Bone Warden',
+  maxHp: 270,
+  bodyW: 66,
+  bodyH: 82,
+  color: 0x7d6b8a, // resting fill (crypt violet-grey — the Catacombs palette).
+  colorTelegraph: 0xf5b041,
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.24,
+  contactDamage: 14,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    { hpThreshold: 1.0, telegraphMult: 0.9, moveSpeed: 95, attacks: ['slam', 'sweep', 'dash'] },
+    { hpThreshold: 0.5, telegraphMult: 0.72, moveSpeed: 125, attacks: ['dash', 'sweep', 'slam', 'volley'] },
+  ],
+  attacks: {
+    slam: {
+      kind: 'slam',
+      telegraph: 0.66,
+      active: 0.16,
+      recovery: 0.55,
+      swing: { reach: 110, halfHeight: 58, forward: 28, damage: 18, knockback: 480 },
+    },
+    volley: {
+      kind: 'volley',
+      telegraph: 0.5,
+      active: 0.12,
+      recovery: 0.5,
+      count: 4,
+      spreadDeg: 30,
+      projectile: { speed: 440, damage: 13, knockback: 200, lifetime: 2.3, w: 16, h: 8 },
+    },
+    dash: {
+      kind: 'dash',
+      telegraph: 0.62,
+      active: 0.42,
+      recovery: 0.7,
+      speed: 740,
+      contactDamage: 22,
+      knockback: 540,
+    },
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.7,
+      active: 0.13,
+      recovery: 0.6,
+      count: 12,
+      projectile: { speed: 330, damage: 14, knockback: 200, lifetime: 2.3, w: 14, h: 14 },
+    },
+  },
+}
+
+// ── BOSSES (id → spec) ── the lookup GameScene reads (biome.boss → BOSSES[id], biome.miniboss → BOSSES[id]).
+// THREE finale bosses now (round-2); the boss biome's `boss` is an ARRAY of ids, and GameScene picks one off
+// the run seed so different runs face a different fight (the variety win). The three MINIBOSS specs join the
+// SAME map (they're just lighter bosses) so _pickBossId / scaleBossSpec / the boss HP bar reuse them as-is.
 export const BOSSES = {
   rampartsBoss: RAMPARTS_BOSS,
   rampartsBoss2: RAMPARTS_BOSS_2,
+  rampartsBoss3: RAMPARTS_BOSS_3,
+  prisonMiniboss: PRISON_MINIBOSS,
+  sewersMiniboss: SEWERS_MINIBOSS,
+  catacombsMiniboss: CATACOMBS_MINIBOSS,
 }
 
-// The ordered list (for the verifier's well-formedness sweep — BOTH bosses are checked).
-export const BOSS_ORDER = [RAMPARTS_BOSS, RAMPARTS_BOSS_2]
+// The ordered list (for the verifier's well-formedness sweep — ALL bosses + minibosses are checked, since
+// each is a real boss spec the FSM runs and the verifier's boss-table contract must hold for every one).
+export const BOSS_ORDER = [
+  RAMPARTS_BOSS,
+  RAMPARTS_BOSS_2,
+  RAMPARTS_BOSS_3,
+  PRISON_MINIBOSS,
+  SEWERS_MINIBOSS,
+  CATACOMBS_MINIBOSS,
+]
 
 // ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). The
 // round-3 'sweep' (a true-radial projectile ring — Boss.js dispatches it) is the FOURTH primitive. ──

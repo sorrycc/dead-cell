@@ -35,7 +35,7 @@ import { mulberry32 } from '../src/util/rng.js'
 import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
-import { generateLevel, TILE, canReachPlatform } from '../src/world/LevelGenerator.js'
+import { generateLevel, TILE, canReachPlatform, LAYOUT_TEMPLATES } from '../src/world/LevelGenerator.js'
 import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
@@ -51,7 +51,7 @@ import { createRunState } from '../src/core/RunState.js'
 // util/save.js (Phaser-free) + the pure configs, and applyUpgrades/BASE_PLAYER_STATS touch NO storage,
 // so this import never throws under node (review MINOR — the purity-convention pin made explicit).
 import { UPGRADES } from '../src/config/upgrades.js'
-import { WEAPON_ORDER } from '../src/config/weapons.js'
+import { WEAPON_ORDER, WEAPON_AFFIXES, WEAPON_AFFIX_ORDER, WEAPON_AFFIX_CHANCE, foldWeaponAffix } from '../src/config/weapons.js'
 import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
 // Bosses-phase PURE modules (§6.6, Decision 64/68, AC56/AC59/AC61): the archetype specs + per-biome
 // pools, the boss table, and the boss-arena generator branch. All node-importable (no Phaser) — the
@@ -282,9 +282,14 @@ function checkDescription(desc, biome) {
     }
   }
 
-  // (e) Traversable (AC27).
+  // (e) Traversable (AC27) — re-derived from the EMITTED platforms via the SHARED reach metric, so it
+  // holds for ANY layout template (staircase/shaft/islands) by construction (Enrichment round-2).
   const t = bfsTraversable(desc)
   if (!t.ok) return `not traversable: ${t.reason}`
+
+  // (e') Layout template well-formed (Enrichment round-2): the chosen `template` must be a KNOWN id. The
+  // SWEEP below additionally asserts the SHAPE space is actually USED (no dead template) per real biome.
+  if (!LAYOUT_TEMPLATES.includes(desc.template)) return `unknown layout template "${desc.template}"`
 
   // (f) §6.14 (Decision 80, AC67) — the OPTIONAL treasure branch: when present, its treasure ledge must be
   // STANDABLE (re-derived from tiles — GameScene places the reward there) AND REACHABLE from the entrance
@@ -336,6 +341,9 @@ function bfsReaches(desc, fromCell, toCell) {
 // traversable) holds for every biome the run can walk, not only the opener.
 const N = 200
 for (const biome of BIOME_ORDER) {
+  // Enrichment round-2: track which LAYOUT TEMPLATES this biome's seed sweep actually produces, so we can
+  // assert the SHAPE space is genuinely used (≥2 distinct templates) — i.e. the variety isn't dead config.
+  const templatesSeen = new Set()
   for (let i = 0; i < N; i++) {
     // Spread the seeds (a Knuth multiplicative hash) so the sweep isn't a near-identical run of
     // adjacent integers — exercises a wide range of seeded layouts deterministically.
@@ -346,6 +354,13 @@ for (const biome of BIOME_ORDER) {
 
     const reason = checkDescription(d1, biome)
     if (reason) fail(`biome ${biome.id} seed ${seed}: ${reason}`)
+    templatesSeen.add(d1.template)
+  }
+  // Every real biome (≥ LAYOUT_MIN_COLS) must show MULTIPLE layout shapes across the sweep — the round-2
+  // "every run feels different" guarantee. (All shipped biomes are ≥64 cols, well above the staircase-only
+  // narrow-grid floor, so a single-template biome would be a regression in the weights/pick.)
+  if (templatesSeen.size < 2) {
+    fail(`biome ${biome.id}: only ${templatesSeen.size} layout template(s) across ${N} seeds (expected ≥2 — the variety win)`)
   }
 }
 
@@ -673,6 +688,17 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   for (const id of bossIds) {
     if (!BOSSES[id]) fail(`boss biome ${bossBiomes[0].id}: boss id "${id}" not in BOSSES (AC65)`)
   }
+  // ── Round-2 (§6.6.8): a biome's OPTIONAL `miniboss` id must resolve to a known boss (a typo / dangling id
+  // fails loudly, mirroring the boss-id check). EVERY non-boss biome SHOULD carry one (the per-biome set-piece
+  // gate — so the run has an escalating climax per biome, not just the finale); we assert presence + validity. ──
+  for (const biome of BIOME_ORDER) {
+    if (biome.miniboss !== undefined && !BOSSES[biome.miniboss]) {
+      fail(`biome ${biome.id}: miniboss id "${biome.miniboss}" not in BOSSES (round-2)`)
+    }
+    if (!biome.endsInBoss && !biome.miniboss) {
+      fail(`biome ${biome.id}: a non-boss biome should declare a miniboss set-piece (round-2 §6.6.8)`)
+    }
+  }
 }
 
 // ── 6c) Boss table well-formed (AC56/AC61): ≥1 boss; each has ≥2 phases with DESCENDING hpThresholds
@@ -715,7 +741,9 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (scaled10.maxHp < base.maxHp) fail(`boss ${boss.id}: scaled maxHp below base (${scaled10.maxHp} < ${base.maxHp})`)
     // Non-mutation: snapshot a base attack damage, run the fold, re-read it (scaleBossSpec must clone).
     const baseSlamDmg = base.attacks.slam ? base.attacks.slam.swing.damage : null
-    for (const kind of BOSS_ATTACK_KINDS) {
+    // Iterate the boss's OWN defined attacks (round-2: a miniboss may define only a subset of the four kinds —
+    // it doesn't need every primitive, only the ones its phases reference, which 6c already proves exist).
+    for (const kind of Object.keys(base.attacks)) {
       const a = base.attacks[kind]
       const a10 = scaled10.attacks[kind]
       if (a.swing && a10.swing.damage < a.swing.damage) fail(`boss ${boss.id}: scaled ${kind} slam damage dropped`)
@@ -920,17 +948,108 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   if (!(typeof ELITE_CHANCE === 'number' && ELITE_CHANCE > 0 && ELITE_CHANCE < 1)) fail(`ELITE_CHANCE must be in (0,1), got ${ELITE_CHANCE}`)
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 10) Weapon AFFIXES (Enrichment round-2 — the in-run weapon build engine). An INDEPENDENT proof that the
+//     weighted affix set + the pure foldWeaponAffix fold are well-formed: a non-empty weighted set, sane
+//     per-affix modifiers, and a fold that (a) never mutates the shared weapon config, (b) PRESERVES the
+//     weapon schema (so the Player reads it unchanged), and (c) never WEAKENS the weapon's damage (an affix
+//     is always a bonus). Mirrors the elite-affix / upgrade-table well-formedness checks — a malformed affix
+//     table fails loudly under node, never reaching the game.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 10a) WEAPON_AFFIXES well-formed: a weighted set of ≥3 affixes ({ affix, w }), each with a string
+  // id + name + positive weight, sane modifier ranges (any present multiplier > 0; a lifesteal in [0,1]),
+  // and a well-formed addStatus when present (a known damaging status shape). WEAPON_AFFIX_CHANCE ∈ (0,1). ──
+  if (!Array.isArray(WEAPON_AFFIXES) || WEAPON_AFFIXES.length < 3) {
+    fail(`WEAPON_AFFIXES has ${WEAPON_AFFIXES?.length} entries, expected ≥3 (round-2 weapon build engine)`)
+  }
+  const seenWAffix = new Set()
+  for (const entry of WEAPON_AFFIXES) {
+    if (!(typeof entry.w === 'number') || entry.w <= 0) fail('weapon affix entry: weight must be > 0')
+    const a = entry.affix
+    if (!a || typeof a.id !== 'string' || !a.id) fail('weapon affix: missing id')
+    if (typeof a.name !== 'string' || !a.name) fail(`weapon affix ${a.id}: missing name`)
+    if (seenWAffix.has(a.id)) fail(`weapon affix ${a.id}: duplicate id`)
+    seenWAffix.add(a.id)
+    for (const f of ['damageMult', 'knockbackMult', 'comboSpeedMult']) {
+      if (a[f] !== undefined && !(typeof a[f] === 'number' && a[f] > 0)) fail(`weapon affix ${a.id}: ${f} must be > 0`)
+    }
+    if (a.lifestealFrac !== undefined && !(a.lifestealFrac >= 0 && a.lifestealFrac <= 1)) {
+      fail(`weapon affix ${a.id}: lifestealFrac must be in [0,1]`)
+    }
+    if (a.addStatus) {
+      if (typeof a.addStatus.kind !== 'string' || !a.addStatus.kind) fail(`weapon affix ${a.id}: addStatus needs a kind`)
+      if (!(a.addStatus.duration > 0)) fail(`weapon affix ${a.id}: addStatus duration must be > 0`)
+    }
+    // The affix MUST do SOMETHING (a no-op affix is a content bug — a rolled affix must change the weapon).
+    const doesSomething =
+      (a.damageMult ?? 1) !== 1 || (a.knockbackMult ?? 1) !== 1 || (a.comboSpeedMult ?? 1) !== 1 ||
+      (a.lifestealFrac ?? 0) !== 0 || !!a.addStatus
+    if (!doesSomething) fail(`weapon affix ${a.id}: changes nothing about the weapon (a no-op affix)`)
+  }
+  if (!(typeof WEAPON_AFFIX_CHANCE === 'number' && WEAPON_AFFIX_CHANCE > 0 && WEAPON_AFFIX_CHANCE < 1)) {
+    fail(`WEAPON_AFFIX_CHANCE must be in (0,1), got ${WEAPON_AFFIX_CHANCE}`)
+  }
+
+  // ── 10b) foldWeaponAffix is a PURE, schema-preserving, never-weaken fold: for EVERY (weapon, affix) pair
+  // it must (a) return a NEW object that keeps the weapon schema (same type, a non-empty swings table, a
+  // projectile IFF ranged, a status when addStatus is present), (b) never MUTATE the shared weapon config,
+  // and (c) never reduce a swing's damage below the base (an affix only ever helps). Identity on a null affix. ──
+  {
+    // Identity: a null affix returns the SAME weapon ref (the plain weapon — no fold).
+    for (const w of WEAPON_ORDER) {
+      if (foldWeaponAffix(w, null) !== w) fail(`foldWeaponAffix(${w.id}, null) must return the plain weapon (identity)`)
+    }
+    for (const w of WEAPON_ORDER) {
+      const baseDmgs = w.swings.map((s) => s.damage)
+      const baseProjDmg = w.projectile ? w.projectile.damage : null
+      for (const affix of WEAPON_AFFIX_ORDER) {
+        const folded = foldWeaponAffix(w, affix)
+        if (folded === w) fail(`foldWeaponAffix(${w.id}, ${affix.id}) must return a NEW object (no mutation)`)
+        // Schema preserved.
+        if (folded.type !== w.type) fail(`foldWeaponAffix(${w.id}, ${affix.id}): type changed`)
+        if (!Array.isArray(folded.swings) || folded.swings.length !== w.swings.length) fail(`foldWeaponAffix(${w.id}, ${affix.id}): swings table malformed`)
+        if (w.type === 'ranged' && !folded.projectile) fail(`foldWeaponAffix(${w.id}, ${affix.id}): ranged weapon lost its projectile`)
+        if (w.type !== 'ranged' && folded.projectile) fail(`foldWeaponAffix(${w.id}, ${affix.id}): melee weapon gained a projectile`)
+        if (affix.addStatus && (!folded.status || folded.status.kind !== affix.addStatus.kind)) {
+          fail(`foldWeaponAffix(${w.id}, ${affix.id}): addStatus affix did not stamp the status`)
+        }
+        // active/recovery stay sane (a faster combo must not collapse the lock to 0 — a re-fire bug guard).
+        for (const s of folded.swings) {
+          if (!(s.active > 0)) fail(`foldWeaponAffix(${w.id}, ${affix.id}): a swing active collapsed to ≤0`)
+          if (s.recovery < 0) fail(`foldWeaponAffix(${w.id}, ${affix.id}): a swing recovery went negative`)
+        }
+        // Never-weaken: every swing's damage ≥ the base (an affix only helps the player).
+        folded.swings.forEach((s, i) => {
+          if (s.damage < baseDmgs[i]) fail(`foldWeaponAffix(${w.id}, ${affix.id}): swing ${i} damage ${s.damage} < base ${baseDmgs[i]}`)
+        })
+        if (baseProjDmg !== null && folded.projectile.damage < baseProjDmg) {
+          fail(`foldWeaponAffix(${w.id}, ${affix.id}): projectile damage dropped below base`)
+        }
+        // affixLifestealFrac is surfaced for the hit-site read (≥0).
+        if (!(folded.affixLifestealFrac >= 0)) fail(`foldWeaponAffix(${w.id}, ${affix.id}): affixLifestealFrac must be ≥ 0`)
+      }
+      // Non-mutation: the base weapon's swing damages + projectile damage are UNCHANGED after all the folds.
+      w.swings.forEach((s, i) => {
+        if (s.damage !== baseDmgs[i]) fail(`foldWeaponAffix MUTATED ${w.id} base swing ${i} damage (aliasing bug)`)
+      })
+      if (baseProjDmg !== null && w.projectile.damage !== baseProjDmg) fail(`foldWeaponAffix MUTATED ${w.id} base projectile damage (aliasing bug)`)
+    }
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
-    `traversable(AC27) + branch-treasure standable&reachable(AC67); level pin OK; ` +
+    `traversable(AC27) + branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2); level pin OK; ` +
     `curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
     `identity/non-mutating/never-weaker (AC55); ${ENEMY_ARCHETYPES.length} enemy archetypes + per-biome ` +
     `pools (AC59); boss table well-formed + depth-scaling guardrail (AC56/AC61); ${WEAPON_ORDER.length} ` +
     `weapons (AC60); boss-arena branch deterministic + valid over ${N} seeds (AC57); ` +
-    `${SHOP_ITEMS.length} shop items well-formed (AC63); ${BOSS_ORDER.length} bosses well-formed (AC65); ` +
+    `${SHOP_ITEMS.length} shop items well-formed (AC63); ${BOSS_ORDER.length} bosses+minibosses well-formed (AC65, round-2 roster); ` +
     `status tick/expiry/refresh pure+pinned (${STATUS_KINDS.length} kinds, AC66); ` +
-    `${SCROLLS.length} scrolls + ${ELITE_AFFIXES.length} elite affixes well-formed (round-3 build variety)`,
+    `${SCROLLS.length} scrolls + ${ELITE_AFFIXES.length} elite affixes well-formed (round-3 build variety); ` +
+    `${WEAPON_AFFIXES.length} weapon affixes pure-fold/schema-preserving/never-weaken (round-2 build engine)`,
 )
 process.exit(0)

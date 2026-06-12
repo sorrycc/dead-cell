@@ -34,6 +34,20 @@ export const ROWS_MAX = 30
 //             determinism deep-equal stay intact). Each biome spawns a DIFFERENT mix (Prison = grunts;
 //             Sewers adds shooters; Ramparts adds chargers/flyers) → visibly distinct biomes. The
 //             verifier asserts every pool is non-empty + references only known archetype ids.
+// `miniboss` : (OPTIONAL — Enrichment round-2, §6.6.8) a boss id (config/bosses.js BOSSES[id]) spawned as a
+//             SET-PIECE on this biome's LAST NORMAL level (levelInBiome === levels-1) so the run has an
+//             ESCALATING climax per biome, not just the one finale. A miniboss is a cut-down boss spec; it
+//             rides the EXISTING Boss FSM + scaleBossSpec depth fold + boss HP bar (zero engine change). The
+//             room KEEPS its exit Door (the miniboss guards the way out but isn't the finale's hard gate).
+//             Absent ⇒ no miniboss (the boss biome has none — its finale IS the set-piece). The verifier
+//             asserts a present id resolves to a known boss.
+// `layoutWeights` : (OPTIONAL — Enrichment round-2) a WEIGHTED list of LAYOUT-TEMPLATE ids
+//             ([{id:'staircase'|'shaft'|'islands', w}, …]) the GENERATOR picks the room SHAPE from off a
+//             seeded sub-RNG (off the main draw thread — pin-safe). Absent ⇒ a shared default mix. This
+//             FLAVOURS each biome's spatial feel (the Prison reads as a readable stair, the Catacombs as a
+//             vertical descent, the Ramparts as a sprawl of floating islands) on top of the colour/enemy
+//             mix — so "every run feels different" is about SHAPE, not just palette. The generator forces
+//             'staircase' below LAYOUT_MIN_COLS regardless (so the narrow regression-pin grid is byte-stable).
 
 // ── PRISON — the opening biome (Decision 39/43, tier 0). ──
 // All fields are pure data. The generator clamps cols/rows into [MIN,MAX] (AC28) and reads the
@@ -44,9 +58,17 @@ export const PRISON = {
   name: 'Prison',
   difficultyTier: 0, // tier 0 — the opener (monotone index, ≤ SEWERS ≤ RAMPARTS).
   endsInBoss: false, // not a boss biome.
+  miniboss: 'prisonMiniboss', // round-2 (§6.6.8) — The Jailer guards this biome's last normal level (a gentle first set-piece).
   levels: 3, // BLOCKER 1: this biome spans 3 generated rooms before rolling to SEWERS.
   // Enemy archetype pool (Decision 68/AC59) — Prison is all melee Grunts (a fair opener).
   enemyPool: [{ id: 'grunt', w: 1 }],
+  // Layout mix (Enrichment round-2) — the OPENER leans on the readable STAIRCASE (a gentle on-ramp) with a
+  // light sprinkle of the other shapes, so a new player isn't dropped into a vertical shaft on level 1.
+  layoutWeights: [
+    { id: 'staircase', w: 5 },
+    { id: 'shaft', w: 1 },
+    { id: 'islands', w: 2 },
+  ],
   cols: 64, // grid width in tiles (within [COLS_MIN, COLS_MAX]).
   rows: 22, // grid height in tiles (within [ROWS_MIN, ROWS_MAX]).
   // Enemy count band (AC28): the generator draws n ∈ [minEnemies, maxEnemies] standable spawns.
@@ -82,11 +104,19 @@ export const SEWERS = {
   name: 'Sewers',
   difficultyTier: 1,
   endsInBoss: false,
+  miniboss: 'sewersMiniboss', // round-2 (§6.6.8) — The Drowned guards this biome's last normal level (a ranged zoner set-piece).
   levels: 3,
   // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure).
   enemyPool: [
     { id: 'grunt', w: 3 },
     { id: 'shooter', w: 2 },
+  ],
+  // Layout mix (Enrichment round-2) — the Sewers tilt toward floating ISLANDS over open water/sludge (a
+  // bouncier traverse that pairs with the kiting shooters), with the stair + shaft as the alternates.
+  layoutWeights: [
+    { id: 'staircase', w: 3 },
+    { id: 'shaft', w: 2 },
+    { id: 'islands', w: 4 },
   ],
   cols: 76, // longer than PRISON (still within bounds) — a denser, twistier descent.
   rows: 24,
@@ -120,6 +150,7 @@ export const CATACOMBS = {
   name: 'Catacombs',
   difficultyTier: 2, // tier 2 — between Sewers (1) and the bumped Ramparts (3); monotone.
   endsInBoss: false,
+  miniboss: 'catacombsMiniboss', // round-2 (§6.6.8) — The Bone Warden guards the last set-piece before the finale.
   levels: 3, // 3 generated rooms before rolling to Ramparts (extends the run by a biome).
   // Enemy pool (Decision 68/AC59) — Catacombs leans on the new SPITTER shotgunner + the FLYER over a grunt
   // base (a ranged-spread + aerial mix — distinct from the Sewers' grunt+shooter kiting feel).
@@ -127,6 +158,13 @@ export const CATACOMBS = {
     { id: 'grunt', w: 2 },
     { id: 'spitter', w: 3 }, // the round-3 5th archetype debuts here (its signature biome).
     { id: 'flyer', w: 2 },
+  ],
+  // Layout mix (Enrichment round-2) — the Catacombs lean into the vertical SHAFT (a switchback descent into
+  // the crypt — its signature spatial feel), with the stair + islands as the alternates.
+  layoutWeights: [
+    { id: 'staircase', w: 2 },
+    { id: 'shaft', w: 4 },
+    { id: 'islands', w: 2 },
   ],
   cols: 82, // between Sewers (76) and Ramparts (88) — within bounds.
   rows: 25,
@@ -158,7 +196,7 @@ export const RAMPARTS = {
   // OR The Hollow Sentinel), so different runs face a different fight (the variety win). `boss` is an ARRAY
   // of ids keyed into config/bosses.js BOSSES; GameScene picks one off the run seed (a run replays the same
   // boss). A single-id string is still accepted by GameScene (back-compat) — the array is the multi-boss form.
-  boss: ['rampartsBoss', 'rampartsBoss2'], // The Warden | The Hollow Sentinel (AC57/AC65).
+  boss: ['rampartsBoss', 'rampartsBoss2', 'rampartsBoss3'], // The Warden | The Hollow Sentinel | The Iron Tyrant (round-2, AC57/AC65).
   levels: 3, // 2 normal generated levels + the boss arena as the last (levelInBiome === levels-1).
   // Enemy pool (Decision 68/AC59) — Ramparts is the FULL roster: every archetype incl. the round-3 Spitter,
   // so the deepest biome throws the whole bestiary at you (the hardest, most varied rooms).
@@ -168,6 +206,14 @@ export const RAMPARTS = {
     { id: 'charger', w: 2 },
     { id: 'flyer', w: 2 },
     { id: 'spitter', w: 2 },
+  ],
+  // Layout mix (Enrichment round-2) — the deepest biome throws the FULL shape variety at you in roughly even
+  // measure (every room a fresh spatial puzzle), tilted a touch toward the sprawling ISLANDS read (a fortress
+  // of broken ramparts you leap between).
+  layoutWeights: [
+    { id: 'staircase', w: 3 },
+    { id: 'shaft', w: 3 },
+    { id: 'islands', w: 4 },
   ],
   cols: 88, // longest (within bounds).
   rows: 26,

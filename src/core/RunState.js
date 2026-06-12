@@ -83,6 +83,11 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
     // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
     // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──
     weaponId, // the currently-equipped weapon id (carried across level rebuilds).
+    // ── Equipped weapon AFFIX (Enrichment round-2 — the build engine) ── the rolled affix id on the current
+    // weapon (or null = a plain weapon). Carried as a SCALAR so a level rebuild re-folds the SAME weapon (the
+    // GameScene rebuild re-equips WEAPONS[weaponId] folded with WEAPON_AFFIXES_BY_ID[weaponAffixId]). A fresh
+    // run starts with no affix (the starting weapon is unmodified — the identity).
+    weaponAffixId: null,
 
     // ── Run stats (for the GameOver summary, AC46) ──
     kills: 0, // GameScene bumps this on each enemy death.
@@ -115,6 +120,16 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
     // final biome — endsInBoss gates this so a future non-boss final biome keeps the Door path.
     isBossLevel() {
       return this.biome().endsInBoss === true && this.levelInBiome >= this.biome().levels - 1
+    },
+
+    // ── isMinibossLevel() (Enrichment round-2, §6.6.8) ── true when the CURRENT level is a NON-boss biome's
+    // LAST NORMAL level AND that biome declares a `miniboss` — the per-biome set-piece gate. PURE (no Phaser)
+    // so the verifier can call it. GameScene reads it in _buildLevel to spawn the miniboss INTO the normal
+    // room (which keeps its exit Door — the miniboss guards the way out but isn't the finale's hard gate).
+    // Mutually exclusive with isBossLevel() (a boss biome has endsInBoss → it builds the arena, not this).
+    isMinibossLevel() {
+      const b = this.biome()
+      return b.endsInBoss !== true && !!b.miniboss && this.levelInBiome >= b.levels - 1
     },
 
     // ── advance() (Decision 46, BLOCKER 1) — next seed + next level/biome/depth ──

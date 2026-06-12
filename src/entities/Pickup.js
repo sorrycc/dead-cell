@@ -53,8 +53,9 @@ export class PickupPool {
       this.group.add(rect)
       const body = rect.body
       body.setSize(PICKUP_SIZE, PICKUP_SIZE, true)
-      // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC).
-      rect.pk = { active: false, id: 0, kind: null, weaponId: null, scrollId: null, goldAmount: 0, healFrac: 0 }
+      // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC). weaponAffixId is the
+      // Enrichment round-2 weapon affix rolled at placement (null = a plain weapon — the identity).
+      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, scrollId: null, goldAmount: 0, healFrac: 0 }
       rect.pickupRef = rect.pk // back-ref so the overlap callback resolves the pickup from its body.
       this._disable(rect)
       this._items.push(rect)
@@ -88,6 +89,7 @@ export class PickupPool {
     pk.id = _nextPickupId++
     pk.kind = kind
     pk.weaponId = meta.weaponId ?? null
+    pk.weaponAffixId = meta.weaponAffixId ?? null // round-2 — the weapon affix rolled at placement (null = plain).
     pk.scrollId = meta.scrollId ?? null
     pk.goldAmount = kind === 'gold' ? (meta.amount ?? GOLD_AMOUNT) : 0
     pk.healFrac = kind === 'heal' ? (meta.healFrac ?? HEAL_PICKUP_FRAC) : 0 // §6.9 — fraction of max HP a heal restores.
@@ -130,6 +132,7 @@ export class PickupPool {
     rect.pk.active = false
     rect.pk.kind = null
     rect.pk.weaponId = null
+    rect.pk.weaponAffixId = null
     rect.pk.scrollId = null
     rect.pk.healFrac = 0
     const body = rect.body

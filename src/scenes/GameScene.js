@@ -17,11 +17,12 @@ import { scaleAtDepth, scaleSpec, scaleBossSpec } from '../config/difficulty.js'
 import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
-import { WEAPONS } from '../config/weapons.js'
+import { WEAPONS, WEAPON_AFFIXES, WEAPON_AFFIX_CHANCE, WEAPON_AFFIXES_BY_ID, foldWeaponAffix } from '../config/weapons.js'
 import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
 import { SHOP_ITEMS } from '../config/shop.js'
+import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { mulberry32 } from '../util/rng.js'
 
 // ── GameScene (design §6.1 + §6.2 + §6.3 + §6.4, AC11–AC18 + AC19/AC27–AC30 + AC20–AC26 + AC42–AC47) ──
@@ -358,6 +359,15 @@ export class GameScene extends Phaser.Scene {
     this.desc = desc
     this.tileMap = new TileMap(this, desc)
 
+    // ── ROOM TYPE (Enrichment round-2, §6.15) ── roll a tagged room type off the LEVEL seed (a fresh sub-RNG,
+    // OFF the generator's pinned draw — the weapon-pickup/shop discipline, so the level pin stays intact). A
+    // miniboss level is NEVER tagged (it already IS the set-piece — see _buildLevel's miniboss branch). The
+    // roll FLAVOURS this normal room: more elites (forceElite), more enemies (extraEnemies), richer loot
+    // (lootMult), an optional debuff (playerDamageTakenMult), a guaranteed reward. Most rolls are 'normal' (the
+    // identity — byte-unchanged). _applyRoomType sets this.roomType + this.roomDamageTakenMult (read at the
+    // player-hit sites) and pops the banner. MUST run BEFORE the spawn loop so forceElite/extraEnemies apply.
+    this._applyRoomType(desc)
+
     // Reposition the Player at the entrance (feet on the platform). reset() snaps the collider body
     // there + clears residual velocity so a rebuild never carries momentum from the previous level.
     // (HP is NOT touched here — it carried in via create()/_nextLevel — Decision 46.)
@@ -389,7 +399,7 @@ export class GameScene extends Phaser.Scene {
     for (const e of desc.enemies) {
       const base = this._pickArchetype(biome, archetypeRng)
       const spec = scaleSpec(base, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollElite(eliteRng) })
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollEliteForRoom(eliteRng) })
     }
 
     // ── enemyCountBonus (design §6.4, Decision 45 / review MAJOR — IMPLEMENTABLE source) ── at depth,
@@ -398,13 +408,16 @@ export class GameScene extends Phaser.Scene {
     // standable geometry: the DRY violation the review flagged). Capped so the live count never exceeds
     // the biome's maxEnemies, and bounded by the surplus available (else simply fewer — never a no-op
     // claim). Each bonus spawn is the SAME scaled spec, so "more AND tankier enemies at depth" holds.
+    // Round-2 (§6.15): a HORDE room type adds roomType.extraEnemies on TOP of the depth bonus (still capped
+    // at the biome max + the surplus available), so a tagged horde reads as a real density spike.
     const liveCount = desc.enemies.length
-    const wantBonus = Math.min(scale.enemyCountBonus, Math.max(0, biome.maxEnemies - liveCount))
+    const roomExtra = this.roomType ? this.roomType.extraEnemies ?? 0 : 0
+    const wantBonus = Math.min(scale.enemyCountBonus + roomExtra, Math.max(0, biome.maxEnemies - liveCount))
     for (let i = 0; i < wantBonus && i < desc.spawnCandidates.length; i++) {
       const e = desc.spawnCandidates[i]
       const base = this._pickArchetype(biome, archetypeRng) // same off-the-pin RNG (Decision 68).
       const spec = scaleSpec(base, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollElite(eliteRng) })
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc, elite: this._rollEliteForRoom(eliteRng) })
     }
 
     // ── Pickups (§6.5, Decision 54, AC48) ── the generator's desc.pickups (cell/gold) become REAL
@@ -503,6 +516,59 @@ export class GameScene extends Phaser.Scene {
       () => this._hazardCooldown <= 0 && this.player.isHittable() && !this.gameOver,
       this,
     )
+
+    // ── MINIBOSS set-piece (Enrichment round-2, §6.6.8) ── on a non-boss biome's LAST normal level, spawn the
+    // biome's declared miniboss INTO this room (it still has its exit Door — the miniboss guards the way out but
+    // isn't the finale's hard gate). It reuses the SAME Boss entity + scaleBossSpec depth fold + boss HP bar as
+    // the finale, so the run gets an escalating climax per biome with zero engine change. No-op on levels without
+    // a miniboss (the common case — the bare `if` keeps the normal-room path identical).
+    if (this.runState.isMinibossLevel()) this._spawnMiniboss(desc)
+  }
+
+  // ── _spawnMiniboss(desc) (Enrichment round-2, §6.6.8) ── spawn the current biome's miniboss as a Boss entity
+  // into the normal room, depth-scaled (scaleBossSpec — tankier + harder-hitting deeper, like the finale). It is
+  // added to the SAME enemyHurtboxes group so the EXISTING player→enemy/projectile overlaps hit it (no new
+  // wiring), draws its slam/dash from enemyHitboxes + its volley/sweep from enemyProjectilePool (Decision 64/65),
+  // and shows the boss HP bar. Its death is NOT a run-end (unlike the finale): onBossDeath just clears the bar +
+  // counts the kill. Placed at a standable spot near the EXIT so it guards the way out. this.boss is the live
+  // miniboss for this level (teardown despawns it like any boss); this.isBossRoom stays FALSE (the Door logic +
+  // hazard-as-normal-level path are unchanged — a miniboss room is a normal room with a guardian).
+  _spawnMiniboss(desc) {
+    const biome = this.runState.biome()
+    const spec = BOSSES[biome.miniboss]
+    if (!spec) return // defensive — an unknown id degrades to no miniboss (KISS, never throws).
+    const bossSpec = scaleBossSpec(spec, scaleAtDepth(this.runState.depth))
+    // Place it near the exit ledge (the guardian of the way out), feet on the exit platform. A miniboss is a
+    // big body, so spawn its center where the exit door sits — the floor/platform collider settles it.
+    const spawnX = desc.exit.x
+    const spawnY = desc.exit.y
+    this.boss = new Boss(this, spawnX, spawnY, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
+      minX: TILE_SIZE * 1.5,
+      maxX: desc.worldWidth - TILE_SIZE * 1.5,
+    })
+    // A miniboss death is NOT a run-end — just clear the HP bar + count the kill (no Victory handoff).
+    this.boss.onBossDeath = () => this._onMinibossDefeated()
+    this.boss.onDeath = () => {
+      this.runState.kills += 1
+    }
+    this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the miniboss.
+
+    // Show the boss HP bar for the miniboss (the set-piece reads). _emitHud refreshes it; _onMinibossDefeated /
+    // teardown clear it so it never persists. NOTE: isBossRoom stays FALSE (the Door + normal-room path hold);
+    // teardown clears the bar explicitly via this.boss handling + the _clearBossHud call below on death.
+    this.registry.set('bossActive', true)
+    this.registry.set('bossName', bossSpec.name)
+    this.registry.set('bossHp', this.boss.hp)
+    this.registry.set('bossMaxHp', this.boss.maxHp)
+  }
+
+  // ── _onMinibossDefeated() (Enrichment round-2, §6.6.8) ── the miniboss-kill edge: NOT a run-end (the run
+  // continues — the exit Door is the gate). Just clear the boss HP bar so it doesn't linger, and a small camera
+  // flourish so the kill reads. The kill count is bumped by the boss.onDeath hook (above). Guarded against a
+  // double-fire by the boss's own dead flag (Boss fires onBossDeath once).
+  _onMinibossDefeated() {
+    this._clearBossHud()
+    this.cameras.main.flash(220, 244, 208, 63) // a brief gold flash marks the set-piece clear.
   }
 
   // ── _enemyNotFlyer(enemyRect) ── the shared collider predicate (Decision 68/AC59): true for a normal
@@ -719,9 +785,11 @@ export class GameScene extends Phaser.Scene {
       this.enemyHurtboxes.remove(this.boss.collider, false, false)
       this.boss.forceDespawn()
       this.boss = null
+      // Clear the boss HP bar whenever ANY boss (finale OR round-2 miniboss) is torn down — so leaving a
+      // miniboss room via the Door (without killing it) never leaks a stale bar into the next room/run.
+      this._clearBossHud()
     }
     if (this.isBossRoom) {
-      this._clearBossHud()
       this.isBossRoom = false
     }
     // Enemies: despawn each (destroys its GameObjects) + clear the hurtbox group membership.
@@ -831,6 +899,131 @@ export class GameScene extends Phaser.Scene {
     return ELITE_AFFIXES[ELITE_AFFIXES.length - 1].affix // fallthrough (float rounding) → the last affix.
   }
 
+  // ── _rollWeaponAffix(rng) (Enrichment round-2 — the build engine; mirrors _rollElite) ── roll a WEAPON
+  // affix off the passed seeded RNG: WEAPON_AFFIX_CHANCE of the time pick ONE affix from the weighted
+  // WEAPON_AFFIXES set (keen/heavy/swift/vampiric/venomous), else null (a plain weapon — the identity).
+  // The weighted pick uses the SAME idiom as _pickArchetype/_rollElite (DRY). Off the seeded RNG so a run
+  // replays the same affixes. Returns the affix ID (a scalar stamped on the pickup + carried on RunState),
+  // or null. Two draws (the gate, then the pick) keep the affix deterministic given the seed.
+  _rollWeaponAffix(rng) {
+    if (rng() >= WEAPON_AFFIX_CHANCE) return null // a plain weapon this roll (the common-enough identity).
+    const total = WEAPON_AFFIXES.reduce((s, e) => s + (e.w || 1), 0)
+    let r = rng() * total
+    for (const entry of WEAPON_AFFIXES) {
+      r -= entry.w || 1
+      if (r <= 0) return entry.affix.id
+    }
+    return WEAPON_AFFIXES[WEAPON_AFFIXES.length - 1].affix.id // float-rounding fallthrough → the last affix.
+  }
+
+  // ── _equipWeaponWithAffix(weaponId, affixId) (Enrichment round-2) ── resolve the base weapon + the rolled
+  // affix to a FOLDED weapon (foldWeaponAffix — a fresh object, never mutating the shared config) and equip
+  // it, recording BOTH ids on RunState so a level rebuild re-folds the SAME weapon (the carry discipline the
+  // bare weaponId already follows). affixId null → the plain weapon (identity). Used by the pickup + shop +
+  // branch-reward paths (DRY — one equip-with-affix site). Returns the folded weapon (for any caller use).
+  _equipWeaponWithAffix(weaponId, affixId) {
+    const base = WEAPONS[weaponId]
+    if (!base) return null
+    const affix = affixId ? WEAPON_AFFIXES_BY_ID[affixId] : null
+    const folded = foldWeaponAffix(base, affix)
+    this.player.equipWeapon(folded) // resets the combo so the new moveset starts clean (Decision 63).
+    this.runState.weaponId = weaponId // the base id (carried across level rebuilds).
+    this.runState.weaponAffixId = affix ? affix.id : null // the affix id (re-folded on rebuild — round-2).
+    return folded
+  }
+
+  // ── _applyRoomType(desc) (Enrichment round-2, §6.15) ── roll a tagged ROOM TYPE off the LEVEL seed (a
+  // fresh sub-RNG, OFF the generator's pinned draw — the weapon-pickup/shop discipline) and arm its effects
+  // for this level. A miniboss level is NEVER tagged (it already IS the set-piece). Sets this.roomType (read
+  // by the spawn loop for forceElite/extraEnemies + the drop/reward sites for lootMult/guaranteedReward) and
+  // this.roomDamageTakenMult (read at the player-hit sites — the cursed-room debuff). Pops a banner + a camera
+  // flash so the type READS on entry. A 'normal' roll is the identity (no banner, neutral mults).
+  _applyRoomType(desc) {
+    this.roomType = ROOM_NORMAL // the identity until a non-normal type is rolled.
+    this.roomDamageTakenMult = 1 // the cursed-room debuff (1 = neutral); reset every level here.
+    // A miniboss level is its OWN set-piece — never ALSO tag it (it would double the difficulty spike).
+    if (this.runState.isMinibossLevel()) return
+    const rng = mulberry32((desc.seed ^ 0x4001ed) >>> 0) // distinct mix from the weapon/shop RNGs.
+    this.roomType = this._pickRoomType(rng)
+    if (this.roomType.playerDamageTakenMult) this.roomDamageTakenMult = this.roomType.playerDamageTakenMult
+    // A guaranteed bonus reward on entry (the carrot for the harder/cursed room), scaled by lootMult — placed
+    // at a standable spawn candidate off the entrance so it's reachable but not underfoot at spawn.
+    if (this.roomType.guaranteedReward) this._placeRoomReward(desc, this.roomType)
+    // Banner + flash so the room type reads (a brief tell). 'normal' has an empty name → no banner.
+    if (this.roomType.name) this._popRoomBanner(this.roomType)
+  }
+
+  // ── _pickRoomType(rng) ── weighted seeded pick over ROOM_TYPES (the SAME idiom as _pickArchetype/_rollElite
+  // — DRY). 'normal' has the highest weight so most rooms are untagged (the tags read as a spike). Returns the
+  // room-type object (never null — 'normal' is the fallback).
+  _pickRoomType(rng) {
+    const total = ROOM_TYPES.reduce((s, e) => s + (e.w || 1), 0)
+    let r = rng() * total
+    for (const entry of ROOM_TYPES) {
+      r -= entry.w || 1
+      if (r <= 0) return entry.type
+    }
+    return ROOM_NORMAL // float-rounding fallthrough → normal (the identity).
+  }
+
+  // ── _rollEliteForRoom(eliteRng) (round-2, §6.15) ── the room-aware elite roll: in an ELITE ARENA room
+  // (roomType.forceElite) EVERY spawn is an elite (skip the chance gate — pick a weighted affix directly off
+  // eliteRng so a run still replays the same affixes); otherwise the normal _rollElite (the ELITE_CHANCE gate).
+  // KISS: forceElite consumes ONE eliteRng draw for the affix pick (vs _rollElite's two — the gate + the pick),
+  // which is fine because the elite room's spawn sequence is its own deterministic thread per seed.
+  _rollEliteForRoom(eliteRng) {
+    if (this.roomType && this.roomType.forceElite) {
+      const total = ELITE_AFFIXES.reduce((s, e) => s + (e.w || 1), 0)
+      let r = eliteRng() * total
+      for (const entry of ELITE_AFFIXES) {
+        r -= entry.w || 1
+        if (r <= 0) return entry.affix
+      }
+      return ELITE_AFFIXES[ELITE_AFFIXES.length - 1].affix
+    }
+    return this._rollElite(eliteRng)
+  }
+
+  // ── _placeRoomReward(desc, roomType) (round-2, §6.15) ── place the room type's guaranteed bonus reward (a
+  // fat gold or a run-only scroll), scaled by lootMult, at a standable spawn candidate off the entrance. Off a
+  // fresh seeded RNG (off the pin — the weapon-pickup discipline). A real pooled pickup (DRY — the same pool).
+  _placeRoomReward(desc, roomType) {
+    const rng = mulberry32((desc.seed ^ 0x4e7a4d) >>> 0)
+    const spot =
+      desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
+      desc.pickups[0] ||
+      { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    const x = spot.x
+    const y = spot.y - TILE_SIZE
+    const mult = roomType.lootMult ?? 1
+    if (roomType.guaranteedReward === 'scroll') {
+      const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
+      this.pickupPool.acquire(x, y, 'scroll', { scrollId })
+    } else {
+      // A fat gold payout scaled by the room's lootMult (a richer reward for the harder room).
+      this.pickupPool.acquire(x, y, 'gold', { amount: Math.round(20 * mult) })
+    }
+  }
+
+  // ── _popRoomBanner(roomType) (round-2, §6.15) ── a brief camera-fixed banner + a tinted flash so the room
+  // type READS on entry (a primitive text tell — programmer-art). Destroyed on level rebuild via _levelObjects.
+  _popRoomBanner(roomType) {
+    this.cameras.main.flash(260, (roomType.bannerColor >> 16) & 0xff, (roomType.bannerColor >> 8) & 0xff, roomType.bannerColor & 0xff)
+    const banner = this.add
+      .text(this.cameras.main.width / 2, 70, roomType.name, {
+        fontFamily: 'monospace',
+        fontSize: '28px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(120)
+    this._levelObjects.push(banner)
+    // Fade the banner out after a beat so it doesn't clutter the fight (a 1.6s tell, then gone).
+    this.tweens.add({ targets: banner, alpha: 0, delay: 1200, duration: 600 })
+  }
+
   // ── _pickBossId(bossField) (design §6.12, Decision 78, AC65) ── resolve the boss biome's `boss` field to
   // ONE boss id. Accepts an ARRAY of ids (the multi-boss form) — picks one off the RUN seed (a fresh
   // off-the-pin mulberry32) so a run replays the same boss but different runs vary — OR a single string
@@ -889,9 +1082,12 @@ export class GameScene extends Phaser.Scene {
     const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
     const pool = choices.length ? choices : WEAPON_PICKUP_POOL
     const weaponId = pool[Math.floor(rng() * pool.length)]
+    // Enrichment round-2 — roll a weapon AFFIX off the SAME level RNG (deterministic; a run replays the same
+    // affixed loot). Stamped on the pickup so collection folds + equips the modified weapon (the build engine).
+    const weaponAffixId = this._rollWeaponAffix(rng)
     // Place it at a spawn spot away from the entrance (the first pickup point, or the level midpoint).
     const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
-    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId })
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId, weaponAffixId })
   }
 
   // ── _maybePlaceShop(desc) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── deterministically (off the
@@ -937,11 +1133,13 @@ export class GameScene extends Phaser.Scene {
     const x = spot.x
     const y = spot.y - TILE_SIZE
     if (roll < 0.34) {
-      // A weapon to try (the build-defining reward) — a weapon NOT currently equipped (a real swap).
+      // A weapon to try (the build-defining reward) — a weapon NOT currently equipped (a real swap), with a
+      // ROLLED affix (round-2 — the treasure-branch weapon is the prime spot for an exciting modified weapon).
       const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
       const pool = choices.length ? choices : WEAPON_PICKUP_POOL
       const weaponId = pool[Math.floor(rng() * pool.length)]
-      this.pickupPool.acquire(x, y, 'weapon', { weaponId })
+      const weaponAffixId = this._rollWeaponAffix(rng)
+      this.pickupPool.acquire(x, y, 'weapon', { weaponId, weaponAffixId })
     } else if (roll < 0.58) {
       // A run-only scroll boost (build power) — picks a deterministic scroll id off the same RNG.
       const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
@@ -980,10 +1178,13 @@ export class GameScene extends Phaser.Scene {
     // status (spear → bleed, hammer → stun) to the struck enemy, scaled by the run-only status-duration
     // mult (Venom). Null for a weapon with no status tag (sword) → no-op (identity).
     enemy.applyStatus(this._scaleStatus(this.player.equippedWeapon.status))
-    // ── LIFESTEAL (Vampirism scroll, round 3) ── heal a fraction of the MELEE damage dealt. 0 by default
-    // (no scroll → no heal — the identity); heal() no-ops at full HP / when dead, so this is always safe.
-    if (this.player.lifestealFrac > 0 && result.damage > 0) {
-      this.player.heal(Math.round(result.damage * this.player.lifestealFrac))
+    // ── LIFESTEAL (Vampirism scroll round 3 + Vampiric weapon affix round-2) ── heal a fraction of the MELEE
+    // damage dealt. The scroll lifesteal (player.lifestealFrac) and the EQUIPPED weapon's affix lifesteal
+    // (equippedWeapon.affixLifestealFrac — 0 on a plain/unaffixed weapon) ADD (a Vampiric weapon on a
+    // Vampirism build sustains hard). 0 by default → no heal (the identity); heal() no-ops at full HP / dead.
+    const lifesteal = this.player.lifestealFrac + (this.player.equippedWeapon.affixLifestealFrac ?? 0)
+    if (lifesteal > 0 && result.damage > 0) {
+      this.player.heal(Math.round(result.damage * lifesteal))
     }
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
@@ -1075,11 +1276,11 @@ export class GameScene extends Phaser.Scene {
         break
       }
       case 'weapon': {
-        const weapon = WEAPONS[pk.weaponId]
-        if (weapon) {
-          this.player.equipWeapon(weapon) // resets the combo so the new moveset starts clean (Decision 63).
-          this.runState.weaponId = pk.weaponId // carried across level rebuilds.
-        }
+        // Enrichment round-2 — fold the rolled affix (pk.weaponAffixId, null = plain) into a FRESH weapon and
+        // equip it (the build engine). _equipWeaponWithAffix records BOTH ids on RunState (carried/re-folded
+        // on rebuild) + resets the combo. The live affixed weapon persists across rebuilds (the Player object
+        // persists — only the world rebuilds), so the affix sticks for the rest of the run.
+        this._equipWeaponWithAffix(pk.weaponId, pk.weaponAffixId)
         break
       }
       case 'heal': {
@@ -1198,11 +1399,10 @@ export class GameScene extends Phaser.Scene {
         break
       }
       case 'weapon': {
-        const weapon = WEAPONS[item.weaponId]
-        if (weapon) {
-          this.player.equipWeapon(weapon) // swap moveset (resets the combo — same path as a weapon pickup).
-          this.runState.weaponId = item.weaponId // carried across level rebuilds.
-        }
+        // Enrichment round-2 — a shop weapon also rolls an affix (off Math.random — shop buys are off the
+        // seeded layout, like the scroll buy above; KISS) so a vendor weapon can be build-defining too.
+        const affixId = this._rollWeaponAffix(Math.random.bind(Math))
+        this._equipWeaponWithAffix(item.weaponId, affixId) // fold + equip + record on RunState (DRY).
         break
       }
     }
@@ -1277,6 +1477,14 @@ export class GameScene extends Phaser.Scene {
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
   }
 
+  // ── _weaponLabel() (Enrichment round-2) ── the HUD weapon string: the weapon name, plus the rolled affix
+  // name when the equipped weapon is affixed (e.g. "Sword ✦ Keen"). A plain weapon shows just its name (the
+  // identity — a fresh run's "Sword" reads exactly as before). One source so the HUD label is consistent.
+  _weaponLabel() {
+    const w = this.player.equippedWeapon
+    return w.affixName ? `${w.name} ✦ ${w.affixName}` : w.name
+  }
+
   // Push HP (+ combo + depth/biome) to the registry for the decoupled HUD (Decision 2). The HUD reads
   // these each frame and never touches this scene. depth/biome let the HUD show the live "DEPTH n ·
   // BIOME" readout so the rising difficulty reads (AC45). (create() seeds sane defaults so the HUD
@@ -1290,7 +1498,7 @@ export class GameScene extends Phaser.Scene {
     // §6.5 (Decision 2/AC49) — live currency counters + equipped weapon name for the decoupled HUD.
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
-    this.registry.set('weapon', this.player.equippedWeapon.name)
+    this.registry.set('weapon', this._weaponLabel())
     // §6.9 — live flask charges for the HUD's flask readout (the heal valve, Decision 72).
     this.registry.set('flasks', this.runState.flasks)
     this.registry.set('maxFlasks', this.runState.maxFlasks)
