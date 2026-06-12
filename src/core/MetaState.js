@@ -19,13 +19,27 @@ import { PLAYER_MAX_HP } from '../config/constants.js'
 // additive identity, AC53). Frozen so a fold (or a careless caller) can never mutate the shared base.
 //   maxHp            — starting + maximum HP (the Player + RunState seed from it).
 //   meleeDamageMult  — multiplier applied to melee damage at the resolveHit site (Decision 60).
+//   rangedDamageMult — §6.9 (Decision 73): multiplier on RANGED (bow) projectile damage (1 = neutral).
 //   dodgeCooldownMult— factor on the Player's DODGE_COOLDOWN (≤1 → dodge sooner).
+//   dodgeIframeBonus — §6.9 (Decision 73): flat extra dodge i-frame seconds (0 = neutral).
 //   startWeaponId    — the weapon the run STARTS equipping (default the Sword → Phase-4 feel).
+//   startGold        — §6.9 (Decision 73): run-only gold the run STARTS with (0 = neutral; a meta head-start).
+//   startScrolls     — §6.9 (Decision 73): run-only scroll boosts auto-applied at run start (0 = neutral).
+//   maxFlasks        — §6.9 (Decision 72): healing-flask charges (refilled each biome). 2 = the base valve.
+//   flaskHealFrac    — §6.9 (Decision 72): fraction of MAX HP each flask drink restores (base 40%).
+// The §6.9 enrichment ADDS its fields at NEUTRAL base values so the additive-identity case (empty meta) is
+// byte-unchanged — a fresh run still plays exactly as before the enrichment (the verifier's identity pin holds).
 export const BASE_PLAYER_STATS = Object.freeze({
   maxHp: PLAYER_MAX_HP,
   meleeDamageMult: 1,
+  rangedDamageMult: 1,
   dodgeCooldownMult: 1,
+  dodgeIframeBonus: 0,
   startWeaponId: 'sword',
+  startGold: 0,
+  startScrolls: 0,
+  maxFlasks: 2,
+  flaskHealFrac: 0.4,
 })
 
 // ── applyUpgrades(baseStats, upgrades) → a NEW starting-stats object (PURE, Decision 56/57) ──

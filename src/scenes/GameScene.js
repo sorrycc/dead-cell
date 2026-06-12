@@ -18,7 +18,7 @@ import { PickupPool } from '../entities/Pickup.js'
 import { WEAPONS } from '../config/weapons.js'
 import { ENEMY_SPECS } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
-import { SCROLLS_BY_ID } from '../config/scrolls.js'
+import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
 import { mulberry32 } from '../util/rng.js'
 
 // ── GameScene (design §6.1 + §6.2 + §6.3 + §6.4, AC11–AC18 + AC19/AC27–AC30 + AC20–AC26 + AC42–AC47) ──
@@ -86,10 +86,16 @@ const CONTACT_KNOCKBACK = 280 // px/s.
 // instant kill — a few ticks before you must reposition. Boss room ONLY (the only hazard-body site).
 const HAZARD_DAMAGE = 8 // hp per tick.
 
-// ── Run start seed (design §6.2/§6.4, Decision 44/46) ── a fixed placeholder start seed for the run
-// (a Hub-chosen seed is Phase 7). RunState OWNS the deterministic next-seed chain now (it MOVED out of
-// this scene — DRY), so a given START_SEED replays the same biome/level sequence (AC47).
-const START_SEED = 0xc0ffee
+// ── Run start seed (design §6.2/§6.4/§6.9, Decision 44/46/71) ── the FALLBACK start seed when no seed is
+// passed in (a bare dev `scene.start('Game')` / the verifier identity). RunState OWNS the deterministic
+// next-seed chain (it MOVED out of this scene — DRY), so a given start seed replays the same biome/level
+// sequence (AC47). The ENRICHMENT (Decision 71, the replayability fix): the run seed is no longer FROZEN to
+// this constant — HubScene mints a fresh per-run seed from REAL ENTROPY (Date.now ⊕ a random draw) at START
+// RUN and passes it via scene.start('Game', { seed }). _resolveSeed() below reads that, falling back to
+// FALLBACK_SEED only when none is passed. The PURE modules (RunState/generator) are UNTOUCHED — they still
+// take a seed in — so the verifier's determinism walk (which constructs createRunState(0xc0ffee) directly)
+// is unaffected: entropy lives ONLY at the scene boundary, never inside a pure module.
+const FALLBACK_SEED = 0xc0ffee
 
 // ── Weapon-pickup placement (§6.5, Decision 63) ── a sparse, FIXED per-level chance to place ONE
 // weapon pickup (NOT a generator pickup kind — sourcing it scene-side keeps the generator emitting only
@@ -106,9 +112,17 @@ export class GameScene extends Phaser.Scene {
     super('Game')
   }
 
-  create() {
+  // Phaser passes scene-start DATA to create(): { seed? } from HubScene's START RUN (Decision 71). A bare
+  // start (dev / direct) passes nothing → _resolveSeed() mints a fresh entropy seed so even a dev launch
+  // varies. The verifier never runs this scene (it's Phaser-coupled) — it constructs RunState directly.
+  create(data) {
     // ── Per-scene gravity (Decision 9; the BLOCKER #2 model) ──
     this.physics.world.gravity.y = GRAVITY
+
+    // ── Resolve the run seed (Decision 71 — the replayability fix) ── prefer a seed passed in by the Hub
+    // (a shared/entropy seed); else mint one from entropy HERE so a bare dev launch still varies. The seed
+    // is stored so the HUD + the GameOver/Victory summary can surface it (a shareable run id).
+    this.runSeed = this._resolveSeed(data)
 
     // ── MetaState (design §6.5, Decision 56/60, AC50/AC53) ── load the PERSISTENT meta (banked Cells,
     // owned upgrades, best depth) from localStorage. NEVER throws (save.js try/catch). Fold the owned
@@ -124,7 +138,7 @@ export class GameScene extends Phaser.Scene {
     // RunState.maxHp/hp are minted from the UPGRADED maxHp, so the single create()-time player sync
     // below is consistent). startedAt is captured HERE (purity stays in RunState — the clock is passed
     // IN). scene.start('Game') fully re-creates the scene per run, so a fresh RunState is minted each run.
-    this.runState = createRunState(START_SEED, this.time.now, startStats)
+    this.runState = createRunState(this.runSeed, this.time.now, startStats)
 
     // ── Clear/seed the cross-scene registry BEFORE the first _emitHud (review MINOR — stale leak) ──
     // The registry (depth/biomeName/HP) persists across scenes, so a replayed run could briefly show
@@ -139,6 +153,9 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
     this.registry.set('weapon', WEAPONS[this.runState.weaponId].name)
+    // §6.9 — seed the flask (heal valve) HUD keys so the parallel HUD never flashes stale charges.
+    this.registry.set('flasks', this.runState.flasks)
+    this.registry.set('maxFlasks', this.runState.maxFlasks)
     // §6.6.3 (review MINOR) — seed the boss HP-bar keys to "no boss" so a replayed run never flashes the
     // PREVIOUS run's boss bar (the registry survives scene restarts — the same stale-leak HP guards for).
     this.registry.set('bossActive', false)
@@ -157,6 +174,9 @@ export class GameScene extends Phaser.Scene {
     this.isBossRoom = false
     this._hazardCollider = null
     this._hazardCooldown = 0
+    // ── In-run shop state (§6.9, Decision 74) — null/false until a level places a vendor (_buildLevel). ──
+    this.shop = null // the live Shop entity (a door-gated vendor) for THIS level, or null.
+    this.shopOpen = false // true while the shop overlay is up (gameplay is paused beneath it).
     this.effects = new Effects(this, (secs) => {
       this.hitstopTimer = Math.min(HITSTOP_CAP, Math.max(this.hitstopTimer, secs))
     })
@@ -189,6 +209,12 @@ export class GameScene extends Phaser.Scene {
     // FRESH run this is a no-op at the upgraded full HP — the upgrade is reflected, not stale (review
     // MAJOR). It carries a non-full HP only when a future mid-run resume seeds runState.hp < maxHp.
     this.player.hp = this.runState.hp
+
+    // ── Meta 'starting scrolls' (§6.9, Decision 73) ── a meta tier grants N run-only scroll boosts at run
+    // start (a head-start on build variety). Applied deterministically off the RUN seed (so a seeded run
+    // replays the same starting scrolls) to RunState's run-only mults, then synced to the live player. A
+    // fresh meta grants 0 → identity (no scroll applied — the run plays exactly as before the enrichment).
+    this._applyStartingScrolls(startStats.startScrolls ?? 0)
 
     // ── Enemy hurtbox group + per-level enemy list (rebuilt each level) ──
     this.enemyHurtboxes = this.physics.add.group({ allowGravity: true })
@@ -549,7 +575,7 @@ export class GameScene extends Phaser.Scene {
     // A short victory flourish (freeze/flash) then hand off to Victory with the run summary.
     this.hitstopTimer = 0.2
     this.cameras.main.flash(260, 88, 214, 141)
-    const summary = this.runState.summary(this.time.now, true)
+    const summary = this.runState.summary(this.time.now, true, this.runSeed)
     this.time.delayedCall(900, () => this.scene.start('Victory', summary))
   }
 
@@ -585,7 +611,13 @@ export class GameScene extends Phaser.Scene {
     }
     // Capture carried HP into the RunState BEFORE the rebuild (Decision 46 — sync exactly once here).
     this.runState.hp = this.player.hp
+    const prevBiomeIndex = this.runState.biomeIndex // §6.9 — detect a biome ROLL across advance() (Decision 72).
     this.runState.advance()
+    // ── Flask REFILL on a biome transition (§6.9, Decision 72) ── entering a NEW biome tops the flask
+    // charges back to max (the "fountain at the new biome's start" — the genre's between-area heal valve).
+    // HP itself is still CARRIED (never auto-refilled, Decision 46); the flasks are the player's CHOICE to
+    // spend. This makes a damaged run survivable across biomes without trivialising the within-biome slide.
+    if (this.runState.biomeIndex !== prevBiomeIndex) this.runState.flasks = this.runState.maxFlasks
     this._teardownLevel()
     this._buildLevel() // reads the advanced biome/seed/depth from RunState (HP NOT refilled).
     this._updateHint()
@@ -609,7 +641,7 @@ export class GameScene extends Phaser.Scene {
     // scrolls are run-only and simply NOT passed (permadeath loses them). Under the gameOver guard so it
     // fires exactly once per run. The summary carries cellsBanked for GameOver's readout.
     this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
-    this.scene.start('GameOver', this.runState.summary(this.time.now, true))
+    this.scene.start('GameOver', this.runState.summary(this.time.now, true, this.runSeed))
   }
 
   // Destroy everything the CURRENT level owns; keep the persistent player/pools/FX/HUD/overlaps.
@@ -668,8 +700,31 @@ export class GameScene extends Phaser.Scene {
     this.hint.setText(
       `MOVE arrows/WASD  JUMP Space  ATTACK J/click  DODGE Shift/K  [ESC] Title   |   ` +
         `DEPTH ${rs.depth} · ${rs.biome().name} ${rs.levelInBiome + 1}/${rs.biome().levels}  ` +
-        `seed 0x${rs.seed.toString(16)}  →reach the yellow DOOR`,
+        // RUN seed (the shareable run id, Decision 71) + the live LEVEL seed. The run seed identifies the
+        // WHOLE run (same run seed → same biome/level/layout chain — AC47); the level seed is its chained head.
+        `run 0x${this.runSeed.toString(16)}  level 0x${rs.seed.toString(16)}  →reach the yellow DOOR`,
     )
+  }
+
+  // ── _resolveSeed(data) (design §6.9, Decision 71 — the replayability fix) ── prefer a seed PASSED IN by
+  // the Hub (a shared seed a player typed, or the Hub's own entropy mint), coercing it to an unsigned 32-bit
+  // int; else mint a fresh seed from REAL ENTROPY (Date.now ⊕ a random draw ⊕ a high-res clock if present)
+  // so every launch — even a bare dev `scene.start('Game')` — produces a DIFFERENT run. This is the ONLY
+  // entropy source in the run path; the pure modules stay deterministic (they take the resolved seed in).
+  _resolveSeed(data) {
+    if (data && Number.isFinite(data.seed)) return data.seed >>> 0
+    return GameScene.mintSeed()
+  }
+
+  // Mint a fresh unsigned-32-bit run seed from entropy (Decision 71). Static so HubScene can reuse the SAME
+  // mint (DRY — one entropy recipe). Mixes Date.now, a Math.random draw, and (when available) performance.now
+  // so two runs started in the same millisecond still diverge. The >>>0 keeps it an unsigned 32-bit int —
+  // exactly the shape RunState's seed chain expects (so the chained level seeds stay byte-stable per run).
+  static mintSeed() {
+    const t = Date.now()
+    const r = Math.floor(Math.random() * 0x100000000)
+    const hi = typeof performance !== 'undefined' && performance.now ? Math.floor(performance.now() * 1000) : 0
+    return ((t ^ r ^ hi) >>> 0) || 1 // never 0 (a degenerate seed); 1 is a fine fallback.
   }
 
   // ── _pickArchetype(biome, rng) (design §6.6.4, Decision 68, AC59) ── pick a base archetype spec off
@@ -767,8 +822,10 @@ export class GameScene extends Phaser.Scene {
   // ── Projectile → enemy hit (§6.5, Decision 62, review MAJOR) ── a SEPARATE handler from the melee
   // one: the attacker shape is the PROJECTILE's (its live position + travel dir), so backstab/knockback
   // geometry derives from where the SHOT is — not the player. Reuses the SAME resolveHit + effects.hit
-  // pipeline (DRY). Player melee/scroll mults apply to the bow's projectile damage too (it's a player
-  // weapon). The shot dies on first hit (KISS — no pierce); the per-shot hitSet already deduped.
+  // pipeline (DRY). This overlap is wired against the PLAYER projectile pool ONLY, so every shot here is
+  // the player's: it scales with the RANGED damage mult (§6.9, Decision 73 — the bow rides the ranged-damage
+  // meta, NOT the melee one) × the run-only scroll mult. The shot dies on first hit (KISS — no pierce); the
+  // per-shot hitSet already deduped.
   _onProjectileHitEnemy(projRect, enemyRect) {
     const pj = projRect.pj
     const enemy = enemyRect.enemyRef
@@ -778,7 +835,7 @@ export class GameScene extends Phaser.Scene {
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
     const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
       allowBackstab: true,
-      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
+      damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
@@ -836,6 +893,12 @@ export class GameScene extends Phaser.Scene {
         }
         break
       }
+      case 'heal': {
+        // §6.9 (Decision 72) — a fountain/heart: restore a fraction of MAX HP on touch (no charge spent —
+        // it's a found heal, distinct from the carried flask). A green heal pop reads the recovery.
+        this.player.heal(Math.round(this.player.maxHp * (pk.healFrac || 0)))
+        break
+      }
     }
     // A small collect pop (reuse the spark pool — no new allocation).
     this.effects.hit(pickupRect.body.center.x, pickupRect.body.center.y, { damage: 0 })
@@ -851,6 +914,45 @@ export class GameScene extends Phaser.Scene {
     const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
     this.player.maxHp = newMax
     if (grew > 0) this.player.hp = Math.min(newMax, this.player.hp + grew) // heal by the grown amount.
+  }
+
+  // ── _drinkFlask() (design §6.9, Decision 72 — the HP-recovery valve) ── spend ONE flask charge to heal a
+  // fraction of MAX HP. Guarded: no-op with no charges, while dead/transitioning, or already at full HP (so
+  // a charge is never wasted on a no-heal — the heal() return is the truth). On a real heal: decrement the
+  // charge, pop a green heal FX, flash the camera faint green. Flask charges REFILL on a biome transition
+  // (_nextLevel) so HP management is a real per-biome resource decision (the genre's healing-flask loop).
+  _drinkFlask() {
+    if (this.gameOver || this.transitioning) return
+    if (this.runState.flasks <= 0) return
+    const amount = Math.round(this.player.maxHp * this.runState.flaskHealFrac)
+    const healed = this.player.heal(amount)
+    if (healed <= 0) return // already full → don't burn a charge.
+    this.runState.flasks -= 1
+    this.effects.hit(this.player.body.center.x, this.player.body.center.y - 10, { damage: 0 })
+    this.cameras.main.flash(160, 46, 204, 113) // a faint green pulse so the heal reads.
+  }
+
+  // ── _tryOpenShop() (§6.9, Decision 74) ── open the in-run shop if the player is standing on the vendor
+  // (implemented with the shop entity in this same enrichment). Defined here so the update() interact-edge
+  // wiring has a single call site; the shop overlay logic lives in _openShop / the ShopOverlay.
+  _tryOpenShop() {
+    if (this.gameOver || this.transitioning) return
+    if (this.shop && this.shop.playerInRange && !this.shopOpen) this._openShop()
+  }
+
+  // ── _applyStartingScrolls(n) (§6.9, Decision 73) ── apply `n` run-only scroll boosts at run start (a meta
+  // tier's head-start on build variety). Deterministic off the RUN seed (a fresh mulberry32, NOT on any
+  // pinned draw — same off-the-pin discipline as weapon pickups) so a seeded run replays the same scrolls.
+  // n=0 → no-op (the identity case: a fresh meta plays exactly as before). Each scroll mutates RunState's
+  // run-only mults in place; one sync reflects them on the live player. Run-only — never banked (permadeath).
+  _applyStartingScrolls(n) {
+    if (!n || n <= 0 || !SCROLL_IDS.length) return
+    const rng = mulberry32((this.runSeed ^ 0x5c0011) >>> 0)
+    for (let i = 0; i < n; i++) {
+      const scroll = SCROLLS[Math.floor(rng() * SCROLLS.length)]
+      if (scroll) scroll.apply(this.runState)
+    }
+    this._syncPlayerScrollStats() // reflect the armed run-only boosts on the live player NOW.
   }
 
   _onEnemyHitPlayer(hitboxRect) {
@@ -900,7 +1002,7 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.flash(180, 200, 40, 40)
     this.cameras.main.shake(220, 0.01)
     // Snapshot the summary NOW (RunState may be torn down with the scene) and route to GameOver → Hub.
-    const summary = this.runState.summary(this.time.now, false)
+    const summary = this.runState.summary(this.time.now, false, this.runSeed)
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
   }
 
@@ -918,6 +1020,9 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
     this.registry.set('weapon', this.player.equippedWeapon.name)
+    // §6.9 — live flask charges for the HUD's flask readout (the heal valve, Decision 72).
+    this.registry.set('flasks', this.runState.flasks)
+    this.registry.set('maxFlasks', this.runState.maxFlasks)
     // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
     // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.
     if (this.boss && !this.boss.dead) this.registry.set('bossHp', this.boss.hp)
@@ -941,6 +1046,10 @@ export class GameScene extends Phaser.Scene {
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held
       // key/click fires exactly once per press.
       if (inputState.attackPressed) this.player.attack()
+      // §6.9 — drink a healing flask (Q, Decision 72) / open the shop (E, Decision 74). Both are one-shot
+      // edges sampled in Input; resolved BEFORE the player tick so a heal/shop-open lands this frame.
+      if (inputState.healPressed) this._drinkFlask()
+      if (inputState.interactPressed) this._tryOpenShop()
       this.player.update(gdt, inputState)
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
       // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.

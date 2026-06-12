@@ -57,7 +57,19 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
     // ── Currencies (§6.5, Decision 55) — DIFFERENT lifetimes (review): cells survive death (banked to
     // META at run end), gold/scrolls die with the run (permadeath loses them). ──
     cells: 0, // collected this run; BANKED to MetaState at run end (AC49/AC51).
-    gold: 0, // run-only currency (lost on death, never banked).
+    gold: startStats ? startStats.startGold : 0, // run-only currency (lost on death, never banked). Seeded
+    //                // from the META 'startGold' upgrade so a fresh run can begin with a gold head-start (§6.9).
+
+    // ── Healing flask (design §6.9, Decision 72 — the HP-recovery valve) ── the genre's between-area heal:
+    // a limited-charge flask the player DRINKS mid-run to recover HP, REFILLED on every biome transition
+    // (a fountain at the new biome's start — see GameScene._nextLevel). maxFlasks/healFrac are seeded from
+    // the META fold (a meta tier grows them) so HP management becomes a real resource decision instead of a
+    // one-way slide. Run-only (a fresh run reseeds from meta; charges are NOT banked — permadeath). The
+    // earlier model (HP only ever falls across 9 levels + boss) had NO recovery for an un-upgraded player;
+    // this is that fix (the enrichment's healing item).
+    maxFlasks: startStats ? startStats.maxFlasks : 2, // flask charges carried between levels (refilled on biome change).
+    flasks: startStats ? startStats.maxFlasks : 2, // current charges (start full).
+    flaskHealFrac: startStats ? startStats.flaskHealFrac : 0.4, // fraction of MAX HP each drink restores.
 
     // ── Run-only scroll modifiers (§6.5, Decision 55/60) — applied LIVE, never saved to meta. ──
     scrollDamageMult: 1, // stacks ON TOP of the permanent meleeDamageMult at the hit site.
@@ -116,15 +128,19 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
       return this
     },
 
-    // ── summary(now, completed) — the GameOver SNAPSHOT (Decision 47, AC46) ── a plain object passed
-    // as scene-start DATA so GameOverScene stays decoupled (it never reaches into the live scene).
-    summary(now, completed) {
+    // ── summary(now, completed, runSeed) — the GameOver SNAPSHOT (Decision 47/71, AC46) ── a plain object
+    // passed as scene-start DATA so GameOverScene stays decoupled (it never reaches into the live scene).
+    // runSeed (Decision 71) is the WHOLE-run seed GameScene minted from entropy — echoed here so the run-end
+    // screen can show a SHAREABLE run id (re-enter it in the Hub to replay the exact run). Optional (the
+    // verifier never calls summary) — defaults to this.seed so a bare call stays well-formed.
+    summary(now, completed, runSeed = this.seed) {
       return {
         depthReached: this.depth,
         biomeName: this.biome().name,
         timeMs: now - this.startedAt,
         kills: this.kills,
         cellsBanked: this.cells, // §6.5 — the Cells banked to META this run (GameOver shows it, AC51).
+        runSeed: runSeed >>> 0, // §6.9 (Decision 71) — the shareable run id (the entropy-minted run seed).
         completed: !!completed,
       }
     },

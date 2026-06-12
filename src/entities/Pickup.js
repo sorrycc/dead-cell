@@ -25,6 +25,7 @@ const PICKUP_COLORS = {
   gold: 0xf1c40f, // gold — the run-only currency.
   scroll: 0xc26bff, // magenta — a run-only stat boost.
   weapon: 0xecf0f1, // white — a weapon swap.
+  heal: 0x2ecc71, // green — §6.9 (Decision 72): a fountain/heart that restores HP on touch.
 }
 const PICKUP_SIZE = 16 // px — a small square pickup (programmer-art primitive).
 const ARC_VELOCITY_Y = -260 // px/s — the upward pop on spawn (gravity pulls it back to settle).
@@ -32,6 +33,7 @@ const ARC_VELOCITY_X = 90 // px/s — a small random horizontal scatter so a mul
 const GOLD_AMOUNT = 5 // gold granted per gold pickup (run-only currency).
 const GOLD_DROP_CHANCE = 0.6 // chance an enemy death also drops a gold pickup (run-only).
 const SCROLL_DROP_CHANCE = 0.12 // rarer — chance a death drops a run-only scroll boost.
+const HEAL_PICKUP_FRAC = 0.35 // §6.9 (Decision 72) — a heal pickup restores this fraction of MAX HP.
 
 let _nextPickupId = 1 // monotonic id (handy for debugging; not load-bearing).
 
@@ -52,7 +54,7 @@ export class PickupPool {
       const body = rect.body
       body.setSize(PICKUP_SIZE, PICKUP_SIZE, true)
       // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC).
-      rect.pk = { active: false, id: 0, kind: null, weaponId: null, scrollId: null, goldAmount: 0 }
+      rect.pk = { active: false, id: 0, kind: null, weaponId: null, scrollId: null, goldAmount: 0, healFrac: 0 }
       rect.pickupRef = rect.pk // back-ref so the overlap callback resolves the pickup from its body.
       this._disable(rect)
       this._items.push(rect)
@@ -88,6 +90,7 @@ export class PickupPool {
     pk.weaponId = meta.weaponId ?? null
     pk.scrollId = meta.scrollId ?? null
     pk.goldAmount = kind === 'gold' ? (meta.amount ?? GOLD_AMOUNT) : 0
+    pk.healFrac = kind === 'heal' ? (meta.healFrac ?? HEAL_PICKUP_FRAC) : 0 // §6.9 — fraction of max HP a heal restores.
     return rect
   }
 
@@ -128,6 +131,7 @@ export class PickupPool {
     rect.pk.kind = null
     rect.pk.weaponId = null
     rect.pk.scrollId = null
+    rect.pk.healFrac = 0
     const body = rect.body
     body.setVelocity(0, 0)
     body.enable = false

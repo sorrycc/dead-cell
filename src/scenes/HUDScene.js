@@ -63,6 +63,12 @@ export class HUDScene extends Phaser.Scene {
       .text(BAR_X, BAR_Y + BAR_H + 58, '', { fontFamily: 'monospace', fontSize: '18px', color: '#e6edf3' })
       .setOrigin(0, 0)
       .setScrollFactor(0)
+    // ── Flask readout (§6.9, Decision 72) ── the healing-flask charges (refilled each biome). Green to
+    // match the heal FX; shows "FLASK n/max [Q]" so the heal valve + its key are discoverable. Registry-only.
+    this.flaskLabel = this.add
+      .text(BAR_X, BAR_Y + BAR_H + 82, '', { fontFamily: 'monospace', fontSize: '18px', color: '#2ecc71' })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
 
     // ── Boss HP bar (§6.6, AC56) ── created hidden; update() shows it ONLY while `bossActive` is true
     // (GameScene sets it in the boss room and CLEARS it on death/teardown — review MINOR, so a stale
@@ -109,6 +115,11 @@ export class HUDScene extends Phaser.Scene {
     this.cellsLabel.setText(`CELLS ${cells}`)
     this.goldLabel.setText(`GOLD ${gold}`)
     this.weaponLabel.setText(`WEAPON ${weapon}`)
+
+    // Flask readout (§6.9, Decision 72) — the heal valve's charges + its key, so the heal is discoverable.
+    const flasks = this.registry.get('flasks') ?? 0
+    const maxFlasks = this.registry.get('maxFlasks') ?? 0
+    this.flaskLabel.setText(`FLASK ${flasks}/${maxFlasks} [Q]`)
 
     // ── Boss HP bar (§6.6, AC56) ── shown ONLY while `bossActive` is true (GameScene sets it in the
     // boss room and CLEARS it on death/teardown). When inactive the bar is hidden, so a stale prior-run

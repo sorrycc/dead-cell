@@ -111,8 +111,10 @@ export class Player {
     // (the additive identity). GameScene calls applyStartStats(startStats) at run start to fold in the
     // permanent META upgrades; run-only scrolls multiply scrollDamageMult LIVE (read at the hit site).
     this.meleeDamageMult = 1 // permanent meta melee-damage multiplier (Decision 60).
+    this.rangedDamageMult = 1 // §6.9 (Decision 73) — permanent meta RANGED (bow) damage multiplier.
     this.scrollDamageMult = 1 // run-only scroll damage multiplier (read LIVE; never saved).
     this.dodgeCooldownMult = 1 // factor on DODGE_COOLDOWN (≤1 → dodge sooner; Decision 60).
+    this.dodgeIframeBonus = 0 // §6.9 (Decision 73) — flat extra dodge i-frame seconds (0 = neutral).
     this.equippedWeapon = SWORD // the active weapon (its swings table + type drive attacks, Decision 61).
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
@@ -174,6 +176,16 @@ export class Player {
   // Public for combat (Decision 14): true during the DODGE i-frame window.
   isInvulnerable() {
     return this.iframeTimer > 0
+  }
+
+  // ── heal(amount) (design §6.9, Decision 72) ── restore HP up to maxHp; no-op if dead/full. Returns the
+  // ACTUAL amount healed (0 if none) so the caller (flask/fountain/shop) can spend the charge only on a
+  // real heal + pop the FX only when something happened. KISS — the single HP-up path (DRY).
+  heal(amount) {
+    if (this.dead || amount <= 0) return 0
+    const before = this.hp
+    this.hp = Math.min(this.maxHp, this.hp + amount)
+    return this.hp - before
   }
 
   // ── Combat: can an incoming hit land? (design §6.3, Decisions 21/32, AC23) ──
@@ -293,7 +305,9 @@ export class Player {
       this.state = STATE.DODGE
       this.facing = input.moveX !== 0 ? Math.sign(input.moveX) : this.facing
       this.dodgeTimer = DODGE_DURATION
-      this.iframeTimer = DODGE_IFRAMES
+      // The dodge i-frame window = the base window + the meta 'dodge i-frames' bonus (Decision 73). The
+      // bonus widens the safe window (a more forgiving roll); a fresh meta leaves it at the Phase-1 base.
+      this.iframeTimer = DODGE_IFRAMES + this.dodgeIframeBonus
       // Gate measured from start; outlasts duration. The meta "shorter dodge cooldown" upgrade folds in
       // as dodgeCooldownMult (≤1 → dodge sooner; Decision 60). Identity at mult=1 (the Phase-4 value).
       this.dodgeCooldownTimer = DODGE_COOLDOWN * this.dodgeCooldownMult
@@ -465,7 +479,11 @@ export class Player {
     this.maxHp = startStats.maxHp
     this.hp = startStats.maxHp // a fresh run starts at the upgraded FULL HP.
     this.meleeDamageMult = startStats.meleeDamageMult
+    // §6.9 (Decision 73) — the deeper-meta fields. Defaulted (?? neutral) so a pre-§6.9 startStats object
+    // (e.g. a bare fold) stays valid; a fresh meta leaves every value at its neutral base (the identity).
+    this.rangedDamageMult = startStats.rangedDamageMult ?? 1
     this.dodgeCooldownMult = startStats.dodgeCooldownMult
+    this.dodgeIframeBonus = startStats.dodgeIframeBonus ?? 0
     const w = weapons[startStats.startWeaponId] || SWORD
     this.equipWeapon(w)
   }

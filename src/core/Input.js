@@ -48,6 +48,8 @@ export class Input {
       j: KC.J, // ATTACK (moved off jump in the Combat phase).
       shift: KC.SHIFT,
       k: KC.K,
+      q: KC.Q, // §6.9 (Decision 72) — DRINK FLASK (the between-area heal valve).
+      e: KC.E, // §6.9 (Decision 74) — INTERACT (open the in-run shop / vendor when in range).
     })
 
     // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
@@ -84,6 +86,10 @@ export class Input {
     this._pointerWasDown = pointer.isDown
     const attackPressed = Phaser.Input.Keyboard.JustDown(keys.j) || pointerEdge
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed }
+    // §6.9 — one-shot EDGES (JustDown, sole-owned here like the others): DRINK FLASK (Q) + INTERACT (E).
+    const healPressed = Phaser.Input.Keyboard.JustDown(keys.q)
+    const interactPressed = Phaser.Input.Keyboard.JustDown(keys.e)
+
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed }
   }
 }

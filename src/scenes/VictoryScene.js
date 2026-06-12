@@ -11,7 +11,10 @@ import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
 // scene only DISPLAYS the cellsBanked line. (No longer the Phase-0 "VICTORY → Title" stub.)
 
 // Safe defaults so the scene is navigable even if launched bare (e.g. from a dev tool / direct start).
-const DEFAULT_SUMMARY = { depthReached: 0, biomeName: '—', timeMs: 0, kills: 0, cellsBanked: 0, completed: true }
+const DEFAULT_SUMMARY = { depthReached: 0, biomeName: '—', timeMs: 0, kills: 0, cellsBanked: 0, runSeed: 0, completed: true }
+
+// Format a run seed as the shareable hex run id (Decision 71) — what you type into the Hub to replay.
+const formatSeed = (s) => `0x${(s >>> 0).toString(16)}`
 
 // Format milliseconds as m:ss (KISS — runs are minutes-long; no hours). Mirrors GameOverScene.
 function formatTime(ms) {
@@ -47,6 +50,7 @@ export class VictoryScene extends Phaser.Scene {
       ['TIME', formatTime(summary.timeMs)],
       ['KILLS', `${summary.kills}`],
       ['CELLS BANKED', `${summary.cellsBanked}`], // §6.6.3 (AC58) — the Cells added to permanent meta.
+      ['RUN SEED', formatSeed(summary.runSeed)], // §6.9 (Decision 71) — the shareable run id (replay in Hub).
     ]
     const rowH = 38
     const blockTop = cy - 40
