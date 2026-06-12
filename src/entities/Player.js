@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
-import { SWINGS, COMBO_LEN } from '../combat/hitbox.js'
 import { PLAYER_MAX_HP } from '../config/constants.js'
+import { SWORD } from '../config/weapons.js'
 
 // ── Player controller (design §6.1 + §6.3, Decisions 10/11/12/13/14 + 18/25/31/32, AC11–AC18 + AC20/AC23) ──
 // A plain class (Decision 10) that HOLDS a Phaser.GameObjects.Rectangle + its Arcade body
@@ -98,11 +98,22 @@ const STATE = { RUN: 'run', DODGE: 'dodge', ATTACK: 'attack' }
 
 export class Player {
   // scene: the GameScene; (x, y): spawn position in world coords. hitboxPool: a HitboxPool tagged
-  // 'player' whose acquire() the attack swings draw from (Combat phase; null in a Phase-1 context).
-  constructor(scene, x, y, hitboxPool = null) {
+  // 'player' whose MELEE swings draw from (null in a Phase-1 context). projectilePool: a
+  // ProjectilePool the RANGED weapon fires from (§6.5; null = ranged shots are cosmetic-only).
+  constructor(scene, x, y, hitboxPool = null, projectilePool = null) {
     this.scene = scene
     this.hitboxPool = hitboxPool
+    this.projectilePool = projectilePool // §6.5 Decision 62 — ranged weapon fires from this.
     this.id = 'player' // stable id for the per-swing hitSet dedup + ownerId tag (Decision 20).
+
+    // ── Injected run-start modifiers (design §6.5, Decision 60, AC53) ── seeded to the IDENTITY here
+    // (1× / default sword), so a fresh Player with no applyStartStats() call plays EXACTLY like Phase 4
+    // (the additive identity). GameScene calls applyStartStats(startStats) at run start to fold in the
+    // permanent META upgrades; run-only scrolls multiply scrollDamageMult LIVE (read at the hit site).
+    this.meleeDamageMult = 1 // permanent meta melee-damage multiplier (Decision 60).
+    this.scrollDamageMult = 1 // run-only scroll damage multiplier (read LIVE; never saved).
+    this.dodgeCooldownMult = 1 // factor on DODGE_COOLDOWN (≤1 → dodge sooner; Decision 60).
+    this.equippedWeapon = SWORD // the active weapon (its swings table + type drive attacks, Decision 61).
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
     // `collider` owns the Arcade body and is INVISIBLE (alpha 0). Arcade owns its position;
@@ -131,7 +142,11 @@ export class Player {
     this.iframeTimer = 0 // > 0 while invulnerable (subset of the dodge).
     this.dodgeCooldownTimer = 0 // > 0 while dodge is gated.
 
-    // ── Combat state (design §6.3, Decisions 18/31/32) ──
+    // ── Combat state (design §6.3, Decisions 18/31/32) ── seeded to MAX_HP (the Phase-4 identity). A
+    // +maxHP meta upgrade flows in via applyStartStats() at run start (Decision 60) — it raises BOTH
+    // this.maxHp AND this.hp so a fresh run begins at the upgraded full HP. (review MAJOR: this is the
+    // injection point for maxHp; GameScene also seeds RunState.maxHp/hp from the SAME startStats so the
+    // carried HP reflects the upgrade — see GameScene.create / RunState.)
     this.hp = MAX_HP
     this.maxHp = MAX_HP
     this.dead = false // death edge guard (fires the scene callback exactly once, AC26).
@@ -240,9 +255,15 @@ export class Player {
       this.attackTimer = Math.max(0, this.attackTimer - dt)
       if (this.attackTimer <= 0 && this.state === STATE.ATTACK) {
         this.state = STATE.RUN
-        this.comboWindowTimer = SWINGS[this.comboIndex].comboWindow
-        // A swing whose comboWindow is 0 (the FINISHER) ends the chain immediately: reset the index
-        // now so there is no lingering state (Decision 31). Non-zero windows decay below instead.
+        // Read the EQUIPPED weapon's swing table (Decision 61) — not the module SWINGS (which would be
+        // sword-only). comboIndex was set in _startSwing against the equipped table; GUARD for −1
+        // defensively (a mid-swing equipWeapon() swap — collecting a weapon pickup while attacking —
+        // resets comboIndex, so without this guard swings[−1] would throw). If reset, the chain simply
+        // closes (no follow-up window) — the new weapon's combo starts fresh on the next press.
+        const row = this.comboIndex >= 0 ? this.equippedWeapon.swings[this.comboIndex] : null
+        this.comboWindowTimer = row ? row.comboWindow : 0
+        // A swing whose comboWindow is 0 (the FINISHER, or a reset) ends the chain immediately: reset
+        // the index now so there is no lingering state (Decision 31). Non-zero windows decay below.
         if (this.comboWindowTimer <= 0) this.comboIndex = -1
       }
     }
@@ -273,7 +294,9 @@ export class Player {
       this.facing = input.moveX !== 0 ? Math.sign(input.moveX) : this.facing
       this.dodgeTimer = DODGE_DURATION
       this.iframeTimer = DODGE_IFRAMES
-      this.dodgeCooldownTimer = DODGE_COOLDOWN // gate measured from start; outlasts duration.
+      // Gate measured from start; outlasts duration. The meta "shorter dodge cooldown" upgrade folds in
+      // as dodgeCooldownMult (≤1 → dodge sooner; Decision 60). Identity at mult=1 (the Phase-4 value).
+      this.dodgeCooldownTimer = DODGE_COOLDOWN * this.dodgeCooldownMult
       this._kickScaleY(DODGE_SQUASH_Y)
     }
 
@@ -382,9 +405,13 @@ export class Player {
 
     // Facing cue: park the front marker on the leading edge. During the swing's active window it
     // EXTENDS to the swing reach + pops color so the swing telegraph reads (primitives only — the
-    // hitbox body itself stays invisible; this is a cosmetic stand-in).
+    // hitbox body itself stays invisible; this is a cosmetic stand-in). Reads the EQUIPPED weapon's
+    // swing reach (Decision 61) — a ranged Bow's draw row has a small reach so the marker stays
+    // well-formed (no stale sword geometry on Hammer/Bow — review MAJOR). comboIndex is valid during
+    // an active swing (set in _startSwing); guard for −1 defensively (no active swing → the 6px stub).
     const swingActive = this.attackColorTimer > 0
-    const markerLen = swingActive ? SWINGS[this.comboIndex].reach : 6
+    const activeSwing = swingActive && this.comboIndex >= 0 ? this.equippedWeapon.swings[this.comboIndex] : null
+    const markerLen = activeSwing ? activeSwing.reach : 6
     this.frontMarker.width = markerLen
     this.frontMarker.setFillStyle(swingActive ? ATTACK_COLOR : 0x2c3e50)
     // Anchor the marker so it grows FORWARD from the body's leading edge along facing.
@@ -392,30 +419,73 @@ export class Player {
     this.frontMarker.y = this.body.center.y
   }
 
-  // ── Start a swing (Decision 18/25/31, AC20). Advances the combo, enters ATTACK, arms the
-  // active+recovery lock, applies the lunge nudge, and acquires the pooled hitbox for this swing. ──
+  // ── Start a swing (Decision 18/25/31/61/62, AC20/AC54). Advances the combo on the EQUIPPED weapon's
+  // swing table, enters ATTACK, arms the active+recovery lock, applies the lunge nudge, then DISPATCHES
+  // by weapon TYPE: melee → a pooled hitbox in front; ranged → a fired pooled projectile. ──
   _startSwing() {
-    // Advance the chain: wrap −1→0→1→2→(window-gated reset). The comboWindow timer reset (Decision
-    // 31) sends comboIndex back to −1 when it lapses, so a fresh chain always starts at swing 0.
-    this.comboIndex = (this.comboIndex + 1) % COMBO_LEN
-    const swing = SWINGS[this.comboIndex]
+    const weapon = this.equippedWeapon
+    const swings = weapon.swings
+    // Advance the chain on THIS weapon's table (Decision 61): wrap against ITS length (not the module
+    // COMBO_LEN, which is sword-only). The comboWindow reset (Decision 31) sends comboIndex back to −1
+    // when it lapses (and equipWeapon resets it on a swap), so a fresh chain always starts at swing 0.
+    this.comboIndex = (this.comboIndex + 1) % swings.length
+    const swing = swings[this.comboIndex]
     this.state = STATE.ATTACK
     this.attackTimer = swing.active + swing.recovery // the lock; reset to RUN at 0 (step 1).
     this.comboWindowTimer = 0 // window opens at swing END, not now (Decision 31).
     this.attackColorTimer = swing.active // cosmetic swing pop duration (the visual telegraph).
 
-    // Forward lunge nudge (juice): a one-shot velocity bump along facing, biggest on the finisher.
+    // Forward lunge nudge (juice): a one-shot velocity bump along facing (0 for the bow's draw row).
     const body = this.body
     body.setVelocityX(body.velocity.x + this.facing * swing.lunge)
     this._kickScaleY(1.12) // a small stretch on the swing.
 
-    // Acquire the transient hitbox from the pool (Decision 16/20). It lives for swing.active then
-    // the pool releases it; its per-swing hitSet dedups multi-hit (Decision 20). The pool may be
-    // null in a non-combat (Phase-1) context — then the swing is cosmetic only.
-    if (this.hitboxPool) {
-      const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
-      this.hitboxPool.acquire(attacker, swing, this.id)
+    const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
+    if (weapon.type === 'ranged') {
+      // RANGED (Decision 62): fire a pooled projectile along facing per the weapon's projectile spec.
+      // Its hit is resolved by GameScene's projectile-specific overlap (its own attacker shape = the
+      // SHOT's position + dir — NOT the player's, review MAJOR). The pool may be null (cosmetic-only).
+      if (this.projectilePool && weapon.projectile) {
+        this.projectilePool.acquire(attacker, weapon.projectile, this.id)
+      }
+    } else {
+      // MELEE (Decision 16/20): acquire the transient hitbox; it lives for swing.active then the pool
+      // releases it; its per-swing hitSet dedups multi-hit. Null pool = cosmetic-only (Phase-1).
+      if (this.hitboxPool) this.hitboxPool.acquire(attacker, swing, this.id)
     }
+  }
+
+  // ── applyStartStats(startStats) (design §6.5, Decision 60, AC53) ── fold the run-start stats (the
+  // META upgrades applied to BASE_PLAYER_STATS) into the live Player at run start. Raises maxHp AND
+  // refills hp to it (so a +maxHP upgrade starts the run at the upgraded full HP), sets the melee
+  // multiplier + dodge-cooldown factor, and equips the starting weapon. IDENTITY-safe: BASE_PLAYER_STATS
+  // (no upgrades) leaves every field at its Phase-4 value. GameScene also seeds RunState from the SAME
+  // startStats so the carried HP matches (review MAJOR — the HP-carry/upgrade reconciliation).
+  applyStartStats(startStats, weapons) {
+    this.maxHp = startStats.maxHp
+    this.hp = startStats.maxHp // a fresh run starts at the upgraded FULL HP.
+    this.meleeDamageMult = startStats.meleeDamageMult
+    this.dodgeCooldownMult = startStats.dodgeCooldownMult
+    const w = weapons[startStats.startWeaponId] || SWORD
+    this.equipWeapon(w)
+  }
+
+  // ── equipWeapon(weapon) (Decision 61/63) ── swap the active weapon. Resets the combo so the NEW
+  // moveset starts clean at swing 0 (and so a stale index can never index a shorter table — e.g.
+  // swapping sword(3)→hammer(2) while comboIndex was 2 would otherwise read undefined). CANCELS any
+  // in-progress swing (release the live melee hitbox + clear the lock + return to RUN) so a mid-swing
+  // swap — collecting a weapon pickup while attacking — takes effect immediately and leaves no dangling
+  // hitbox or stale swing-end read. (A live projectile from a previous bow shot keeps flying — it's
+  // already independent of the equipped weapon; only the pending MELEE swing is cancelled.)
+  equipWeapon(weapon) {
+    if (this.state === STATE.ATTACK) {
+      if (this.hitboxPool) this.hitboxPool.releaseAll()
+      this.state = STATE.RUN
+      this.attackTimer = 0
+    }
+    this.equippedWeapon = weapon
+    this.comboIndex = -1
+    this.comboWindowTimer = 0
   }
 
   // Expose a plain attacker shape for damage.js (cx + facing — the pure resolveHit input).

@@ -1,43 +1,31 @@
-// ── Swing geometry + tuning (design §6.3, Decisions 16/18/20/28, AC20) ──
+// ── Swing geometry + tuning (design §6.3 + §6.5, Decisions 16/18/20/28 + 61, AC20/AC54) ──
 // 100% PURE module — NO Phaser import — so it is headlessly importable under plain node
-// (scripts/verify-gen.mjs may grow to assert swing geometry without a browser). This is the
-// resolution of review MAJOR #28: the prior single `hitbox.js` mixed pure math with a
-// Phaser-coupled pool, which contradicted the project's "pure generator/config" convention.
-// The pool now lives in combat/HitboxPool.js (Phaser-coupled); ONLY the math lives here.
+// (scripts/verify-gen.mjs asserts swing geometry without a browser). This is the resolution of
+// review MAJOR #28: the prior single `hitbox.js` mixed pure math with a Phaser-coupled pool, which
+// contradicted the project's "pure generator/config" convention. The pool lives in combat/
+// HitboxPool.js (Phaser-coupled); ONLY the math lives here.
 //
-// What this owns:
-//   • SWINGS — the per-swing tuning table for the 2–3 hit light combo (Decision 18). Each row
-//     is one swing in the chain; the table IS the combo (KISS — a combo is "which row am I on").
-//   • swingRect(attacker, swing) — the world-space AABB of a swing placed in FRONT of the
-//     attacker by its facing. A stateless function of data both the Player and the Enemy already
-//     expose (center x/y + facing), so it is reused by player→enemy AND enemy→player (DRY).
-
-// ── The light combo (Decision 18, AC20) ──
-// THREE swings: two quick jabs then a heavier finisher. Each row is self-contained tuning so the
-// whole combo reads as a table you can re-balance in one place. All times are SECONDS (the dt
-// boundary contract, §6.1/§6.3) and all distances are world pixels.
+// SWING-TABLE MIGRATION (§6.5, Decision 61): the per-swing TUNING TABLE moved to config/weapons.js
+// (a weapon IS a swing table + a type). The light 3-hit combo is now the SWORD's `swings`. To keep
+// every existing import working unchanged (HitboxPool/Player/the verifier all import `SWINGS`/
+// `COMBO_LEN` from here), this module RE-EXPORTS the SWORD's table as `SWINGS` (DRY — one source, the
+// sword keeps the Phase-4 feel byte-for-byte). The Player no longer reads the module-level COMBO_LEN
+// for its combo wrap — it reads `equippedWeapon.swings.length` (Decision 61) — but COMBO_LEN stays
+// exported for the verifier's `COMBO_LEN === SWINGS.length` pin and any back-compat reader.
 //
-// Per-swing fields:
-//   reach        px  — how far in FRONT of the attacker the hitbox extends (its width).
-//   halfHeight   px  — half the hitbox's vertical extent (centered on the attacker).
-//   forward      px  — how far the hitbox's NEAR edge sits ahead of the attacker center
-//                      (a small standoff so the box reads as "in front", not "inside").
-//   damage       hp  — base damage subtracted from the victim (before backstab crit).
-//   knockback    px/s— horizontal impulse magnitude away from the attacker (damage.js signs it).
-//   active       s   — how long the hitbox is LIVE (can register overlaps) for this swing.
-//   recovery     s   — committed recovery AFTER active before the next swing/attack is allowed.
-//   comboWindow  s   — after the swing ends, how long a follow-up press still chains (else reset).
-//   lunge        px/s— a one-shot forward velocity nudge applied at swing start (finisher = big).
-export const SWINGS = [
-  // Swing 1 — quick jab. Short reach, low commit, generous chain window.
-  { reach: 46, halfHeight: 26, forward: 18, damage: 8, knockback: 220, active: 0.08, recovery: 0.12, comboWindow: 0.34, lunge: 80 },
-  // Swing 2 — second jab. Slightly more reach + damage, still snappy.
-  { reach: 52, halfHeight: 28, forward: 20, damage: 10, knockback: 280, active: 0.09, recovery: 0.14, comboWindow: 0.34, lunge: 110 },
-  // Swing 3 — FINISHER. Bigger box, harder hit + knockback, heavier commit, longer pre-lunge.
-  { reach: 64, halfHeight: 32, forward: 22, damage: 16, knockback: 460, active: 0.11, recovery: 0.22, comboWindow: 0.0, lunge: 230 },
-]
+// What this owns now:
+//   • SWINGS / COMBO_LEN — re-exports of the SWORD's swing table (back-compat; the SWORD is the default).
+//   • swingRect(attacker, swing) — the world-space AABB of a swing placed in FRONT of the attacker by
+//     its facing. A stateless function of data both the Player and the Enemy already expose
+//     (center x/y + facing), reused by player→enemy AND enemy→player AND every weapon's swing (DRY).
 
-// Number of swings in the chain (derived — never hand-typed, so the table is the single source).
+import { SWORD } from '../config/weapons.js'
+
+// The SWORD's swing table re-exported under the historic name so existing imports don't break. The
+// per-swing field schema is documented on config/weapons.js (the new owner of the tuning data).
+export const SWINGS = SWORD.swings
+
+// Number of swings in the SWORD chain (derived — the verifier pins COMBO_LEN === SWINGS.length).
 export const COMBO_LEN = SWINGS.length
 
 // ── swingRect(attacker, swing) → { x, y, w, h } ──

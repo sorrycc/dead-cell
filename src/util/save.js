@@ -26,15 +26,18 @@ export function set(key, value) {
 }
 
 // ── Typed meta-progression wrapper ──
-// Phase 7 banks Cells and permanent upgrades here; defined now so there's a STABLE schema
-// to extend later (not used by gameplay in Phase 0). Single source of the save key + the
-// default meta shape, layered over the defensive get/set above.
+// The meta-loop (§6.5) banks Cells + permanent upgrades + best depth here; the schema is owned in
+// ONE place (the save key + the default shape) layered over the defensive get/set above. core/
+// MetaState.js is the gameplay-facing wrapper around these.
 const SAVE_KEY = 'dead-cell:meta'
 
 // The persistent meta shape. `cells` is the permanent currency (survives death); `upgrades`
-// maps upgrade-id → owned level/flag. Spread defaults over the stored object so a save
-// written by an older build (missing newer fields) still loads with sane values.
-export const DEFAULT_META = Object.freeze({ cells: 0, upgrades: {} })
+// maps upgrade-id → owned level; `bestDepth` is the deepest depth ever reached. Spread defaults over
+// the stored object so a save written by an OLDER build (missing newer fields) still loads with sane
+// values — CRUCIAL: loadMeta only back-fills keys PRESENT in DEFAULT_META, so `bestDepth` MUST live
+// here (not only as a MetaState default) or a pre-§6.5 save would load WITHOUT it (review MINOR /
+// AC50/AC55 — the relaunch round-trip must hold for pre-existing saves).
+export const DEFAULT_META = Object.freeze({ cells: 0, upgrades: {}, bestDepth: 0 })
 
 export function loadMeta() {
   const stored = get(SAVE_KEY, null)

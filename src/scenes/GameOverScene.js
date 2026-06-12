@@ -1,17 +1,18 @@
 import Phaser from 'phaser'
 import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
 
-// ── GameOverScene (design §6.4, Decision 47/48, AC46/AC47) ──
+// ── GameOverScene (design §6.4 + §6.5, Decision 47/48/59, AC46/AC47/AC51/AC52) ──
 // The run-end screen. GameScene hands off here on player death (completed:false → red "GAME OVER")
 // OR on clearing the last biome's Door (completed:true → gold "RUN COMPLETE"), passing a run-summary
 // SNAPSHOT as scene-start DATA. This scene is DECOUPLED (SOLID, same rule as the HUD/registry split):
-// it reads the summary from this.scene.settings.data and NEVER reaches into the live GameScene. It
-// renders the summary (depth, biome, time, kills) with primitives + text only, then routes to Title
-// on a key/click. (Hub routing is Phase 7; the boss-gated VictoryScene is Phase 6 — this scene serves
-// both the death and the placeholder run-complete edges via the `completed` flag.)
+// it reads the summary from scene-start data and NEVER reaches into the live GameScene. It renders the
+// summary (depth, biome, time, kills, CELLS BANKED) with primitives + text only, then routes to the
+// HUB on a key/click (§6.5, Decision 59 — banked Cells are immediately spendable; the loop closes).
+// It does NOT itself save — banking is GameScene's job (the single writer under the gameOver guard);
+// this scene only DISPLAYS the cellsBanked line from the summary.
 
 // Safe defaults so the scene is navigable even if launched bare (e.g. from a dev tool / direct start).
-const DEFAULT_SUMMARY = { depthReached: 0, biomeName: '—', timeMs: 0, kills: 0, completed: false }
+const DEFAULT_SUMMARY = { depthReached: 0, biomeName: '—', timeMs: 0, kills: 0, cellsBanked: 0, completed: false }
 
 // Format milliseconds as m:ss (KISS — runs are minutes-long; no hours).
 function formatTime(ms) {
@@ -50,6 +51,7 @@ export class GameOverScene extends Phaser.Scene {
       ['BIOME', `${summary.biomeName}`],
       ['TIME', formatTime(summary.timeMs)],
       ['KILLS', `${summary.kills}`],
+      ['CELLS BANKED', `${summary.cellsBanked}`], // §6.5 (AC51) — the Cells added to permanent meta.
     ]
     const rowH = 38
     const blockTop = cy - 40
@@ -65,15 +67,16 @@ export class GameOverScene extends Phaser.Scene {
     })
 
     this.add
-      .text(cx, blockTop + rows.length * rowH + 40, 'Press SPACE / click → Title', {
+      .text(cx, blockTop + rows.length * rowH + 40, 'Press SPACE / click → HUB', {
         fontFamily: 'monospace',
         fontSize: '22px',
         color: '#8b949e',
       })
       .setOrigin(0.5)
 
-    const toTitle = () => this.scene.start('Title')
-    this.input.keyboard.once('keydown-SPACE', toTitle)
-    this.input.once('pointerdown', toTitle)
+    // GameOver → HUB (§6.5, Decision 59) so banked Cells are immediately spendable — the loop closes.
+    const toHub = () => this.scene.start('Hub')
+    this.input.keyboard.once('keydown-SPACE', toHub)
+    this.input.once('pointerdown', toHub)
   }
 }

@@ -44,6 +44,14 @@ import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../
 // numeric fields, so any base with those fields proves the "scaled stat rises" property.)
 import { scaleAtDepth, scaleSpec, effectiveDifficulty } from '../src/config/difficulty.js'
 import { createRunState } from '../src/core/RunState.js'
+// Meta-loop PURE modules (§6.5, Decision 56/57/61, AC55): the upgrade + weapon tables + the pure
+// applyUpgrades fold. A SUCCESSFUL node import RE-PROVES their purity (no Phaser, no top-level
+// localStorage) — the same convention the level/run modules satisfy. core/MetaState.js imports only
+// util/save.js (Phaser-free) + the pure configs, and applyUpgrades/BASE_PLAYER_STATS touch NO storage,
+// so this import never throws under node (review MINOR — the purity-convention pin made explicit).
+import { UPGRADES } from '../src/config/upgrades.js'
+import { WEAPON_ORDER } from '../src/config/weapons.js'
+import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -429,10 +437,89 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 5) Meta-loop pure contracts (§6.5, Decision 56/57/61, AC55). An INDEPENDENT proof of the economy/
+//    weapon math that stays Phaser-free: upgrade-cost monotonicity, the pure non-mutating applyUpgrades
+//    fold (identity + never-weaker), and well-formed weapon movesets. The successful imports above
+//    already re-proved purity (a Phaser/storage-coupled module would throw under node).
+// ════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── 5a) Upgrade table well-formed (AC55): costs non-decreasing per upgrade + length === maxLevel. ──
+{
+  for (const upg of UPGRADES) {
+    if (!Array.isArray(upg.costs) || upg.costs.length === 0) fail(`upgrade ${upg.id}: empty costs`)
+    if (upg.costs.length !== upg.maxLevel) {
+      fail(`upgrade ${upg.id}: costs.length ${upg.costs.length} !== maxLevel ${upg.maxLevel}`)
+    }
+    for (let i = 1; i < upg.costs.length; i++) {
+      if (upg.costs[i] < upg.costs[i - 1]) {
+        fail(`upgrade ${upg.id}: costs not monotone at ${i} (${upg.costs[i]} < ${upg.costs[i - 1]})`)
+      }
+    }
+    if (typeof upg.apply !== 'function') fail(`upgrade ${upg.id}: apply is not a function`)
+  }
+}
+
+// ── 5b) applyUpgrades is a PURE non-mutating fold (AC55): identity on empty + never mutates BASE. ──
+{
+  // Identity: empty upgrades → a deep-equal CLONE of BASE (not the frozen base itself).
+  const id = applyUpgrades(BASE_PLAYER_STATS, {})
+  if (!deepEqual(id, { ...BASE_PLAYER_STATS })) fail('applyUpgrades({}) is not the identity clone of BASE')
+  if (id === BASE_PLAYER_STATS) fail('applyUpgrades({}) returned the SAME ref as BASE (must be a clone)')
+  // Non-mutation: a full-stack fold must not touch BASE_PLAYER_STATS.
+  const baseSnapshot = { ...BASE_PLAYER_STATS }
+  for (const upg of UPGRADES) applyUpgrades(BASE_PLAYER_STATS, { [upg.id]: upg.maxLevel })
+  if (!deepEqual(BASE_PLAYER_STATS, baseSnapshot)) fail('applyUpgrades MUTATED BASE_PLAYER_STATS (aliasing bug)')
+}
+
+// ── 5c) An upgrade never WEAKENS you (AC55): max-level fold yields stats ≥ base on the field it
+// touches. The sense differs per field: maxHp + meleeDamageMult are "bigger is better" (≥ base);
+// dodgeCooldownMult is "SMALLER is better" (≤ base — a shorter cooldown); startWeaponId is a string
+// (an unlock, not a numeric weaken). We assert the right sense per upgrade so the proof is meaningful. ──
+{
+  for (const upg of UPGRADES) {
+    const maxed = applyUpgrades(BASE_PLAYER_STATS, { [upg.id]: upg.maxLevel })
+    if (maxed.maxHp < BASE_PLAYER_STATS.maxHp) fail(`upgrade ${upg.id}: maxHp decreased`)
+    if (maxed.meleeDamageMult < BASE_PLAYER_STATS.meleeDamageMult) fail(`upgrade ${upg.id}: meleeDamageMult decreased`)
+    if (maxed.dodgeCooldownMult > BASE_PLAYER_STATS.dodgeCooldownMult) {
+      fail(`upgrade ${upg.id}: dodgeCooldownMult increased (a longer cooldown is a weaken)`)
+    }
+    if (typeof maxed.startWeaponId !== 'string') fail(`upgrade ${upg.id}: startWeaponId is not a string`)
+  }
+}
+
+// ── 5d) Weapons well-formed (AC54/AC55): type ∈ {melee,ranged}, a non-empty swings table with the
+// required per-row fields, and a projectile spec IFF ranged. ──
+{
+  const SWING_FIELDS = ['reach', 'halfHeight', 'forward', 'damage', 'knockback', 'active', 'recovery', 'comboWindow', 'lunge']
+  const PROJ_FIELDS = ['speed', 'damage', 'knockback', 'lifetime']
+  if (WEAPON_ORDER.length < 3) fail(`WEAPON_ORDER has ${WEAPON_ORDER.length} weapons, expected ≥3 (AC54)`)
+  for (const w of WEAPON_ORDER) {
+    if (w.type !== 'melee' && w.type !== 'ranged') fail(`weapon ${w.id}: type ${w.type} not melee/ranged`)
+    if (!Array.isArray(w.swings) || w.swings.length === 0) fail(`weapon ${w.id}: empty swings table`)
+    for (const s of w.swings) {
+      for (const f of SWING_FIELDS) {
+        if (typeof s[f] !== 'number') fail(`weapon ${w.id}: swing missing numeric field "${f}"`)
+      }
+      if (s.active <= 0 || s.recovery < 0) fail(`weapon ${w.id}: swing active/recovery out of range`)
+    }
+    // projectile IFF ranged.
+    if (w.type === 'ranged') {
+      if (!w.projectile) fail(`weapon ${w.id}: ranged but no projectile spec`)
+      for (const f of PROJ_FIELDS) {
+        if (typeof w.projectile[f] !== 'number') fail(`weapon ${w.id}: projectile missing numeric field "${f}"`)
+      }
+    } else if (w.projectile) {
+      fail(`weapon ${w.id}: melee weapon must NOT carry a projectile spec`)
+    }
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
     `traversable(AC27); level pin OK; curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
-    `levels; seed chain deterministic (AC47)`,
+    `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
+    `identity/non-mutating/never-weaker (AC55)`,
 )
 process.exit(0)

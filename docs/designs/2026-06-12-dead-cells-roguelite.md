@@ -264,22 +264,77 @@ saves; level editor.
     replays the same biome sequence + layouts; `npm run verify` re-proves the seed-chain + curve
     determinism headlessly.
 
-**Phase 5 — Run economy (gold/scrolls + Cells bank) *(deferred from §6.5; filled when implemented)*:**
+**Phase 5 — Roguelite meta-loop (pickups + Cells/gold + Hub meta-upgrades + weapons + scrolls) — THIS PHASE — fully specified:**
 
-- **AC-P5.** Within a run, **gold/scrolls** are run-only boosts (lost on death) and in-run upgrade
-  choices appear; killed enemies' **Cells** are banked toward meta. (The run FLOW + multi-biome
-  chaining is delivered in Phase 4 above; this phase adds the two ECONOMIES on top of it.)
+> NOTE ON PHASE ORDER + SCOPE. The build orchestrator schedules this as the "Roguelite meta" step,
+> which DELIVERS THE WHOLE META-LOOP in one phase: it FUSES the doc skeleton's original §6.5 (run
+> economy: gold/scrolls + the Cells bank) AND §6.7 (Hub + localStorage meta-progression) — because a
+> Cells bank with no Hub to spend it in, or a Hub with no meta persistence, is a half-loop that can't
+> be played or verified. The §6.4 run FLOW (RunState, multi-biome chaining, depth scaling, GameOver
+> summary) is REUSED unchanged; this phase adds the ECONOMIES + the META on top of it. The §6.6 boss
+> remains a later phase. AC NUMBERING (continuing the §3 convention — reuse the next free integers,
+> never colliding with Combat's 20–26, Levels' 19/27–30, or Run-structure's 42–47): the fully-specified
+> Phase-5 ACs are **48–55**. The old lettered `AC-P5`/`AC-P7` placeholders are SUBSUMED by these.
+
+48. **Pickups drop from enemies + are pooled.** `entities/Pickup.js` is a POOLED pickup (same mandated
+    pooling convention as projectiles/particles — a fixed pool acquired/released, ZERO per-pickup
+    allocation after warm-up). On enemy death the existing `dropCells()` HOOK (Enemy.js, §6.4) spawns
+    pickups at the death point: **Cells** (the meta currency) always, plus a chance of a **gold** pickup.
+    The generator's `desc.pickups` (already emitting `{x,y,kind:'cell'|'gold'}`, §6.2) become real pooled
+    pickups too (replacing the §6.2 placeholder rectangles). A pickup arcs out (a little pop), settles,
+    and is collected on player overlap — incrementing the right counter and returning to the pool. A
+    **scroll** pickup kind also exists (rarer; the run-only boost, AC52).
+49. **TWO currencies, correct scope.** Collecting a **Cell** adds to `RunState.cells` (carried within the
+    run) AND is the quantity BANKED to permanent meta at run end (AC51). Collecting **gold** adds to
+    `RunState.gold` — a RUN-ONLY currency (lost on death, never banked). Both are shown live on the HUD.
+    The distinction is the genre's core: Cells survive death (meta economy), gold/scrolls do not (run
+    economy).
+50. **`MetaState` persists permanent progression to localStorage.** `core/MetaState.js` loads/saves a
+    PERSISTENT meta object via `util/save.js` (the existing defensive `loadMeta`/`saveMeta` over
+    localStorage): `{ cells: <banked Cells>, upgrades: { <id>: <ownedLevel> }, bestDepth }`. It exposes
+    read helpers + a pure `applyUpgrades(baseStats, upgrades)` that folds owned upgrade levels into a
+    starting-stats object. A disabled/full/private-mode storage degrades to in-memory defaults (never
+    throws — Decision 6). Relaunching the game restores the banked Cells + owned upgrades + best depth.
+51. **Run end banks Cells + best depth to meta (permadeath wiring).** On **death** OR **run-complete**
+    GameScene banks the run's collected **Cells** into `MetaState.cells` and updates `bestDepth =
+    max(bestDepth, depthReached)`, then SAVES. The run's **gold/scrolls** are DISCARDED (run-only —
+    permadeath loses them). The banking happens EXACTLY ONCE per run (the existing `gameOver` guard).
+    After banking, flow returns to the **Hub** (not Title), so banked Cells are immediately spendable.
+52. **Hub spends banked Cells on PERMANENT upgrades.** `scenes/HubScene.js` becomes a real between-runs
+    shop. It reads `MetaState` and lists the upgrades from `config/upgrades.js` (e.g. **+max HP**,
+    **+melee damage**, **extra dodge / shorter dodge cooldown**, **starting-weapon unlock**), each with
+    a tiered Cells cost and an owned-level readout. The player navigates the list and **buys** an upgrade
+    if they can afford it: deduct Cells from `MetaState`, increment its owned level, SAVE. A **START RUN**
+    control launches Game. The flow is **Title → Hub → Game**, and **GameOver → Hub** (closing the loop).
+53. **MetaState upgrades + RunState scrolls applied to the player on run start.** When a run starts,
+    GameScene builds the player's starting stats by folding **MetaState upgrades** (permanent) into the
+    base — `maxHp`, `meleeDamageMult`, dodge tuning, the **starting weapon** — and applies them to the
+    Player/RunState. **Run-only scrolls** (collected mid-run, AC48) then stack ON TOP for the current run
+    only (e.g. a damage scroll raises `RunState.scrollDamageMult`), affecting the live player but NEVER
+    saved to meta. A fresh run with no upgrades/scrolls plays exactly as Phase 4 (the additive identity).
+54. **Distinct weapons with distinct movesets + a ranged weapon on the projectile pool.** `config/weapons.js`
+    is a PURE config of ≥3 weapons with DISTINCT stats/movesets: a **fast Sword** (the current melee
+    combo — quick, low damage), a **heavy Hammer** (slow, high damage + knockback, fewer combo steps),
+    and a **ranged Bow/Throwing weapon** that fires a **pooled projectile** (reusing the Phase-2/effects
+    pooling discipline — `combat/ProjectilePool.js`). The Player reads its equipped weapon's swing table
+    + type (melee vs ranged) so attacking dispatches to a melee hitbox OR a fired projectile. Weapon
+    pickups appear in levels; walking over one **swaps** the equipped weapon (the old one is dropped/kept
+    per KISS — see Decision). The starting weapon is set by the unlocked meta upgrade (AC53).
+55. **The full roguelite loop is closed + verifiable.** A given start seed still replays deterministically;
+    the meta economy survives a relaunch (localStorage round-trip); `npm run verify` re-proves the pure
+    contracts it can reach headlessly: `config/upgrades.js` + `config/weapons.js` are PURE (node-import
+    succeeds), upgrade costs are monotone-non-decreasing per tier, `applyUpgrades` is a pure non-mutating
+    fold whose output stats are ≥ the base (an upgrade never makes you weaker), and the weapon swing
+    tables are well-formed (every weapon has a usable moveset). The economy/meta math stays Phaser-free.
 
 **Phase 6 — Bosses:**
 
 - **AC-P6.** A multi-phase boss telegraphs attacks, transitions phases at an HP threshold, and on
   defeat triggers Victory.
 
-**Phase 7 — Meta-progression + Hub:**
-
-- **AC-P7.** The Hub spends banked **Cells** on **permanent** upgrades persisted to localStorage;
-  death loses run-only loot but keeps meta; relaunching the game restores meta state — the full
-  permadeath roguelite loop is closed.
+**Phase 7 — *(SUBSUMED into Phase 5)*** — the Hub + localStorage meta-progression that the skeleton
+parked here is delivered as part of the Phase-5 meta-loop above (AC50–AC53). This slot is retained for
+numbering continuity; no separate work remains.
 
 ---
 
@@ -935,6 +990,127 @@ curve term at a generous max depth — and a MODULE-LOAD assertion throws if a r
 resets), so the curve term is itself non-decreasing across a boundary and the tier only adds —
 monotonicity is structural even at `TIER_WEIGHT=0` — but the derived bound keeps the property ROBUST to
 a future per-biome curve reset.
+
+> Decisions 54–63 are the **Roguelite meta-loop** phase (§6.5 — pickups + the two currencies + the Hub
+> meta-upgrades + weapons + scrolls). They are final for this phase; later phases append their own.
+
+**54. Pickup = a POOLED plain entity (mirrors HitboxPool/ParticlePool), spawned from the existing `dropCells()` HOOK**
+- Options: A) `new` a pickup GameObject per enemy death / per generated spawn · B) a fixed `PickupPool`
+  (`entities/Pickup.js`) of pre-created rectangle+sensor-body members, acquired/released like every other
+  pool in the codebase (HitboxPool, ParticlePool) — ZERO per-pickup allocation after warm-up.
+- Decision: **B)** — pooling is the mandated convention for transient spawned objects (projectiles/
+  particles), and pickups are exactly that (a few alive at once, churned over a run). One `PickupPool`
+  owned by GameScene; `acquire(x, y, kind)` arcs one out and goes live, a player-overlap collects it
+  (increment the currency, release back). The enemy death drop reuses the EXISTING `Enemy.dropCells()`
+  seam (§6.4 left it as a logged hook) — GameScene sets `enemy.onDrop = (x,y) => pool.spawnDrop(x,y)`
+  next to the kill-count hook, so the Enemy stays self-contained (no Phaser/pool import in Enemy.js). The
+  generator's `desc.pickups` (already `{x,y,kind}`) acquire from the SAME pool — the §6.2 placeholder
+  rectangles are deleted (DRY: one pickup path, not two). KISS: a pickup is a kind tag + a tiny arc-then-
+  settle tween; no physics beyond a sensor overlap.
+
+**55. TWO currencies = two RunState fields with DIFFERENT lifetimes (Cells bank, gold/scrolls don't)**
+- Options: A) one currency + a flag · B) `RunState.cells` (carried in-run AND banked to meta at run end)
+  vs `RunState.gold` (run-only, never banked) vs a run-only scroll effect set — three distinct lifetimes.
+- Decision: **B)** — the genre's core is the Cells-survive-death / gold-dies-with-you split. `RunState`
+  already HAS `cells`/`gold` PLACEHOLDER fields (§6.4) — this phase just makes collection write them and
+  run-end read them. Cells are the ONLY thing banked (AC51); gold + scrolls are dropped on the RunState
+  with the run. No new currency type, no meta-gold (YAGNI). The HUD shows both counters live.
+
+**56. `MetaState` (localStorage) is SEPARATE from `RunState` (in-memory) — the permadeath seam**
+- Options: A) fold meta into RunState · B) `core/MetaState.js` owns the PERSISTENT meta (`util/save.js`
+  localStorage) and `core/RunState.js` stays the in-memory run; permadeath = "drop the RunState, keep the
+  MetaState" (the seam §6.4's RunState header already promised).
+- Decision: **B)** — the §6.4 RunState was deliberately kept Phaser-free + save-free for exactly this.
+  `MetaState` wraps the EXISTING `loadMeta`/`saveMeta`/`DEFAULT_META` in `util/save.js` (already a stable
+  schema `{ cells, upgrades }` since Phase 0) and EXTENDS it with `bestDepth`. It exposes `getCells()`,
+  `getUpgradeLevel(id)`, `buy(id)`, `bankRun(summary)`, and the PURE `applyUpgrades(base, upgrades)`. The
+  `save.js` `try/catch` (Decision 6) already makes a disabled/full storage degrade to in-memory defaults —
+  MetaState inherits that for free (never throws). `applyUpgrades` is PURE (no Phaser, no storage read) so
+  the verifier can node-import + assert it.
+
+**57. `config/upgrades.js` = a PURE tiered upgrade table; cost + effect are DATA, applied by a pure fold**
+- Options: A) hard-code upgrade effects in HubScene/Player · B) a PURE `config/upgrades.js` list, each
+  `{ id, name, maxLevel, costs:[…], apply(stats, level) }` where `apply` folds an owned level into a
+  starting-stats object; `MetaState.applyUpgrades` reduces over all owned upgrades.
+- Decision: **B)** — keeping upgrades as DATA (mirrors crowd-runner's `config/*` pure tables) means the
+  Hub renders the list generically (no per-upgrade UI code), the Player just reads the FOLDED stats, and
+  the verifier asserts cost monotonicity + that `apply` only ever helps (AC55). Costs RISE per owned level
+  (`costs[level]`) — a monotone array per upgrade. The starting stats object is the single contract
+  between meta and the player: `{ maxHp, meleeDamageMult, dodgeCooldownMult, extraDodge?, startWeaponId }`.
+  Ship a SMALL set now (+maxHP, +melee dmg, shorter dodge cooldown, a starting-weapon unlock) — YAGNI on a
+  deep tree. `apply` NEVER mutates its input (returns a new stats object) so the fold is referentially safe.
+
+**58. Hub is a KEYBOARD-driven list shop (primitives + text), DECOUPLED from gameplay (same rule as HUD/GameOver)**
+- Options: A) a mouse-driven panel system · B) a simple vertical list the player moves a cursor through
+  (Up/Down), Buy (Space/Enter), Start Run (a dedicated row or key) — drawn with rectangles + text.
+- Decision: **B)** — KISS + primitives-only (the mandated art constraint). HubScene reads `MetaState` in
+  `create()`, renders one row per upgrade (name · owned level · next cost · affordable?) + a banked-Cells
+  header + a START RUN row. Up/Down move a highlight; Buy calls `MetaState.buy(id)` (deduct + increment +
+  SAVE) and re-renders the changed row; START RUN does `scene.start('Game')`. It NEVER touches a live
+  GameScene (there is none — the run ended) and reads meta only through `MetaState` (no direct save.js).
+  Reachable from BOTH Title (Title→Hub→Game, a new "ENTER HUB" path) and GameOver (GameOver→Hub).
+
+**59. Run-end banking happens in GameScene ONCE (the gameOver guard), routes to Hub, not Title**
+- Options: A) bank in GameOverScene · B) bank in GameScene at the death/complete edge (where the live
+  RunState is), then hand the SUMMARY to GameOver, which routes to Hub.
+- Decision: **B)** — GameScene owns the live `RunState` (the source of `cells`/`bestDepth`); banking there
+  is the single writer, gated by the EXISTING `gameOver` one-shot guard so it fires exactly once per run
+  (death OR run-complete). It calls `MetaState.bankRun({ cells: runState.cells, depth: runState.depth })`
+  (adds Cells, bumps bestDepth, SAVES) then `scene.start('GameOver', summary)`. GameOver's "→ Title"
+  becomes "→ Hub" (so banked Cells are immediately spendable — the loop closes). GameOver stays decoupled
+  (it shows the summary + a banked-Cells line read from the summary; it does NOT itself save — banking is
+  GameScene's job, GameOver only displays). Gold/scrolls are simply NOT banked (run-only — permadeath).
+
+**60. Run-start stats = MetaState upgrades folded into a base, scrolls stacked on the RunState (not meta)**
+- Options: A) mutate the Player's constants per run · B) GameScene computes a `startStats` =
+  `MetaState.applyUpgrades(BASE_PLAYER_STATS, upgrades)` at run start, applies it to the Player +
+  RunState (maxHp, meleeDamageMult, dodge tuning, starting weapon); run-only SCROLLS collected mid-run
+  multiply a `RunState.scrollDamageMult` (etc.) that the Player reads LIVE but is never saved.
+- Decision: **B)** — the player's permanent power comes ONLY from the folded meta stats (applied once at
+  run start, carried on RunState so a level rebuild doesn't re-roll them); run-only scrolls are a SEPARATE
+  multiplier on RunState that stacks on top for THIS run and dies with it. The Player gains a small set of
+  injected modifiers (`maxHp`, `meleeDamageMult`, `dodgeCooldownMult`) it reads where it currently uses
+  the bare constants — a thin, additive change. A fresh run with empty meta + no scrolls = the Phase-4
+  player exactly (the identity case — no behavior change when nothing is owned). Melee damage is applied
+  at the resolveHit site (`damage × meleeDamageMult × scrollDamageMult`), keeping `combat/damage.js` pure
+  (the mult is passed in, not imported).
+
+**61. `config/weapons.js` = a PURE weapon table; the Player dispatches melee-vs-ranged off the equipped weapon**
+- Options: A) hard-code the one sword combo · B) a PURE `config/weapons.js` of ≥3 weapons, each
+  `{ id, name, type:'melee'|'ranged', swings:[…], projectile? }`; the Player holds an `equippedWeapon`
+  and reads ITS `swings` table (replacing the module-level `SWINGS` import) + its `type` to dispatch.
+- Decision: **B)** — generalize the EXISTING combat cleanly: the current `SWINGS`/`COMBO_LEN` (combat/
+  hitbox.js) becomes the SWORD's table (the default, so Phase-4 feel is preserved when sword is equipped).
+  The Player's `_startSwing` reads `this.equippedWeapon.swings` instead of the import; `COMBO_LEN` becomes
+  `this.equippedWeapon.swings.length`. Three weapons ship: **Sword** (fast, the current combo), **Hammer**
+  (slow, big damage + knockback, a 1–2 hit combo), **Bow** (ranged — `type:'ranged'`, fires a pooled
+  projectile instead of a melee hitbox). `weapons.js` is PURE data (no Phaser) so the verifier asserts
+  every weapon has a well-formed moveset (AC55). KISS: a weapon is just a swing table + a type flag.
+
+**62. Ranged attack = a POOLED projectile (`combat/ProjectilePool.js`), reusing the hitbox-pool discipline**
+- Options: A) a transient melee-style hitbox flung forward · B) a real `combat/ProjectilePool.js` of
+  pre-created rectangle+Arcade-body projectiles that TRAVEL (a velocity along facing), overlap the enemy
+  hurtbox group, deal damage once, then release on hit / lifetime / world-bound.
+- Decision: **B)** — a ranged weapon needs a moving body, not a parked hitbox; pooling it mirrors the
+  HitboxPool exactly (the mandated convention; the project already has the pattern twice over). When the
+  equipped weapon is `ranged`, `_startSwing` acquires a projectile from the pool (aimed along `facing`,
+  speed/damage/knockback from the weapon's `projectile` spec) instead of a melee hitbox; GameScene wires
+  ONE overlap `(projectilePool.group, enemyHurtboxGroup)` that resolves a hit via the SAME `resolveHit` +
+  `effects.hit` pipeline (DRY — ranged reuses the melee damage path). The projectile body uses the SAME
+  per-shot `hitSet` dedup pattern so it hits each enemy once. It ticks on the GAMEPLAY dt (freezes with
+  hit-stop, Decision 26) so it's consistent with the rest of the combat world.
+
+**63. Weapon pickup = a Pickup kind that SWAPS the equipped weapon (KISS — no inventory management this phase)**
+- Options: A) a full inventory with multiple carried weapons + a swap key · B) a weapon-pickup kind that,
+  on collect, REPLACES the equipped weapon (the old one is simply replaced — no drop-on-ground juggling).
+- Decision: **B)** — YAGNI on inventory management. A weapon pickup carries a `weaponId`; collecting it
+  sets `player.equipWeapon(WEAPONS[id])` (which resets the combo index so the new moveset starts clean).
+  RunState tracks the current `weaponId` so a level rebuild keeps the equipped weapon. The STARTING weapon
+  is `startStats.startWeaponId` from the meta fold (Decision 60) — the default is Sword; a meta upgrade
+  unlocks starting with the Hammer/Bow. Weapon pickups are placed sparsely (a generator pickup kind or a
+  fixed per-level chance) so swapping is a real mid-run choice, but the count stays low (KISS). The
+  `inventory` placeholder on RunState (§6.4) is repurposed to hold the equipped `weaponId` (one field, not
+  a list — the array placeholder becomes a scalar; the verifier doesn't read it, so no contract breaks).
 
 ---
 
@@ -1889,9 +2065,180 @@ only new surfaces are the pure curve, the ordered biome list, the pure RunState,
 a tiny HUD/scene wiring, and the verifier growth. Every deferral is a populated field or a clean
 handoff (the §6.5 economy + §6.6 boss + §6.7 hub plug into these seams, not rewrite them).
 
-### 6.5 Phase 5 — Run economy (gold/scrolls + Cells bank) *(filled when Phase 5 is designed)*
+### 6.5 Phase 5 — Roguelite meta-loop (THIS PHASE — the orchestrator's "Roguelite meta" step)
+
+**Goal.** CLOSE THE LOOP. Phase 4 assembled a depth-scaling multi-biome RUN that ends in a GameOver
+summary; this phase makes that run feed a PERSISTENT meta-economy and adds the player-facing economy/
+weapon systems the genre is built on:
+- **Pickups** (pooled) drop from enemies + sit in levels: **Cells** (meta currency), **gold** (run-only),
+  **scrolls** (run-only stat boosts), and **weapon** pickups.
+- **Two currencies, correct scope:** Cells are CARRIED in the run AND BANKED to permanent meta at run end;
+  gold/scrolls are RUN-ONLY (lost on death).
+- **`MetaState`** persists banked Cells + owned permanent **upgrades** + best depth to **localStorage**
+  (via the existing `util/save.js`), surviving relaunch.
+- **The Hub** (`HubScene`) becomes a real between-runs shop: spend banked Cells on PERMANENT upgrades
+  (`config/upgrades.js`) — +max HP, +melee damage, shorter dodge cooldown, a starting-weapon unlock.
+- **Flow becomes Title → Hub → Game**, and **GameOver → Hub** (banked Cells immediately spendable).
+- **Weapons** (`config/weapons.js`): ≥3 with distinct movesets (fast **Sword**, heavy **Hammer**, ranged
+  **Bow** on a pooled projectile); weapon pickups SWAP the equipped weapon.
+- **Run-start application:** MetaState upgrades fold into the player's starting stats; run-only scrolls
+  stack on top for the current run only.
+
+This satisfies **AC48–AC55**. It REUSES the §6.4 run flow (RunState, biome chaining, depth scaling,
+GameOver summary), the §6.3 combat (resolveHit, HitboxPool, Effects), and the §6.2 generator
+(`desc.pickups` already exist) UNCHANGED — the new surfaces are the pickup/projectile pools, the pure
+meta/upgrades/weapons configs, the Hub shop, and the run-start/run-end wiring. Pure modules stay
+Phaser-free (node-importable); pooling keeps per-frame allocation at zero; the run stays deterministic.
+
+**What this phase deliberately does NOT do (YAGNI):** a deep upgrade TREE or loot/affix system (a small
+flat upgrade set ships); on-ground weapon JUGGLING / multi-slot inventory (a pickup SWAPS the single
+equipped weapon — Decision 63); the §6.6 BOSS (run-complete is still the last-Door edge); gamepad/remap
+UI. Each is a clean seam, not a stub to rewrite.
+
+**New / changed modules this phase** (only what the loop needs — YAGNI):
+
+```
+src/entities/Pickup.js     — NEW, Phaser-coupled. A POOLED pickup (Decision 54): a fixed PickupPool of
+                             rectangle+sensor-body members; acquire(x,y,kind) arcs one out + goes live,
+                             a player overlap collects it (increment the currency / equip the weapon /
+                             arm a scroll) and releases it back. Kinds: cell | gold | scroll | weapon.
+src/core/MetaState.js      — NEW, thin wrapper over util/save.js (Decision 56). loadMeta-backed getters
+                             (getCells, getUpgradeLevel, getBestDepth), buy(id) (deduct+increment+save),
+                             bankRun({cells,depth}) (add Cells, bump bestDepth, save), and the PURE
+                             applyUpgrades(baseStats, upgrades) fold. Inherits save.js try/catch (never
+                             throws). The PURE applyUpgrades is split so the verifier can node-import it.
+src/config/upgrades.js     — NEW, 100% PURE (no Phaser). The upgrade TABLE (Decision 57): each
+                             { id, name, maxLevel, costs:[…] (monotone), apply(stats, level) }. A small
+                             set: MAX_HP, MELEE_DMG, DODGE_CD, START_WEAPON (unlock). Node-importable.
+src/config/weapons.js      — NEW, 100% PURE (no Phaser). ≥3 weapons (Decision 61): SWORD (the current
+                             SWINGS combo — fast), HAMMER (slow, big dmg+knockback, 1–2 hit), BOW
+                             (type:'ranged' + a projectile spec). Each { id, name, type, swings,
+                             projectile? }. The SWORD's swings ARE the migrated combat/hitbox SWINGS
+                             (DRY — sword keeps Phase-4 feel). Node-importable.
+src/combat/ProjectilePool.js — NEW, Phaser-coupled (Decision 62). A pool of traveling rectangle+body
+                             projectiles (mirrors HitboxPool): acquire(attacker, spec, ownerId) fires
+                             one along facing; tick(gdt) moves them + releases on lifetime/world-bound;
+                             a per-shot hitSet dedups. GameScene overlaps its group vs the enemy hurtbox.
+src/entities/Player.js     — EXTEND. Hold an equippedWeapon (Decision 61) + injected meta/scroll
+                             modifiers (Decision 60): maxHp, meleeDamageMult, dodgeCooldownMult read
+                             where the bare constants are used; _startSwing reads equippedWeapon.swings
+                             + dispatches melee-hitbox vs fired-projectile by type; equipWeapon(w) swaps.
+                             A fresh run with no upgrades/scrolls = the Phase-4 player exactly (identity).
+src/config/hitbox.js?      — combat/hitbox.js: the SWINGS table is re-homed as the SWORD's swings in
+                             config/weapons.js; combat/hitbox.js KEEPS swingRect (pure geometry) +
+                             re-exports SWORD's swings as SWINGS for back-compat (no broken imports).
+src/scenes/HubScene.js     — REWRITE the stub into the real shop (Decision 58): reads MetaState, lists
+                             config/upgrades.js rows (name · owned · next cost · affordable), a banked-
+                             Cells header + a START RUN row; Up/Down cursor, Buy (MetaState.buy + save +
+                             re-render), START RUN → Game. Decoupled (MetaState only).
+src/scenes/GameScene.js    — EXTEND. create(): load MetaState, build startStats = applyUpgrades(BASE,
+                             upgrades), seed RunState (maxHp, equipped weapon) + apply to Player; own a
+                             PickupPool + a ProjectilePool + their overlaps. _spawnEnemy: set
+                             enemy.onDrop → pool.spawnDrop (Decision 54). _buildLevel: desc.pickups →
+                             real pooled pickups (drop the placeholder rects). Run end (_onPlayerDeath /
+                             _completeRun): MetaState.bankRun once (Decision 59), then GameOver → Hub.
+src/scenes/GameOverScene.js — EXTEND (small). Show a "CELLS BANKED  n" line from the summary; route to
+                             Hub instead of Title (Decision 59). Still decoupled (no save itself).
+src/scenes/TitleScene.js   — EXTEND (small). Start now routes Title → Hub (the meta hub is the run lobby);
+                             add an explicit affordance. (Game is launched from the Hub's START RUN.)
+src/scenes/HUDScene.js     — EXTEND (small). Add cells/gold counters + the equipped-weapon name next to
+                             the HP bar + depth/biome readout — read from the registry (decoupled).
+scripts/verify-gen.mjs     — GROW (AC55). Import upgrades.js + weapons.js + MetaState.applyUpgrades
+                             (PURE); assert: costs monotone-non-decreasing per upgrade; applyUpgrades is
+                             non-mutating + output stats ≥ base; every weapon has a well-formed moveset.
+                             Keeps every existing pin (rng/combat/level/run-structure).
+```
+
+**`entities/Pickup.js` (the pooled pickup — Decision 54).** A `PickupPool(scene)` pre-creates N
+rectangle+sensor-body members (kind-colored), all parked+disabled. `acquire(x, y, kind, meta)` positions
+one, gives it a small upward arc (a one-shot velocity + a settle, KISS — no full physics), tags it
+`{ kind, weaponId?, scrollId? }`, and adds it to the pool's overlap `group`. GameScene wires ONE overlap
+`(player.collider, pool.group)` whose callback reads the kind and resolves collection: `cell` →
+`runState.cells++`; `gold` → `runState.gold += amount`; `scroll` → arm the scroll's run-only effect on
+RunState; `weapon` → `player.equipWeapon(WEAPONS[weaponId])` + set `runState.weaponId`. Then `release()`
+the pickup (a small collect pop via Effects, reusing the spark pool). Enemy drops call
+`pool.spawnDrop(x,y)` from `enemy.onDrop` (a Cell always + a gold chance + a rare scroll); generator
+`desc.pickups` acquire by their `kind`. Colors are primitives (cyan Cell, gold gold, magenta scroll,
+white weapon). PERSISTS across level rebuilds (the pool is scene-owned); live pickups are released on
+teardown.
+
+**`core/MetaState.js` (the persistence wrapper — Decision 56).** Wraps `util/save.js`:
+- `load()` → `loadMeta()` extended with `bestDepth` default (spread over `DEFAULT_META`). MetaState holds
+  the loaded object + exposes `getCells()`, `getUpgradeLevel(id)`, `getUpgrades()`, `getBestDepth()`.
+- `buy(id)` — look up `config/upgrades.js`, check owned `< maxLevel` AND `cells >= costs[owned]`; if so
+  `cells -= cost`, `upgrades[id] = owned+1`, `saveMeta()`. Returns success.
+- `bankRun({ cells, depth })` — `meta.cells += cells`, `meta.bestDepth = max(bestDepth, depth)`,
+  `saveMeta()`. Called ONCE per run by GameScene (Decision 59). Gold/scrolls are not passed in (run-only).
+- `applyUpgrades(baseStats, upgrades)` — PURE, exported standalone so the verifier imports it without the
+  rest of MetaState (which is save.js-coupled). `reduce` over the upgrade table: for each owned upgrade,
+  `stats = upg.apply(stats, level)` (each `apply` returns a NEW stats object — never mutates). Identity
+  when `upgrades` is empty (returns a clone of base). The BASE stats live as a frozen constant
+  (`{ maxHp: PLAYER_MAX_HP, meleeDamageMult: 1, dodgeCooldownMult: 1, startWeaponId: 'sword' }`).
+
+**`config/upgrades.js` (the upgrade table — Decision 57).** PURE. A small list, each a self-contained
+row: `MAX_HP` (`apply: stats → {...stats, maxHp: stats.maxHp + 20*level}`, costs `[15,30,50]`);
+`MELEE_DMG` (`meleeDamageMult += 0.15*level`, costs `[20,40,70]`); `DODGE_CD` (`dodgeCooldownMult` ×
+`0.85^level`, costs `[25,50]`); `START_WEAPON` (level 1 unlocks Hammer, level 2 unlocks Bow → sets
+`startWeaponId`, costs `[40,80]`). Costs arrays are MONOTONE (the verifier asserts, AC55). `apply` never
+mutates (AC55). `maxLevel` = `costs.length`.
+
+**`config/weapons.js` + the Player weapon dispatch (Decisions 61/62).** PURE weapon table:
+- `SWORD` — `type:'melee'`, `swings:` the migrated Phase-4 `SWINGS` (fast 3-hit combo, the default).
+- `HAMMER` — `type:'melee'`, `swings:` a 2-row table (slow `active/recovery`, big `damage`+`knockback`,
+  short reach). Distinct FEEL from the sword (heavier).
+- `BOW` — `type:'ranged'`, `swings:` a 1-row "draw" (active = the cooldown between shots), `projectile:
+  { speed, damage, knockback, lifetime }`. Firing acquires a projectile.
+- `combat/hitbox.js` keeps `swingRect` (pure) and re-exports `SWORD.swings` as `SWINGS` for back-compat so
+  existing imports (HitboxPool/Player) don't break; `COMBO_LEN` is derived from the EQUIPPED weapon in the
+  Player now (not the module constant).
+- Player: `equippedWeapon` (default from `startStats.startWeaponId`); `_startSwing` reads
+  `this.equippedWeapon.swings` + branches on `type`: melee → the existing `hitboxPool.acquire`; ranged →
+  `projectilePool.acquire(attacker, weapon.projectile, this.id)`. `equipWeapon(w)` resets `comboIndex` so
+  the new moveset starts clean. `meleeDamageMult` (meta) × `scrollDamageMult` (run) is applied at the
+  resolveHit site (passed into the hit, keeping `damage.js` pure).
+
+**`combat/ProjectilePool.js` (Decision 62).** Mirrors HitboxPool: pre-created rectangle+body projectiles,
+`acquire` sets a velocity along facing + a `hitSet` + a `releaseTimer` (lifetime); `tick(gdt)` (gameplay
+dt — freezes with hit-stop) integrates position + releases on lifetime/world-bound. GameScene overlaps
+`(projectilePool.group, enemyHurtboxes)` → the SAME `resolveHit` + `effects.hit` path (DRY), then releases
+the projectile on a hit (or lets it pass through per-shot — KISS: release on first hit).
+
+**GameScene wiring (extend §6.4).**
+- `create()`: `this.meta = MetaState.load()`; `const startStats = applyUpgrades(BASE_PLAYER_STATS,
+  this.meta.getUpgrades())`; seed `runState` (`maxHp = startStats.maxHp`, `weaponId =
+  startStats.startWeaponId`) + apply to Player (`player.maxHp/hp = startStats.maxHp`,
+  `player.meleeDamageMult = startStats.meleeDamageMult`, `player.equipWeapon(WEAPONS[weaponId])`); own a
+  `PickupPool` + a `ProjectilePool` + their overlaps. Identity-safe: empty meta = Phase-4 player.
+- `_spawnEnemy`: also set `enemy.onDrop = (x,y) => this.pickupPool.spawnDrop(x,y, this.runState.depth)`.
+- `_buildLevel`: `desc.pickups` → `this.pickupPool.acquire(p.x, p.y, p.kind)` (delete the placeholder
+  rects + `PICKUP_COLORS`). A sparse weapon pickup may be placed too (KISS — a low fixed chance).
+- Run end: in `_onPlayerDeath` AND `_completeRun`, BEFORE the GameOver handoff, `this.meta.bankRun({
+  cells: this.runState.cells, depth: this.runState.depth })` (once, under the `gameOver` guard,
+  Decision 59); include `cellsBanked` in the summary. GameOver routes to Hub.
+- `_emitHud`: also `registry.set('cells', runState.cells)`, `set('gold', runState.gold)`,
+  `set('weapon', this.player.equippedWeapon.name)`.
+
+**HubScene / GameOverScene / TitleScene / HUDScene** — small, decoupled extends per Decisions 58/59 (see
+the module table). Title → Hub → Game; Hub START RUN → Game; GameOver → Hub. All read meta only through
+MetaState / the registry (no scene reaches into a live GameScene).
+
+**`scripts/verify-gen.mjs` (GROW — AC55).** Add a section 5 (keeping 1–4): import `UPGRADES` from
+`config/upgrades.js`, `WEAPONS` from `config/weapons.js`, and `applyUpgrades` + `BASE_PLAYER_STATS` from
+`core/MetaState.js` (PURE — a successful node import re-proves purity). Assert: every upgrade's `costs` is
+non-decreasing and `length === maxLevel`; `applyUpgrades(BASE, {})` deep-equals a clone of BASE (identity)
+and does NOT mutate BASE; for each upgrade, `applyUpgrades(BASE, {id: maxLevel})` yields stats ≥ BASE on
+every numeric field that upgrade touches (an upgrade never weakens you); every weapon has `type ∈
+{melee,ranged}`, a non-empty `swings` table with the required fields, and a `projectile` spec iff ranged.
+Exits non-zero on any failure.
+
+**Why this is the minimum that satisfies AC48–AC55 (YAGNI):** the run flow + combat + generator are reused
+unchanged; the new code is the two pools (pickup/projectile — the mandated pattern, already used twice),
+three PURE configs (upgrades/weapons + the meta fold), the Hub shop rewrite, and thin run-start/run-end +
+HUD wiring. The boss gate (§6.6), a deep upgrade tree, and multi-slot inventory are explicit deferrals,
+each a clean seam.
+
 ### 6.6 Phase 6 — Bosses *(filled when Phase 6 is designed)*
-### 6.7 Phase 7 — Meta-progression + Hub *(filled when Phase 7 is designed)*
+### 6.7 Phase 7 — *(SUBSUMED into the §6.5 meta-loop — Hub + localStorage meta shipped there)*
 
 ### 6.8 Error handling / edge cases (Phase 0)
 
@@ -2069,7 +2416,51 @@ handoff (the §6.5 economy + §6.6 boss + §6.7 hub plug into these seams, not r
   determinism; extend the existing 200-seed level sweep to EVERY biome in `BIOME_ORDER`. Keeps all
   prior pins. Does NOT import Phaser-coupled modules.
 
-**Phases 5–7:** files listed in each phase's `Design` section when it is implemented.
+**Phase 5 — Roguelite meta-loop (this phase; §6.5):**
+
+- `src/entities/Pickup.js` — NEW, Phaser-coupled. A POOLED pickup (`PickupPool`, Decision 54): fixed
+  rectangle+sensor-body members; `acquire(x,y,kind,meta)` arcs one out + goes live, a player overlap
+  collects it (cell/gold/scroll/weapon), `spawnDrop(x,y,depth)` for enemy drops. Zero per-pickup alloc.
+- `src/core/MetaState.js` — NEW. Thin wrapper over `util/save.js` (Decision 56): `load()`, `getCells()`,
+  `getUpgrades()`, `getUpgradeLevel(id)`, `getBestDepth()`, `buy(id)` (deduct+increment+save),
+  `bankRun({cells,depth})` (add Cells, bump bestDepth, save). Exports the PURE `applyUpgrades(base,
+  upgrades)` fold + `BASE_PLAYER_STATS` standalone (so the verifier node-imports them without save.js).
+- `src/config/upgrades.js` — NEW, **100% PURE** (no Phaser; Decision 57). The upgrade TABLE: each
+  `{ id, name, maxLevel, costs:[…] (monotone), apply(stats, level) }` (non-mutating). A small set
+  (MAX_HP, MELEE_DMG, DODGE_CD, START_WEAPON). Node-importable.
+- `src/config/weapons.js` — NEW, **100% PURE** (no Phaser; Decision 61). ≥3 weapons (SWORD/HAMMER/BOW),
+  each `{ id, name, type:'melee'|'ranged', swings:[…], projectile? }`. SWORD's swings ARE the migrated
+  `SWINGS` (DRY). Node-importable.
+- `src/combat/ProjectilePool.js` — NEW, Phaser-coupled (Decision 62). A pool of traveling
+  rectangle+body projectiles mirroring HitboxPool: `acquire(attacker, spec, ownerId)`, `tick(gdt)`
+  (gameplay dt), per-shot `hitSet` dedup; GameScene overlaps its group vs the enemy hurtbox.
+- `src/combat/hitbox.js` — EXTEND (tiny). Re-home the `SWINGS` table into `config/weapons.js` as SWORD's
+  swings; keep `swingRect` (pure) + re-export SWORD's swings as `SWINGS` for back-compat (no broken
+  imports). `COMBO_LEN` becomes derived from the equipped weapon in the Player.
+- `src/entities/Player.js` — EXTEND. Hold `equippedWeapon` + injected `maxHp`/`meleeDamageMult`/
+  `dodgeCooldownMult` (Decisions 60/61); `_startSwing` reads `equippedWeapon.swings` + dispatches
+  melee-hitbox vs fired-projectile by `type`; `equipWeapon(w)` swaps + resets the combo. Identity-safe
+  (empty meta + sword = the Phase-4 player).
+- `src/scenes/HubScene.js` — REWRITE the stub into the real shop (Decision 58): reads MetaState, lists
+  `config/upgrades.js` rows (name · owned · next cost · affordable) + a banked-Cells header + a START RUN
+  row; Up/Down cursor, Buy (MetaState.buy + save + re-render), START RUN → Game. Decoupled (MetaState only).
+- `src/scenes/GameScene.js` — EXTEND. `create()`: load MetaState, fold `startStats`, seed RunState +
+  apply to Player (maxHp, weapon, meleeDamageMult); own a `PickupPool` + a `ProjectilePool` + overlaps.
+  `_spawnEnemy` sets `enemy.onDrop`; `_buildLevel` turns `desc.pickups` into real pooled pickups (delete
+  the placeholder rects). Run end (`_onPlayerDeath`/`_completeRun`): `MetaState.bankRun` ONCE under the
+  `gameOver` guard (Decision 59), include `cellsBanked` in the summary; GameOver → Hub. `_emitHud` adds
+  cells/gold/weapon.
+- `src/scenes/GameOverScene.js` — EXTEND (small). Show a "CELLS BANKED n" line from the summary; route
+  to **Hub** instead of Title (Decision 59). Still decoupled (no save itself).
+- `src/scenes/TitleScene.js` — EXTEND (small). Start routes Title → **Hub** (the run lobby). Game is
+  launched from the Hub's START RUN.
+- `src/scenes/HUDScene.js` — EXTEND (small). Add cells/gold counters + the equipped-weapon name (registry
+  reads — decoupled, Decision 2).
+- `scripts/verify-gen.mjs` — GROW. Add section 5 (AC55): import `UPGRADES`/`WEAPONS`/`applyUpgrades`/
+  `BASE_PLAYER_STATS`; assert cost monotonicity + `length===maxLevel`, `applyUpgrades` identity +
+  non-mutation + stats ≥ base, and well-formed weapon movesets. Keeps every prior pin. No Phaser import.
+
+**Phases 6–7:** files listed in each phase's `Design` section when implemented (Phase 7 is SUBSUMED here).
 
 ---
 
@@ -2203,4 +2594,35 @@ sweep, plus `npm run dev` observation:
 8. Regression: `npm run build` exits 0; every prior `verify-gen.mjs` pin (rng, combat purity/geometry,
    the per-biome level sweep — determinism, bounds, no-wall-spawn, traversability) still passes.
 
-**Phases 5–7:** verification steps appended per phase when implemented.
+**Phase 5 — Roguelite meta-loop (this phase; §6.5):** the HEADLESS pure-config sweep plus `npm run dev`
+observation of the full loop:
+
+1. [AC55] `npm run verify` exits 0. Its NEW section node-imports `config/upgrades.js`, `config/weapons.js`,
+   and `applyUpgrades`/`BASE_PLAYER_STATS` from `core/MetaState.js` (a successful import re-proves they're
+   PURE — no Phaser); asserts every upgrade's `costs` is non-decreasing with `length === maxLevel`,
+   `applyUpgrades(BASE,{})` equals a BASE clone WITHOUT mutating BASE (identity), each maxed upgrade yields
+   stats ≥ BASE on the fields it touches (never weakens you), and every weapon has a valid `type`, a
+   non-empty `swings` moveset, and a `projectile` iff ranged.
+2. [AC48/AC49] In `npm run dev`: killing an enemy drops POOLED pickups (a cyan Cell always + sometimes a
+   gold/scroll); generated levels also have pickups. Walking over a Cell raises the HUD Cells counter;
+   gold raises the gold counter. Sustained combat shows no GC stutter (the pool never allocates mid-run).
+3. [AC50/AC51] Die or complete the run: the run's collected Cells are BANKED — re-entering the Hub shows a
+   higher banked-Cells total, and the best-depth persists. RELOAD the page (kill the tab): the Hub still
+   shows the banked Cells + owned upgrades + best depth (localStorage round-trip). Gold/scrolls are GONE
+   (run-only). Banking fires exactly once per run.
+4. [AC52] In the Hub: navigate the upgrade list (Up/Down), BUY an affordable upgrade (Space/Enter) — Cells
+   deduct, the owned level rises, the row re-renders, and the buy persists across a reload. An unaffordable
+   upgrade can't be bought. START RUN launches Game. Flow is Title → Hub → Game and GameOver → Hub.
+5. [AC53] Buy +max HP / +melee damage / shorter-dodge-cooldown / a starting-weapon unlock, then START RUN:
+   the player begins with the upgraded maxHp (HUD bar longer), hits harder (bigger damage numbers), dodges
+   more often, and/or starts with the unlocked weapon. Collect a run-only SCROLL mid-run: the boost applies
+   for THIS run only and is NOT present on the next run (it wasn't banked). A run with empty meta + no
+   scrolls plays exactly like Phase 4 (the identity case).
+6. [AC54] Pick up a weapon: the equipped weapon SWAPS (HUD weapon name changes) and the moveset changes —
+   the Hammer is slow + heavy, the Bow fires a POOLED projectile that travels, hits an enemy once (damage
+   number + sparks via the shared FX path), and is recycled. The Sword keeps the Phase-4 combo feel.
+7. Regression: `npm run build` exits 0; every prior `verify-gen.mjs` pin (rng, combat purity/geometry, the
+   per-biome level sweep, the run-structure monotonicity/determinism) still passes — the SWINGS re-home +
+   the new run-start/run-end wiring don't change the generator output or the curve.
+
+**Phases 6–7:** verification steps appended per phase when implemented (Phase 7 is SUBSUMED here).

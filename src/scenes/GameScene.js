@@ -11,6 +11,12 @@ import { generateLevel, TILE_SIZE } from '../world/LevelGenerator.js'
 import { TileMap } from '../world/TileMap.js'
 import { createRunState } from '../core/RunState.js'
 import { scaleAtDepth, scaleSpec } from '../config/difficulty.js'
+import { createMetaState } from '../core/MetaState.js'
+import { ProjectilePool } from '../combat/ProjectilePool.js'
+import { PickupPool } from '../entities/Pickup.js'
+import { WEAPONS } from '../config/weapons.js'
+import { SCROLLS_BY_ID } from '../config/scrolls.js'
+import { mulberry32 } from '../util/rng.js'
 
 // ── GameScene (design §6.1 + §6.2 + §6.3 + §6.4, AC11–AC18 + AC19/AC27–AC30 + AC20–AC26 + AC42–AC47) ──
 // The only scene with an Arcade physics world. As of the Procedural-levels phase (§6.2) the
@@ -75,8 +81,13 @@ const CONTACT_KNOCKBACK = 280 // px/s.
 // this scene — DRY), so a given START_SEED replays the same biome/level sequence (AC47).
 const START_SEED = 0xc0ffee
 
-// Pickup placeholder colors (the economy is Phase 5 — these are render-only markers this phase).
-const PICKUP_COLORS = { cell: 0x4dd0e1, gold: 0xf1c40f }
+// ── Weapon-pickup placement (§6.5, Decision 63) ── a sparse, FIXED per-level chance to place ONE
+// weapon pickup (NOT a generator pickup kind — sourcing it scene-side keeps the generator emitting only
+// cell/gold so the level regression pin + determinism deep-equal stay intact, per the §6.5 BLOCKER
+// resolution). Low so swapping is a real mid-run choice (KISS). The weapon is the OTHER melee/ranged
+// option vs the one you start with (a meaningful pick), chosen off the level seed (deterministic).
+const WEAPON_PICKUP_CHANCE = 0.5 // ~half of levels carry a weapon to try.
+const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword'] // the ids a level pickup can offer.
 
 export class GameScene extends Phaser.Scene {
   constructor() {
@@ -87,14 +98,21 @@ export class GameScene extends Phaser.Scene {
     // ── Per-scene gravity (Decision 9; the BLOCKER #2 model) ──
     this.physics.world.gravity.y = GRAVITY
 
-    // ── RunState (design §6.4, Decision 44/46) ── ONE RunState OWNS the active run: the seed chain,
-    // the biome index + per-biome level counter, the depth, and the carried HP. The scene reads
-    // runState.biome() each build (no fixed `this.biome`) and advances it at the Door. startedAt is
-    // captured HERE via the scene clock (purity stays in RunState — the clock is passed IN). Because
-    // scene.start('Game') fully re-creates the scene on a replay (GameOver → Title → Game), a fresh
-    // RunState + a fresh startedAt are minted per run — timeMs is per-run, never cumulative (review
-    // MINOR — confirmed: no scene-persistent run state leaks across runs).
-    this.runState = createRunState(START_SEED, this.time.now)
+    // ── MetaState (design §6.5, Decision 56/60, AC50/AC53) ── load the PERSISTENT meta (banked Cells,
+    // owned upgrades, best depth) from localStorage. NEVER throws (save.js try/catch). Fold the owned
+    // upgrades into the base starting stats — the run-start power source (maxHp, meleeDamageMult, dodge
+    // factor, starting weapon). A fresh meta folds to BASE_PLAYER_STATS → the Phase-4 player (identity).
+    this.meta = createMetaState()
+    const startStats = this.meta.startStats()
+
+    // ── RunState (design §6.4/§6.5, Decision 44/46/60) ── ONE RunState OWNS the active run: the seed
+    // chain, the biome index + per-biome level counter, the depth, the carried HP, the currencies, the
+    // run-only scroll mults, and the equipped weapon id. Seeded from startStats so the carried maxHp/hp
+    // + starting weapon reflect the META upgrades (review MAJOR — the HP-carry/upgrade reconciliation:
+    // RunState.maxHp/hp are minted from the UPGRADED maxHp, so the single create()-time player sync
+    // below is consistent). startedAt is captured HERE (purity stays in RunState — the clock is passed
+    // IN). scene.start('Game') fully re-creates the scene per run, so a fresh RunState is minted each run.
+    this.runState = createRunState(START_SEED, this.time.now, startStats)
 
     // ── Clear/seed the cross-scene registry BEFORE the first _emitHud (review MINOR — stale leak) ──
     // The registry (depth/biomeName/HP) persists across scenes, so a replayed run could briefly show
@@ -105,6 +123,10 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('playerHp', this.runState.hp)
     this.registry.set('playerMaxHp', this.runState.maxHp)
     this.registry.set('comboIndex', -1)
+    // §6.5 — seed the currency/weapon HUD keys too so the parallel HUD never flashes stale values.
+    this.registry.set('cells', this.runState.cells)
+    this.registry.set('gold', this.runState.gold)
+    this.registry.set('weapon', WEAPONS[this.runState.weaponId].name)
 
     // ── Effects + hit-stop (Decisions 23/24/26) ── the scene OWNS the hit-stop timer (it gates the
     // gameplay dt the whole world reads). Effects only REQUESTS a freeze via the callback (capped,
@@ -116,28 +138,36 @@ export class GameScene extends Phaser.Scene {
       this.hitstopTimer = Math.min(HITSTOP_CAP, Math.max(this.hitstopTimer, secs))
     })
 
-    // ── Combat pools (Decisions 16/28/30) ── one player + one enemy HitboxPool. PERSIST across
-    // rebuilds (the player keeps its pool; enemies share the enemy pool).
+    // ── Combat pools (Decisions 16/28/30/62) ── one player + one enemy HitboxPool + one player
+    // ProjectilePool (the ranged weapon fires from it). PERSIST across rebuilds.
     this.playerHitboxes = new HitboxPool(this, 'player')
     this.enemyHitboxes = new HitboxPool(this, 'enemy')
+    this.projectilePool = new ProjectilePool(this, 'player')
+
+    // ── Pickup pool (§6.5, Decision 54) ── pooled Cells/gold/scroll/weapon pickups; persists across
+    // rebuilds (live pickups are released on teardown). Enemy drops + generator pickups acquire from it.
+    this.pickupPool = new PickupPool(this)
 
     // ── Input + Player ── created ONCE; the Player is repositioned at each new entrance (it and its
-    // pool persist; only the level geometry/enemies/door rebuild).
+    // pools persist; only the level geometry/enemies/door rebuild).
     this.input2 = new Input(this)
-    this.player = new Player(this, 0, 0, this.playerHitboxes)
+    this.player = new Player(this, 0, 0, this.playerHitboxes, this.projectilePool)
     this.player.onDeath = () => this._onPlayerDeath()
-    // ── HP carry sync — EXACTLY ONCE, here in create() (review MAJOR, Decision 46) ── the Player
-    // seeds itself to MAX_HP in its constructor; we overwrite it with the RunState's carried HP a
-    // SINGLE time. This sync lives ONLY here — _buildLevel touches NEITHER player.hp NOR runState.hp,
-    // and _nextLevel writes runState.hp = player.hp exactly once BEFORE teardown — so HP carries
-    // between levels and is never accidentally refilled on a rebuild. (On a fresh run both are
-    // MAX_HP, so this is a no-op at run start; it matters when a future Hub seeds a non-full carry.)
+    // ── Apply the META-folded start stats to the Player (§6.5, Decision 60, AC53) ── raises maxHp +
+    // refills hp to it, sets the melee/dodge modifiers, equips the starting weapon. IDENTITY-safe: a
+    // fresh meta leaves the Phase-4 player exactly. This runs BEFORE the HP-carry sync below.
+    this.player.applyStartStats(startStats, WEAPONS)
+    // ── HP carry sync — EXACTLY ONCE, here in create() (review MAJOR, Decision 46/60) ── overwrite the
+    // player's hp with the RunState's carried HP a SINGLE time. BOTH were just seeded from the SAME
+    // upgraded maxHp (player via applyStartStats, runState via createRunState(startStats)), so on a
+    // FRESH run this is a no-op at the upgraded full HP — the upgrade is reflected, not stale (review
+    // MAJOR). It carries a non-full HP only when a future mid-run resume seeds runState.hp < maxHp.
     this.player.hp = this.runState.hp
 
-    // ── Enemy hurtbox group + per-level lists (rebuilt each level) ──
+    // ── Enemy hurtbox group + per-level enemy list (rebuilt each level) ──
     this.enemyHurtboxes = this.physics.add.group({ allowGravity: true })
     this.enemies = []
-    this.pickupRects = [] // placeholder pickup markers (destroyed on rebuild).
+    // (Pickups are now POOLED — this.pickupPool above — not a per-level rect list; §6.5.)
 
     // ── Persistent colliders (against the PLAYER COLLIDER + the enemy group) ── the solids/oneWay
     // colliders are re-wired per level in _buildLevel because the static groups are recreated; we
@@ -169,6 +199,35 @@ export class GameScene extends Phaser.Scene {
         const e = enemyRect.enemyRef
         return e && !e.dead && e.contactCooldownTimer <= 0 && this.player.isHittable()
       },
+      this,
+    )
+
+    // ── Projectile → enemy overlap (§6.5, Decision 62, review MAJOR) ── PERSISTENT (both pools/groups
+    // persist). A SEPARATE handler (_onProjectileHitEnemy) + a SEPARATE per-shot dedup — NOT the
+    // player's _onPlayerHitEnemy — because a projectile's hit geometry (backstab/knockback origin) must
+    // come from the PROJECTILE's position + travel dir, not the player's. The processFilter reuses the
+    // SAME per-shot-hitSet dedup pattern (a shot hits each enemy once).
+    this.physics.add.overlap(
+      this.projectilePool.group,
+      this.enemyHurtboxes,
+      (projRect, enemyRect) => this._onProjectileHitEnemy(projRect, enemyRect),
+      (projRect, enemyRect) => {
+        const pj = projRect.pj
+        const enemy = enemyRect.enemyRef
+        if (!pj.active || !enemy || !enemy.isHittable()) return false
+        return !pj.hitSet.has(enemy.id)
+      },
+      this,
+    )
+
+    // ── Pickup → player overlap (§6.5, Decision 54) ── PERSISTENT. ONE handler reads the kind tag and
+    // resolves collection (the economy logic lives HERE, not in the decoupled pool). The filter only
+    // fires for a live pickup (a released one is parked off-room + disabled).
+    this.physics.add.overlap(
+      this.player.collider,
+      this.pickupPool.group,
+      (_playerRect, pickupRect) => this._onPickup(pickupRect),
+      (_playerRect, pickupRect) => pickupRect.pk.active,
       this,
     )
 
@@ -246,12 +305,18 @@ export class GameScene extends Phaser.Scene {
       this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX })
     }
 
-    // ── Pickups (placeholder markers — economy is Phase 5, YAGNI) ── a primitive per spawn.
+    // ── Pickups (§6.5, Decision 54, AC48) ── the generator's desc.pickups (cell/gold) become REAL
+    // pooled pickups (the placeholder rects are gone — DRY: ONE pickup path). They're placed at the
+    // standable spawn point; the pool's gravity + the solids collider settle them on the platform.
     for (const p of desc.pickups) {
-      const color = PICKUP_COLORS[p.kind] ?? 0xffffff
-      const rect = this.add.rectangle(p.x, p.y, TILE_SIZE * 0.4, TILE_SIZE * 0.4, color)
-      this.pickupRects.push(rect)
+      this.pickupPool.acquire(p.x, p.y, p.kind)
     }
+    // ── Sparse weapon pickup (§6.5, Decision 63) ── a low FIXED per-level chance to offer ONE weapon
+    // to swap to, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the level pin intact,
+    // per the BLOCKER resolution). Deterministic per seed: a fresh mulberry32 off the level seed picks
+    // whether + which (so a replay places the same weapon). Placed at the level's first pickup spot (or
+    // the entrance if none) so it's reachable on the critical path.
+    this._maybePlaceWeaponPickup(desc)
 
     // ── Door (the exit, Decision 40) ── overlap fires _onDoorOverlap → _nextLevel (guarded).
     this.door = new Door(this, desc.exit, biome.colors.exit, () => this._nextLevel())
@@ -266,6 +331,8 @@ export class GameScene extends Phaser.Scene {
     // ── Level colliders (re-wired per level — the static groups are new each rebuild) ──
     this._solidColliders.push(this.physics.add.collider(this.player.collider, this.tileMap.solids))
     this._solidColliders.push(this.physics.add.collider(this.enemyHurtboxes, this.tileMap.solids))
+    // Pickups collide with solids so they arc + SETTLE on the platform below (§6.5, Decision 54).
+    this._solidColliders.push(this.physics.add.collider(this.pickupPool.group, this.tileMap.solids))
 
     // One-way collider (Decision 15) — reads the PLAYER's COLLIDER body (player.body.bottom), NEVER
     // the squash-scaled visual (review MINOR — the Phase-1/§6.1 invariant, preserved through this
@@ -343,6 +410,10 @@ export class GameScene extends Phaser.Scene {
     if (this.gameOver) return
     this.gameOver = true
     this.runState.hp = this.player.hp // final carried-HP snapshot (kept consistent; summary ignores it).
+    // Bank the run's Cells + best depth to the PERSISTENT meta ONCE (§6.5, Decision 59, AC51) — gold/
+    // scrolls are run-only and simply NOT passed (permadeath loses them). Under the gameOver guard so it
+    // fires exactly once per run. The summary carries cellsBanked for GameOver's readout.
+    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
     this.scene.start('GameOver', this.runState.summary(this.time.now, true))
   }
 
@@ -361,9 +432,8 @@ export class GameScene extends Phaser.Scene {
       e.forceDespawn()
     }
     this.enemies = []
-    // Pickups + level markers + door + tileMap.
-    for (const r of this.pickupRects) r.destroy()
-    this.pickupRects = []
+    // Pickups (pooled — released, not destroyed) + level markers + door + tileMap.
+    this.pickupPool.releaseAll() // §6.5 — live pickups don't carry across levels (release to the pool).
     for (const o of this._levelObjects) if (o && o.active) o.destroy()
     this._levelObjects = []
     if (this.door) {
@@ -374,9 +444,11 @@ export class GameScene extends Phaser.Scene {
       this.tileMap.destroy()
       this.tileMap = null
     }
-    // Release any live hitboxes so a frozen/in-flight swing doesn't dangle across the rebuild.
+    // Release any live hitboxes/projectiles so a frozen/in-flight swing/shot doesn't dangle across the
+    // rebuild (mirrors the hitbox cleanup; the pools persist, only their live members are released).
     this.playerHitboxes.releaseAll()
     this.enemyHitboxes.releaseAll()
+    this.projectilePool.releaseAll()
   }
 
   _updateHint() {
@@ -390,15 +462,35 @@ export class GameScene extends Phaser.Scene {
   }
 
   // Spawn an Enemy: build it (its strike draws from the shared enemyHitboxes pool, Decision 30),
-  // register its collider body as a hurtbox, wire the kill-count hook (Decision 47/AC46), and track it.
+  // register its collider body as a hurtbox, wire the kill-count + Cells-DROP hooks, and track it.
   _spawnEnemy(x, y, spec, patrolBounds) {
     const enemy = new Enemy(this, x, y, spec, this.enemyHitboxes, patrolBounds)
     enemy.onDeath = () => {
       this.runState.kills += 1 // bump the run's kill count for the GameOver summary (free; AC46).
     }
+    // ── Cells/loot drop hook (§6.5, Decision 54, AC48) ── on death the Enemy fires this with the
+    // captured death-center coords + the Cell count; we spawn pooled pickups there (a Cell always +
+    // a gold/scroll chance). The coords are captured in Enemy._die BEFORE the body is disabled (the
+    // review BLOCKER fix). Enemy stays self-contained (no pool import — just this callback).
+    enemy.onDrop = (dropX, dropY, count) => this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count)
     this.enemyHurtboxes.add(enemy.collider)
     this.enemies.push(enemy)
     return enemy
+  }
+
+  // ── _maybePlaceWeaponPickup(desc) (§6.5, Decision 63) ── deterministically (off the level seed)
+  // maybe place ONE weapon pickup so swapping is a real mid-run choice. Off the seeded level RNG (a
+  // fresh mulberry32) so it's NOT on the generator's pinned draw sequence — the level pin stays intact.
+  _maybePlaceWeaponPickup(desc) {
+    const rng = mulberry32((desc.seed ^ 0x5eed1234) >>> 0)
+    if (rng() >= WEAPON_PICKUP_CHANCE) return
+    // Pick a weapon that ISN'T the currently equipped one (a meaningful swap), else any.
+    const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
+    const pool = choices.length ? choices : WEAPON_PICKUP_POOL
+    const weaponId = pool[Math.floor(rng() * pool.length)]
+    // Place it at a spawn spot away from the entrance (the first pickup point, or the level midpoint).
+    const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId })
   }
 
   // ── Combat overlap callbacks (design §6.3 — unchanged from the Combat phase) ──
@@ -415,14 +507,88 @@ export class GameScene extends Phaser.Scene {
     const enemy = enemyRect.enemyRef
     if (!hb.active || !enemy || !enemy.isHittable() || hb.hitSet.has(enemy.id)) return
     hb.hitSet.add(enemy.id)
+    // PLAYER melee damage = swing × backstab × (meta meleeDamageMult × run scrollDamageMult), composed
+    // + rounded ONCE in resolveHit (§6.5, Decision 60 — the mult is PASSED IN, damage.js stays pure).
     const result = resolveHit(this.player.attackerShape, enemy.attackerShape, hb.swing, {
       allowBackstab: true,
+      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
     })
     enemy.onHit(result)
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
     })
+  }
+
+  // ── Projectile → enemy hit (§6.5, Decision 62, review MAJOR) ── a SEPARATE handler from the melee
+  // one: the attacker shape is the PROJECTILE's (its live position + travel dir), so backstab/knockback
+  // geometry derives from where the SHOT is — not the player. Reuses the SAME resolveHit + effects.hit
+  // pipeline (DRY). Player melee/scroll mults apply to the bow's projectile damage too (it's a player
+  // weapon). The shot dies on first hit (KISS — no pierce); the per-shot hitSet already deduped.
+  _onProjectileHitEnemy(projRect, enemyRect) {
+    const pj = projRect.pj
+    const enemy = enemyRect.enemyRef
+    if (!pj.active || !enemy || !enemy.isHittable() || pj.hitSet.has(enemy.id)) return
+    pj.hitSet.add(enemy.id)
+    // The projectile's spec carries damage/knockback (read like a swing row by resolveHit).
+    const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
+    const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
+      allowBackstab: true,
+      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
+    })
+    enemy.onHit(result)
+    this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
+      damage: result.damage,
+      isBackstab: result.isBackstab,
+    })
+    this.projectilePool.release(projRect) // KISS: the shot dies on first hit (no pierce).
+  }
+
+  // ── Pickup collection (§6.5, Decision 54/55/63, AC48/AC49) ── ONE handler reads the kind tag and
+  // routes to the right effect: cell → RunState.cells (banked at run end); gold → RunState.gold
+  // (run-only); scroll → arm the run-only scroll effect on RunState; weapon → swap the equipped weapon
+  // + record the id on RunState (so a level rebuild keeps it). A small collect pop (reusing the spark
+  // pool), then the pickup returns to the pool.
+  _onPickup(pickupRect) {
+    const pk = pickupRect.pk
+    if (!pk.active) return
+    switch (pk.kind) {
+      case 'cell':
+        this.runState.cells += 1 // META currency — banked at run end (AC49/AC51).
+        break
+      case 'gold':
+        this.runState.gold += pk.goldAmount // run-only currency (lost on death — AC49).
+        break
+      case 'scroll': {
+        const scroll = SCROLLS_BY_ID[pk.scrollId]
+        if (scroll) scroll.apply(this.runState) // arm the run-only boost (Decision 55) — never saved.
+        // A vitality scroll bumps RunState.scrollMaxHpBonus → reflect it on the live player NOW.
+        this._syncPlayerScrollStats()
+        break
+      }
+      case 'weapon': {
+        const weapon = WEAPONS[pk.weaponId]
+        if (weapon) {
+          this.player.equipWeapon(weapon) // resets the combo so the new moveset starts clean (Decision 63).
+          this.runState.weaponId = pk.weaponId // carried across level rebuilds.
+        }
+        break
+      }
+    }
+    // A small collect pop (reuse the spark pool — no new allocation).
+    this.effects.hit(pickupRect.body.center.x, pickupRect.body.center.y, { damage: 0 })
+    this.pickupPool.release(pickupRect)
+  }
+
+  // ── Sync run-only scroll stats onto the live Player (§6.5, Decision 60) ── scrollDamageMult is read
+  // LIVE at the hit site (no copy needed). scrollMaxHpBonus is a flat max-HP boost: raise the player's
+  // maxHp to base+bonus and HEAL by the just-added amount (so a vitality scroll both grows + tops up).
+  _syncPlayerScrollStats() {
+    this.player.scrollDamageMult = this.runState.scrollDamageMult
+    const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus
+    const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
+    this.player.maxHp = newMax
+    if (grew > 0) this.player.hp = Math.min(newMax, this.player.hp + grew) // heal by the grown amount.
   }
 
   _onEnemyHitPlayer(hitboxRect) {
@@ -459,10 +625,14 @@ export class GameScene extends Phaser.Scene {
     if (this.gameOver) return
     this.gameOver = true
     this.runState.hp = 0 // the run ended at 0 HP (kept consistent; the summary doesn't read hp).
+    // Bank the run's Cells + best depth to the PERSISTENT meta ONCE (§6.5, Decision 59, AC51). The
+    // run's gold/scrolls are DISCARDED (run-only — permadeath). Under the gameOver guard so it fires
+    // exactly once. Banking here (not GameOver) keeps the single writer next to the live RunState.
+    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
     this.hitstopTimer = 0.25
     this.cameras.main.flash(180, 200, 40, 40)
     this.cameras.main.shake(220, 0.01)
-    // Snapshot the summary NOW (RunState may be torn down with the scene) and route to GameOver.
+    // Snapshot the summary NOW (RunState may be torn down with the scene) and route to GameOver → Hub.
     const summary = this.runState.summary(this.time.now, false)
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
   }
@@ -477,6 +647,10 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('comboIndex', this.player.comboIndex)
     this.registry.set('depth', this.runState.depth)
     this.registry.set('biomeName', this.runState.biome().name)
+    // §6.5 (Decision 2/AC49) — live currency counters + equipped weapon name for the decoupled HUD.
+    this.registry.set('cells', this.runState.cells)
+    this.registry.set('gold', this.runState.gold)
+    this.registry.set('weapon', this.player.equippedWeapon.name)
   }
 
   // ── Per-frame tick (design §6.1/§6.3 — the dt boundary + hit-stop) ──
@@ -489,12 +663,22 @@ export class GameScene extends Phaser.Scene {
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight), but
     // keep ticking FX so the flash/pop plays out.
     if (!this.gameOver && !this.transitioning) {
+      // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
+      // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
+      // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held
+      // key/click fires exactly once per press.
+      if (inputState.attackPressed) this.player.attack()
       this.player.update(gdt, inputState)
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
     }
 
     this.playerHitboxes.tick(gdt)
     this.enemyHitboxes.tick(gdt)
+    // Projectiles tick on the GAMEPLAY dt so they FREEZE with the world during a hit-stop (Decision
+    // 26/62) — consistent with hitboxes/enemies. Pickups settle on REAL dt (cosmetic — keep their visual
+    // glued to the gravity-driven body even during a freeze).
+    this.projectilePool.tick(gdt)
+    this.pickupPool.tick()
 
     if (this.enemies.some((e) => e.removed)) {
       this.enemies = this.enemies.filter((e) => !e.removed)

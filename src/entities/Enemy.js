@@ -88,9 +88,15 @@ export class Enemy {
     this.state = STATE.IDLE
     this.dead = false
     // Optional scene hook fired ONCE when this enemy dies (Decision 47/AC46): GameScene sets it to
-    // bump runState.kills for the run summary. Kept null by default so the Enemy stays self-contained
-    // (the Cells economy is Phase 5 — only the free KILL COUNT is wired this phase).
+    // bump runState.kills for the run summary. Kept null by default so the Enemy stays self-contained.
     this.onDeath = null
+    // ── Cells/loot DROP hook (design §6.5, Decision 54, AC48) ── fired ONCE from _die() with the death
+    // CENTER coords + the count from dropCells(): `(x, y, count) => void`. GameScene sets it to
+    // `(x,y,count) => pickupPool.spawnDrop(x,y,...)` so the death drops pooled pickups. Kept null by
+    // default so the Enemy stays self-contained (NO Phaser/pool import here — the seam is just a
+    // callback the scene supplies, exactly like onDeath). The coords MUST be captured at/before _die()
+    // because _die() disables the body before the pop (so this.body.center is stale afterward).
+    this.onDrop = null
 
     this.patrolMinX = patrolMinX
     this.patrolMaxX = patrolMaxX
@@ -306,27 +312,33 @@ export class Enemy {
     return dx <= range && dy <= this.spec.detectHeight
   }
 
-  // ── Death: disable physics, fire the Cells drop HOOK, start the death pop (Decision 22). ──
+  // ── Death: capture the drop point, disable physics, fire the drop + kill hooks, start the pop. ──
+  // ORDER MATTERS (review BLOCKER): _die() disables the body, after which this.body.center is stale —
+  // so we capture the death CENTER coords FIRST, then disable, then fire onDrop with those captured
+  // coords + the count from dropCells(). (Decision 54 / §6.5.)
   _die() {
     if (this.dead) return // guard: runs exactly once.
     this.dead = true
     this.state = STATE.DEAD
+    // Capture the drop point at the death center BEFORE disabling the body (review BLOCKER).
+    const dropX = this.body.center.x
+    const dropY = this.body.center.y
     this.body.enable = false // stop colliding/overlapping immediately (no post-death contact dmg).
     this.body.setVelocity(0, 0)
     this._releaseStrike() // release only OUR live strike (not the shared pool — review MAJOR).
     this.deathTimer = 0.35 // s — how long the pop plays before despawn.
     this._kickScale(1.5, 1.5)
-    this.dropCells()
+    // Fire the drop hook ONCE with the captured coords + count (Decision 54). GameScene spawns pooled
+    // pickups there; null in a non-economy context (the Enemy stays self-contained).
+    const cells = this.dropCells()
+    if (this.onDrop) this.onDrop(dropX, dropY, cells)
     if (this.onDeath) this.onDeath() // fire the scene's kill-count hook ONCE (Decision 47/AC46).
   }
 
-  // HOOK (Decision 22): Phase 4 spawns real Cell pickups here. Now it just reports the count so the
-  // economy seam is visible/testable (AC24 — "the dropCells() hook fires (logged)").
+  // HOOK (Decision 54): the number of Cells this enemy drops on death. RETURNED (not logged) so _die()
+  // threads it to onDrop → the pooled pickups (§6.5). A future spec field could override the count.
   dropCells() {
-    const cells = 3 // placeholder drop count (a future spec field).
-    // eslint-disable-next-line no-console
-    console.log(`[Enemy ${this.id}] dropCells(${cells}) — Phase 4 spawns pickups here.`)
-    return cells
+    return this.spec.cellDrop ?? 3 // default drop count (spec can tune it per enemy type).
   }
 
   // Remove all GameObjects + tell the scene to drop us from its enemy list (guarded by `removed`).

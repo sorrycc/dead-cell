@@ -20,15 +20,23 @@ const KNOCKBACK_POP_Y = -180 // px/s — negative = up (Phaser y grows downward)
 
 // ── resolveHit(attacker, victim, swing, opts) → result ──
 // attacker / victim are plain shapes: { cx, facing } (body CENTER x + facing ∈ {-1,+1}).
-// swing is a row from combat/hitbox.js SWINGS (we read `damage` + `knockback`).
+// swing is a row from a weapon's swing table (we read `damage` + `knockback`).
 // opts.allowBackstab gates the crit OFF for a fairer enemy→player hit (Decision 19) — a config
 // flag, NOT a code fork: the SAME function serves both directions.
+// opts.damageMult (default 1) is the PLAYER's permanent meta × run-only scroll melee multiplier,
+// PASSED IN so damage.js stays PURE (the mult is never imported — Decision 60). It composes with the
+// backstab mult MULTIPLICATIVELY and is rounded ONCE at the very end (review MAJOR — order is pinned:
+// round-at-the-end so repeated mults don't drift, and so the identity case damageMult=1 reproduces the
+// EXACT pre-§6.5 pinned damages: round(swing.damage × backstabMult × 1) === the old round(...)).
+// CRITICAL (review MAJOR): enemy→player hits MUST pass damageMult=1 (the default) — only the PLAYER's
+// melee gets the player's multipliers, so enemies never scale with the player's upgrades.
 //
 // Backstab predicate (Decision 19): a hit lands "from behind" when the attacker is on the side
 // the victim is NOT facing. The victim faces +facing; the attacker is on the victim's "back" side
 // when sign(attacker.cx − victim.cx) === −victim.facing. The dead-zone rejects near-vertical hits.
 export function resolveHit(attacker, victim, swing, opts = {}) {
   const allowBackstab = opts.allowBackstab !== false // default ON (player→enemy)
+  const damageMult = opts.damageMult ?? 1 // default 1 → identity (enemy hits + the unmodified case).
 
   // Direction the victim gets shoved: AWAY from the attacker. If they're (near) coincident,
   // fall back to the attacker's own facing so the knockback is never a degenerate 0.
@@ -42,11 +50,14 @@ export function resolveHit(attacker, victim, swing, opts = {}) {
     Math.abs(attacker.cx - victim.cx) > BACKSTAB_DEADZONE &&
     attackerSide === -victim.facing
 
-  const damageMult = isBackstab ? BACKSTAB_DAMAGE_MULT : 1
+  const backstabDamageMult = isBackstab ? BACKSTAB_DAMAGE_MULT : 1
   const knockbackMult = isBackstab ? BACKSTAB_KNOCKBACK_MULT : 1
 
   return {
-    damage: Math.round(swing.damage * damageMult),
+    // Compose backstab × player mult, ROUND ONCE at the end (the pinned order). At damageMult=1 this
+    // is byte-identical to the pre-§6.5 round(swing.damage × backstabMult) — the verifier's section-2
+    // pins still hold (they call resolveHit WITHOUT damageMult, so it defaults to 1).
+    damage: Math.round(swing.damage * backstabDamageMult * damageMult),
     knockbackX: awayDir * swing.knockback * knockbackMult,
     knockbackY: KNOCKBACK_POP_Y,
     isBackstab,

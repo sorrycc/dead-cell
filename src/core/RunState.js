@@ -27,10 +27,20 @@ import { PLAYER_MAX_HP } from '../config/constants.js'
 // biome/seed sequence (AC47). >>> 0 keeps every seed an unsigned 32-bit int.
 const nextSeed = (s) => (s * 2654435761 + 0x9e3779b9) >>> 0
 
-// createRunState(startSeed, startedAt=0) → a plain object with advance()/isLastBiome()/biome()/
-// isRunComplete()/summary(). A factory (not a class) keeps it a pure value with methods — trivially
-// snapshot-able for the GameOver handoff (Decision 47) and node-constructible by the verifier.
-export function createRunState(startSeed, startedAt = 0) {
+// createRunState(startSeed, startedAt=0, startStats=null) → a plain object with advance()/isLastBiome()/
+// biome()/isRunComplete()/summary(). A factory (not a class) keeps it a pure value with methods —
+// trivially snapshot-able for the GameOver handoff (Decision 47) and node-constructible by the verifier.
+//
+// startStats (§6.5, Decision 60, review MAJOR — the HP-carry/upgrade reconciliation): an OPTIONAL
+// run-start stats object ({ maxHp, startWeaponId, … } from the META fold). When present, the run seeds
+// maxHp/hp from the UPGRADED maxHp and the equipped weapon from startWeaponId — so a +maxHP upgrade
+// makes a fresh run start at the upgraded full HP AND the carried HP reflects the upgrade (the single
+// create()-time sync site in GameScene then matches). When ABSENT (the verifier / a bare Phase-4 run),
+// it falls back to the bare PLAYER_MAX_HP + the sword — the pre-§6.5 identity (so the verifier's
+// determinism walk is unaffected: it never passes startStats, RunState stays node-constructible + pure).
+export function createRunState(startSeed, startedAt = 0, startStats = null) {
+  const maxHp = startStats ? startStats.maxHp : PLAYER_MAX_HP
+  const weaponId = startStats ? startStats.startWeaponId : 'sword'
   return {
     // ── Run identity + position ──
     seed: startSeed >>> 0, // current level seed; advance() chains it.
@@ -39,14 +49,23 @@ export function createRunState(startSeed, startedAt = 0) {
     depth: 0, // run-GLOBAL levels cleared so far (0 at the first level). Never resets → the
     //                // difficulty curve climbs across the whole run (AC42/AC45).
 
-    // ── Carried player state (Decision 46 — HP is CARRIED between levels, NOT refilled) ──
-    hp: PLAYER_MAX_HP, // seeded full; GameScene syncs player.hp ↔ this between levels.
-    maxHp: PLAYER_MAX_HP, // same PURE source the Player uses (constants.js) — no magic-100 drift.
+    // ── Carried player state (Decision 46/60 — HP is CARRIED between levels, NOT refilled; seeded from
+    // the META-folded maxHp so a +maxHP upgrade is reflected at run start — review MAJOR) ──
+    hp: maxHp, // seeded full (at the upgraded max); GameScene syncs player.hp ↔ this between levels.
+    maxHp, // the meta-folded maximum (or bare PLAYER_MAX_HP when no startStats — the identity).
 
-    // ── Currency / inventory PLACEHOLDERS (fields present; spending is Phase 5 — YAGNI) ──
-    cells: 0, // banked toward META later (Phase 7).
-    gold: 0, // run-only currency later (Phase 5).
-    inventory: [], // placeholder.
+    // ── Currencies (§6.5, Decision 55) — DIFFERENT lifetimes (review): cells survive death (banked to
+    // META at run end), gold/scrolls die with the run (permadeath loses them). ──
+    cells: 0, // collected this run; BANKED to MetaState at run end (AC49/AC51).
+    gold: 0, // run-only currency (lost on death, never banked).
+
+    // ── Run-only scroll modifiers (§6.5, Decision 55/60) — applied LIVE, never saved to meta. ──
+    scrollDamageMult: 1, // stacks ON TOP of the permanent meleeDamageMult at the hit site.
+    scrollMaxHpBonus: 0, // flat max-HP bonus from vitality scrolls (run-only; resets next run).
+
+    // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
+    // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──
+    weaponId, // the currently-equipped weapon id (carried across level rebuilds).
 
     // ── Run stats (for the GameOver summary, AC46) ──
     kills: 0, // GameScene bumps this on each enemy death.
@@ -93,6 +112,7 @@ export function createRunState(startSeed, startedAt = 0) {
         biomeName: this.biome().name,
         timeMs: now - this.startedAt,
         kills: this.kills,
+        cellsBanked: this.cells, // §6.5 — the Cells banked to META this run (GameOver shows it, AC51).
         completed: !!completed,
       }
     },
