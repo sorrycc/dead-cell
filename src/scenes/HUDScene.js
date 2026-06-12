@@ -1,13 +1,14 @@
 import Phaser from 'phaser'
 import { DESIGN_WIDTH } from '../config/constants.js'
 
-// ── HUDScene (design §6.0 + §6.3 + §6.4 + §6.5, Decision 2, AC23/AC45/AC49/AC54) ──
+// ── HUDScene (design §6.0 + §6.3 + §6.4 + §6.5 + §6.6, Decision 2, AC23/AC45/AC49/AC54/AC56) ──
 // Runs in PARALLEL over GameScene (launched, not started). It is DECOUPLED from gameplay (SOLID):
 // it reads player state from the scene REGISTRY (which GameScene writes each frame) and never
 // touches the world directly. The Combat phase adds a player HP bar (AC23); the Run-structure phase
 // (§6.4) adds a "DEPTH n · <BIOME>" readout (AC45); the meta-loop phase (§6.5) adds LIVE cells/gold
-// counters + the equipped-weapon name (AC49/AC54) — all still registry-only (no coupling, Decision 2).
-// GameScene owns this scene's lifecycle and stops it on shutdown.
+// counters + the equipped-weapon name (AC49/AC54); the Bosses phase (§6.6) adds a BOSS HP bar shown
+// ONLY while a boss lives (AC56) — all still registry-only (no coupling, Decision 2). GameScene owns
+// this scene's lifecycle and stops it on shutdown.
 
 const BAR_X = 16
 const BAR_Y = 16
@@ -17,6 +18,13 @@ const BAR_BG = 0x2c3e50 // empty/track color.
 const BAR_FILL = 0x2ecc71 // healthy fill (green).
 const BAR_FILL_LOW = 0xe74c3c // low-HP fill (red) below the threshold.
 const LOW_HP_FRAC = 0.3 // fraction below which the bar reads red.
+
+// ── Boss HP bar (§6.6, AC56) ── a wide bar across the TOP-CENTER, shown ONLY while a boss is active.
+const BOSS_BAR_W = 720
+const BOSS_BAR_H = 26
+const BOSS_BAR_Y = 24
+const BOSS_BAR_BG = 0x3b1f2b // dark track.
+const BOSS_BAR_FILL = 0x9b59b6 // boss fill (purple — matches the boss colour).
 
 export class HUDScene extends Phaser.Scene {
   constructor() {
@@ -56,6 +64,18 @@ export class HUDScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setScrollFactor(0)
 
+    // ── Boss HP bar (§6.6, AC56) ── created hidden; update() shows it ONLY while `bossActive` is true
+    // (GameScene sets it in the boss room and CLEARS it on death/teardown — review MINOR, so a stale
+    // prior-run boss bar never persists). Centered across the top with the boss name above it.
+    const bossX = (DESIGN_WIDTH - BOSS_BAR_W) / 2
+    this.bossTrack = this.add.rectangle(bossX, BOSS_BAR_Y, BOSS_BAR_W, BOSS_BAR_H, BOSS_BAR_BG).setOrigin(0, 0).setScrollFactor(0).setVisible(false)
+    this.bossFill = this.add.rectangle(bossX, BOSS_BAR_Y, BOSS_BAR_W, BOSS_BAR_H, BOSS_BAR_FILL).setOrigin(0, 0).setScrollFactor(0).setVisible(false)
+    this.bossLabel = this.add
+      .text(DESIGN_WIDTH / 2, BOSS_BAR_Y - 6, '', { fontFamily: 'monospace', fontSize: '20px', color: '#f5b041', fontStyle: 'bold' })
+      .setOrigin(0.5, 1)
+      .setScrollFactor(0)
+      .setVisible(false)
+
     // A small overlay tag (kept from Phase 0) proving the parallel scene draws on top.
     this.add
       .text(DESIGN_WIDTH - 16, 16, 'HUD (overlay)', {
@@ -89,5 +109,21 @@ export class HUDScene extends Phaser.Scene {
     this.cellsLabel.setText(`CELLS ${cells}`)
     this.goldLabel.setText(`GOLD ${gold}`)
     this.weaponLabel.setText(`WEAPON ${weapon}`)
+
+    // ── Boss HP bar (§6.6, AC56) ── shown ONLY while `bossActive` is true (GameScene sets it in the
+    // boss room and CLEARS it on death/teardown). When inactive the bar is hidden, so a stale prior-run
+    // value never shows (review MINOR — the registry survives scene restarts).
+    const bossActive = this.registry.get('bossActive') === true
+    const bossHp = this.registry.get('bossHp')
+    const bossMaxHp = this.registry.get('bossMaxHp')
+    const showBoss = bossActive && bossHp != null && bossMaxHp != null && this.bossFill
+    this.bossTrack.setVisible(showBoss)
+    this.bossFill.setVisible(showBoss)
+    this.bossLabel.setVisible(showBoss)
+    if (showBoss) {
+      const bfrac = Phaser.Math.Clamp(bossHp / bossMaxHp, 0, 1)
+      this.bossFill.width = BOSS_BAR_W * bfrac
+      this.bossLabel.setText(this.registry.get('bossName') || 'BOSS')
+    }
   }
 }

@@ -24,8 +24,16 @@ export const ROWS_MAX = 30
 //             intrinsically denser WITHOUT touching the depth curve (the two STACK in
 //             effectiveDifficulty, Decision 43). The verifier asserts it's non-decreasing along the
 //             ordered list (AC43).
-// `endsInBoss` : false for ALL biomes now — the boss gate is Phase 6 (the last biome's flag flips
-//             then). Present as a populated field so the §6.6 boss plugs into this seam, not a rewrite.
+// `endsInBoss` : the LAST biome (RAMPARTS) flips to true in Phase 6 (§6.6.2, Decision 66) — its FINAL
+//             level becomes a boss arena gated by RunState.isBossLevel(); the boss IS the run's gate
+//             (no exit Door). The other biomes stay false. `boss` (on the boss biome) keys into
+//             config/bosses.js (BOSSES[id]). Present as a populated field so the boss plugs into this
+//             seam, not a rewrite.
+// `enemyPool` : a WEIGHTED list of archetype ids ([{id,w}, …], Decision 68/AC59) the SCENE picks from
+//             per spawn off a FRESH seeded RNG (NOT the generator's pinned draw — so the level pin +
+//             determinism deep-equal stay intact). Each biome spawns a DIFFERENT mix (Prison = grunts;
+//             Sewers adds shooters; Ramparts adds chargers/flyers) → visibly distinct biomes. The
+//             verifier asserts every pool is non-empty + references only known archetype ids.
 
 // ── PRISON — the opening biome (Decision 39/43, tier 0). ──
 // All fields are pure data. The generator clamps cols/rows into [MIN,MAX] (AC28) and reads the
@@ -35,8 +43,10 @@ export const PRISON = {
   id: 'prison',
   name: 'Prison',
   difficultyTier: 0, // tier 0 — the opener (monotone index, ≤ SEWERS ≤ RAMPARTS).
-  endsInBoss: false, // boss gate is Phase 6 (the last biome flips this then).
+  endsInBoss: false, // not a boss biome.
   levels: 3, // BLOCKER 1: this biome spans 3 generated rooms before rolling to SEWERS.
+  // Enemy archetype pool (Decision 68/AC59) — Prison is all melee Grunts (a fair opener).
+  enemyPool: [{ id: 'grunt', w: 1 }],
   cols: 64, // grid width in tiles (within [COLS_MIN, COLS_MAX]).
   rows: 22, // grid height in tiles (within [ROWS_MIN, ROWS_MAX]).
   // Enemy count band (AC28): the generator draws n ∈ [minEnemies, maxEnemies] standable spawns.
@@ -73,6 +83,11 @@ export const SEWERS = {
   difficultyTier: 1,
   endsInBoss: false,
   levels: 3,
+  // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure).
+  enemyPool: [
+    { id: 'grunt', w: 3 },
+    { id: 'shooter', w: 2 },
+  ],
   cols: 76, // longer than PRISON (still within bounds) — a denser, twistier descent.
   rows: 24,
   minEnemies: 4, // denser than PRISON.
@@ -99,8 +114,16 @@ export const RAMPARTS = {
   id: 'ramparts',
   name: 'Ramparts',
   difficultyTier: 2,
-  endsInBoss: false,
-  levels: 3,
+  endsInBoss: true, // §6.6.2 (Decision 66) — the boss biome: its FINAL level is a boss arena (no Door).
+  boss: 'rampartsBoss', // keys into config/bosses.js BOSSES (The Warden) — the run's final gate (AC57).
+  levels: 3, // 2 normal generated levels + the boss arena as the last (levelInBiome === levels-1).
+  // Enemy pool (Decision 68/AC59) — Ramparts adds CHARGERS + FLYERS (the full variety) over the base.
+  enemyPool: [
+    { id: 'grunt', w: 2 },
+    { id: 'shooter', w: 2 },
+    { id: 'charger', w: 2 },
+    { id: 'flyer', w: 2 },
+  ],
   cols: 88, // longest (within bounds).
   rows: 26,
   minEnemies: 5, // densest base band.

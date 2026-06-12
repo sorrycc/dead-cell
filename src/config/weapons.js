@@ -80,10 +80,33 @@ export const BOW = {
   },
 }
 
+// ── SPEAR — a long-reach poke/spacing weapon (design §6.6.5, Decision 69, AC60 — the 4th weapon). ──
+// DISTINCT FEEL: the LONGEST reach of any melee weapon, low damage-per-hit, a fast 2–3 hit combo with a
+// forward LUNGE on each thrust — a spacing tool that hits from outside a grunt's swing range and pokes
+// chargers/flyers on approach (distinct from the balanced Sword, the slow/heavy Hammer, the ranged Bow).
+// It satisfies the existing pure swing-table contract VERBATIM, so the Player/Pickup/Hub generic code is
+// UNCHANGED (it reads the table by `type`/`swings`) and the verifier's WEAPON_ORDER.length goes 3→4
+// (AC60). It joins WEAPON_PICKUP_POOL in GameScene so it appears in runs (a found weapon — not a meta
+// unlock, KISS / §6.6.5).
+export const SPEAR = {
+  id: 'spear',
+  name: 'Spear',
+  type: 'melee',
+  swings: [
+    // Thrust 1 — a long low-commit poke. Big reach, small damage, snappy, a strong forward lunge so it
+    // closes/spaces. Generous chain window into the next thrust.
+    { reach: 86, halfHeight: 18, forward: 26, damage: 7, knockback: 200, active: 0.07, recovery: 0.12, comboWindow: 0.36, lunge: 160 },
+    // Thrust 2 — a second poke, slightly more reach + damage, still snappy.
+    { reach: 92, halfHeight: 18, forward: 28, damage: 9, knockback: 240, active: 0.08, recovery: 0.13, comboWindow: 0.36, lunge: 180 },
+    // Thrust 3 — FINISHER lunge: the longest reach, a harder hit + shove, a big committed lunge.
+    { reach: 104, halfHeight: 20, forward: 30, damage: 13, knockback: 380, active: 0.1, recovery: 0.2, comboWindow: 0.0, lunge: 280 },
+  ],
+}
+
 // ── WEAPONS (id → config) ── the lookup the Player/Pickup/GameScene use to equip by id. The
 // STARTING weapon id comes from the meta fold (config/upgrades.js START_WEAPON → startStats.
 // startWeaponId, Decision 60/63); the default is 'sword' so a fresh run plays exactly like Phase 4.
-export const WEAPONS = { sword: SWORD, hammer: HAMMER, bow: BOW }
+export const WEAPONS = { sword: SWORD, hammer: HAMMER, bow: BOW, spear: SPEAR }
 
-// The ordered list (for the verifier sweep + any list rendering). KISS — three weapons ship now.
-export const WEAPON_ORDER = [SWORD, HAMMER, BOW]
+// The ordered list (for the verifier sweep + any list rendering). FOUR weapons ship now (§6.6.5, AC60).
+export const WEAPON_ORDER = [SWORD, HAMMER, BOW, SPEAR]

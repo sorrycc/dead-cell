@@ -225,6 +225,15 @@ function mergeRuns(tiles, cols, rows, type) {
 // PURE. ONE mulberry32(seed) threads the whole generation so the SAME (seed, biome) is byte-
 // identical (AC19). Returns plain data (no functions) so it serializes for the regression pin.
 export function generateLevel(seed, biomeConfig) {
+  // ── BOSS-ARENA MODE (design §6.6.2, Decision 66, AC57) ── when GameScene passes a shallow-merged
+  // { ...biome, bossArena: true } for the boss level, emit a SIMPLE flat walled room instead of the
+  // staircase walk. It returns the SAME description SHAPE (so TileMap is unchanged) but with a DISTINCT
+  // contract (NO exit Door point, enemies:[], pickups:[], a bossSpawn, isBossArena:true). The headless
+  // verifier runs this branch through a SEPARATE assertion path (checkBossArena), NOT checkDescription
+  // (whose exit/traversability checks would reject a no-exit arena — the review BLOCKER). KISS: one
+  // floor → trivially traversable + reach-bounded by construction (nothing to fail).
+  if (biomeConfig.bossArena === true) return generateBossArena(seed, biomeConfig)
+
   const rng = mulberry32(seed)
 
   // ── 1) Dimensions (AC28) ── clamp the biome's cols/rows into the GLOBAL bounds (config/biomes.js
@@ -376,6 +385,97 @@ export function generateLevel(seed, biomeConfig) {
     enemies, // standable world spawn points + patrol bounds + spec.
     spawnCandidates, // SURPLUS enemy spawns for the depth-scaled enemyCountBonus (Decision 45).
     pickups, // standable world spawn points + kind.
+    seed,
+    biomeId: biomeConfig.id,
+  }
+}
+
+// ── generateBossArena(seed, biomeConfig) → a boss-arena description (design §6.6.2, Decision 66, AC57) ──
+// PURE. A FLAT walled room: a full-width SOLID floor, SOLID side walls + ceiling, NO staircase, NO
+// normal enemy/pickup spawns, NO exit Door point. A central `entrance` (the player drops in here, HP
+// carried), a `bossSpawn` to the right of it, and a band of HAZARD tiles along part of the floor (the
+// arena hazard — AC57; GameScene gives THESE static bodies in the boss room so they deal contact damage,
+// the BLOCKER #1 fix). Returns the SAME description shape as generateLevel so TileMap is unchanged, plus
+// `isBossArena:true` + `bossSpawn` and `enemies:[]`/`pickups:[]`/`spawnCandidates:[]` (no normal pool).
+// IMPORTANT (review BLOCKER): this description has NO meaningful `exit` for a Door — the boss is the
+// gate. We still emit an `exit` field EQUAL to the entrance ONLY as a harmless placeholder so any code
+// reading desc.exit doesn't crash; GameScene's _buildBossLevel does NOT place a Door (it branches on
+// isBossArena). The verifier routes this through checkBossArena (its own assertions), NOT
+// checkDescription — so the exit===entrance placeholder never trips the exit≠entrance check.
+//
+// HAZARD BODIES (review BLOCKER #1): the hazard tiles are emitted into the grid as TILE.HAZARD here, but
+// TileMap renders hazards body-less by default (Decision 29 — render-only). For the arena to deal
+// contact damage GameScene calls tileMap.enableHazardBodies() in the boss room, which promotes each
+// hazard rect to a STATIC Arcade body so the player×hazards overlap can actually fire (a normal level
+// never calls it, so normal hazards stay render-only — the §6.4 balance is preserved).
+function generateBossArena(seed, biomeConfig) {
+  // The arena uses the biome's cols/rows clamped to bounds (a wide, tall flat room reads as an arena).
+  const cols = clampInt(biomeConfig.cols, COLS_MIN, COLS_MAX)
+  const rows = clampInt(biomeConfig.rows, ROWS_MIN, ROWS_MAX)
+
+  const tiles = []
+  for (let r = 0; r < rows; r++) tiles.push(new Array(cols).fill(TILE.EMPTY))
+
+  // ── Shell: a full-width SOLID floor, SOLID side walls + ceiling (a sealed arena — no pit). ──
+  const floorRow = rows - 1
+  for (let c = 0; c < cols; c++) {
+    tiles[floorRow][c] = TILE.SOLID
+    tiles[0][c] = TILE.SOLID // a ceiling so the flyer-less arena reads as enclosed.
+  }
+  for (let r = 0; r < rows; r++) {
+    tiles[r][0] = TILE.SOLID
+    tiles[r][cols - 1] = TILE.SOLID
+  }
+
+  // ── Entrance: the player drops in left-of-center, feet on the floor. bossSpawn: right-of-center. ──
+  const standRow = floorRow - 1 // the EMPTY cell directly above the floor (feet on the floor top).
+  const entranceCol = clampInt(Math.floor(cols * 0.28), 2, cols - 3)
+  const bossCol = clampInt(Math.floor(cols * 0.72), 3, cols - 3)
+  const entrance = {
+    col: entranceCol,
+    row: standRow,
+    x: (entranceCol + 0.5) * TILE_SIZE,
+    y: (standRow + 0.5) * TILE_SIZE,
+  }
+  const bossSpawn = {
+    col: bossCol,
+    row: standRow,
+    x: (bossCol + 0.5) * TILE_SIZE,
+    // The boss is a tall body; spawn its CENTER a little above the floor so its base rests on it.
+    y: (standRow + 0.5) * TILE_SIZE,
+  }
+
+  // ── Arena HAZARD band (AC57) ── a contiguous strip of HAZARD tiles ON the floor row's surface in the
+  // CENTER of the arena (between the entrance and the boss), so crossing/positioning is dangerous but
+  // there's safe footing at both ends. Replace the floor TOP at those columns with a HAZARD tile sitting
+  // ON the floor (the floor SOLID stays beneath as footing geometry; the hazard renders on standRow).
+  const hazStart = clampInt(Math.floor(cols * 0.42), entranceCol + 2, cols - 4)
+  const hazEnd = clampInt(Math.floor(cols * 0.58), hazStart, bossCol - 2)
+  for (let c = hazStart; c <= hazEnd; c++) {
+    // Place the hazard on the standable row (it sits on the floor SOLID just below — never floating).
+    if (tiles[standRow][c] === TILE.EMPTY) tiles[standRow][c] = TILE.HAZARD
+  }
+
+  // ── platforms[] (Decision 37) ── merge the SOLID runs for TileMap bodies (the floor/walls/ceiling).
+  const solidRuns = mergeRuns(tiles, cols, rows, TILE.SOLID)
+
+  return {
+    cols,
+    rows,
+    tileSize: TILE_SIZE,
+    worldWidth: cols * TILE_SIZE,
+    worldHeight: rows * TILE_SIZE,
+    tiles,
+    entrance,
+    // Placeholder exit === entrance (the boss is the gate, NO Door — see the header). The verifier's
+    // boss-arena path never asserts exit≠entrance, so this is harmless.
+    exit: { ...entrance },
+    platforms: solidRuns,
+    enemies: [], // the boss replaces the normal pool (AC57).
+    spawnCandidates: [],
+    pickups: [],
+    bossSpawn, // GameScene spawns the Boss here (Decision 66/67).
+    isBossArena: true, // GameScene branches on this (no Door; wire the hazard overlap).
     seed,
     biomeId: biomeConfig.id,
   }

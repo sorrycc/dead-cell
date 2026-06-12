@@ -2,7 +2,8 @@ import Phaser from 'phaser'
 import { GRAVITY } from '../config/constants.js'
 import { Input } from '../core/Input.js'
 import { Player } from '../entities/Player.js'
-import { Enemy, BRUTE_SPEC } from '../entities/Enemy.js'
+import { Enemy } from '../entities/Enemy.js'
+import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
@@ -10,11 +11,13 @@ import { Effects } from '../effects/Effects.js'
 import { generateLevel, TILE_SIZE } from '../world/LevelGenerator.js'
 import { TileMap } from '../world/TileMap.js'
 import { createRunState } from '../core/RunState.js'
-import { scaleAtDepth, scaleSpec } from '../config/difficulty.js'
+import { scaleAtDepth, scaleSpec, scaleBossSpec } from '../config/difficulty.js'
 import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
 import { WEAPONS } from '../config/weapons.js'
+import { ENEMY_SPECS } from '../config/enemies.js'
+import { BOSSES } from '../config/bosses.js'
 import { SCROLLS_BY_ID } from '../config/scrolls.js'
 import { mulberry32 } from '../util/rng.js'
 
@@ -26,14 +29,16 @@ import { mulberry32 } from '../util/rng.js'
 // the generated exit. The Combat phase (§6.3) is unchanged: pooled melee hitboxes, the Brute FSM,
 // the damage pipeline, pooled FX + hit-stop.
 //
-// RUN STRUCTURE (§6.4, AC42–AC47): the scene OWNS one RunState (the active run) — the seed chain, the
-// ordered biome index + per-biome level counter, the run-global depth, and the carried HP. _buildLevel
-// reads the CURRENT biome from RunState and scales each enemy spawn by scaleAtDepth(depth) (a NEW spec
-// per spawn — never mutating BRUTE_SPEC), with a depth-scaled enemyCountBonus drawn from the generator's
-// spawnCandidates surplus. Reaching the Door ADVANCES the run (RunState.advance — depth always rises,
-// biome rolls only when its `levels` are exhausted) and rebuilds in place, carrying HP (NOT refilled).
-// Clearing the LAST biome's last Door → a "RUN COMPLETE" GameOver handoff; player death → a "GAME OVER"
-// GameOver handoff carrying a run summary (depth/biome/time/kills). Both fire exactly once (gameOver).
+// RUN STRUCTURE (§6.4/§6.6, AC42–AC47/AC57): the scene OWNS one RunState (the active run) — the seed
+// chain, the ordered biome index + per-biome level counter, the run-global depth, and the carried HP.
+// _buildLevel reads the CURRENT biome from RunState; for each enemy spawn it PICKS an archetype off the
+// biome's weighted enemyPool (a fresh seeded RNG, off the pinned draw — §6.6.4) and scaleSpec()s it by
+// scaleAtDepth(depth) (a NEW spec per spawn — never mutating the shared config spec), with a depth-scaled
+// enemyCountBonus drawn from the generator's spawnCandidates surplus. On the boss biome's FINAL level
+// (RunState.isBossLevel) it branches to _buildBossLevel (a flat arena + the boss, NO Door). Reaching a
+// Door ADVANCES the run (RunState.advance — depth always rises, biome rolls only when its `levels` are
+// exhausted) and rebuilds in place, carrying HP (NOT refilled). Player death → a "GAME OVER" handoff;
+// the boss kill → VictoryScene (§6.6.3). All run-end edges fire exactly once (the gameOver guard).
 //
 // HIT-STOP dt BOUNDARY (Decision 24/26): update() computes a REAL dt (delta/1000, clamped MAX_DT),
 // decays the hit-stop on real dt, and feeds a GAMEPLAY dt (gdt = hitstop>0 ? 0 : dt) to
@@ -76,6 +81,11 @@ const HITSTOP_CAP = 0.09 // s.
 // ── Enemy contact-damage (design §6.3, AC23/AC24) ── horizontal shove on a contact hit.
 const CONTACT_KNOCKBACK = 280 // px/s.
 
+// ── Arena hazard contact damage (design §6.6.2, AC57) ── the bite per hazard tick in the boss room.
+// Sized so standing on the spikes hurts (punishes bad positioning during the boss fight) but isn't an
+// instant kill — a few ticks before you must reposition. Boss room ONLY (the only hazard-body site).
+const HAZARD_DAMAGE = 8 // hp per tick.
+
 // ── Run start seed (design §6.2/§6.4, Decision 44/46) ── a fixed placeholder start seed for the run
 // (a Hub-chosen seed is Phase 7). RunState OWNS the deterministic next-seed chain now (it MOVED out of
 // this scene — DRY), so a given START_SEED replays the same biome/level sequence (AC47).
@@ -87,7 +97,9 @@ const START_SEED = 0xc0ffee
 // resolution). Low so swapping is a real mid-run choice (KISS). The weapon is the OTHER melee/ranged
 // option vs the one you start with (a meaningful pick), chosen off the level seed (deterministic).
 const WEAPON_PICKUP_CHANCE = 0.5 // ~half of levels carry a weapon to try.
-const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword'] // the ids a level pickup can offer.
+// The ids a level pickup can offer — now includes the SPEAR (§6.6.5, AC60) so the 4th weapon appears
+// in runs (it's a found weapon, not a meta unlock — Decision 69).
+const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword', 'spear']
 
 export class GameScene extends Phaser.Scene {
   constructor() {
@@ -127,6 +139,12 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
     this.registry.set('weapon', WEAPONS[this.runState.weaponId].name)
+    // §6.6.3 (review MINOR) — seed the boss HP-bar keys to "no boss" so a replayed run never flashes the
+    // PREVIOUS run's boss bar (the registry survives scene restarts — the same stale-leak HP guards for).
+    this.registry.set('bossActive', false)
+    this.registry.set('bossHp', null)
+    this.registry.set('bossMaxHp', null)
+    this.registry.set('bossName', '')
 
     // ── Effects + hit-stop (Decisions 23/24/26) ── the scene OWNS the hit-stop timer (it gates the
     // gameplay dt the whole world reads). Effects only REQUESTS a freeze via the callback (capped,
@@ -134,15 +152,23 @@ export class GameScene extends Phaser.Scene {
     this.hitstopTimer = 0
     this.gameOver = false
     this.transitioning = false // Decision 40 one-shot guard (see _nextLevel).
+    // ── Boss-room state (§6.6.3) — null/false until _buildBossLevel runs (the last level of RAMPARTS). ──
+    this.boss = null
+    this.isBossRoom = false
+    this._hazardCollider = null
+    this._hazardCooldown = 0
     this.effects = new Effects(this, (secs) => {
       this.hitstopTimer = Math.min(HITSTOP_CAP, Math.max(this.hitstopTimer, secs))
     })
 
-    // ── Combat pools (Decisions 16/28/30/62) ── one player + one enemy HitboxPool + one player
-    // ProjectilePool (the ranged weapon fires from it). PERSIST across rebuilds.
+    // ── Combat pools (Decisions 16/28/30/62/65) ── one player + one enemy HitboxPool + one PLAYER
+    // ProjectilePool (the bow fires from it) + one ENEMY ProjectilePool (the Shooter archetype + the
+    // boss volley fire from it — Decision 65, the 'enemy'-tagged instance). All PERSIST across rebuilds
+    // (created ONCE here, released on teardown) — the same lifecycle the player pool already has.
     this.playerHitboxes = new HitboxPool(this, 'player')
     this.enemyHitboxes = new HitboxPool(this, 'enemy')
     this.projectilePool = new ProjectilePool(this, 'player')
+    this.enemyProjectilePool = new ProjectilePool(this, 'enemy') // §6.6.3 (Decision 65) — enemy/boss shots.
 
     // ── Pickup pool (§6.5, Decision 54) ── pooled Cells/gold/scroll/weapon pickups; persists across
     // rebuilds (live pickups are released on teardown). Enemy drops + generator pickups acquire from it.
@@ -220,6 +246,24 @@ export class GameScene extends Phaser.Scene {
       this,
     )
 
+    // ── ENEMY projectile → player overlap (§6.6.3, Decision 65, review BLOCKER/MAJOR) ── the INVERSE of
+    // the player projectile→enemy overlap: an 'enemy'-tagged shot (Shooter/boss volley) hitting the
+    // player collider. PERSISTENT (both persist). A SEPARATE handler (_onEnemyProjectileHitPlayer) + a
+    // per-shot hitSet dedup against the PLAYER id — NOT the melee _onEnemyHitPlayer (which keys off a
+    // hitbox + the enemies[] list; a projectile is not a hitbox and the boss isn't in enemies[]). The
+    // filter fires only for a live shot the player can still take (so a frozen/parked shot never hits).
+    this.physics.add.overlap(
+      this.enemyProjectilePool.group,
+      this.player.collider,
+      (projRect) => this._onEnemyProjectileHitPlayer(projRect),
+      (projRect) => {
+        const pj = projRect.pj
+        if (!pj.active || !this.player.isHittable()) return false
+        return !pj.hitSet.has(this.player.id)
+      },
+      this,
+    )
+
     // ── Pickup → player overlap (§6.5, Decision 54) ── PERSISTENT. ONE handler reads the kind tag and
     // resolves collection (the economy logic lives HERE, not in the decoupled pool). The filter only
     // fires for a live pickup (a released one is parked off-room + disabled).
@@ -263,6 +307,14 @@ export class GameScene extends Phaser.Scene {
   // runState.hp — HP carry is owned by create() (the one-time sync) + _nextLevel (the pre-teardown
   // write), so a rebuild never refills HP.
   _buildLevel() {
+    // ── BOSS-LEVEL BRANCH (design §6.6.3, Decision 66/67, AC57) ── the ONE branch _buildLevel gains:
+    // when the run is on the boss biome's final level, build the boss ARENA instead of a normal level
+    // (a flat walled room with the boss, an arena hazard, and NO exit Door — the boss is the gate).
+    if (this.runState.isBossLevel()) {
+      this._buildBossLevel()
+      return
+    }
+
     const biome = this.runState.biome()
     const desc = generateLevel(this.runState.seed, biome)
     this.desc = desc
@@ -281,14 +333,18 @@ export class GameScene extends Phaser.Scene {
       .setAlpha(0.55)
     this._levelObjects.push(entMarker)
 
-    // ── Enemies, DEPTH-SCALED (design §6.4, Decision 45, AC45) ── each spawn gets a NEW spec derived
-    // by scaleSpec(BRUTE_SPEC, scaleAtDepth(depth)) — maxHp/contactDamage/speeds/swing.damage rise
-    // with the run-global depth, NEVER mutating the shared BRUTE_SPEC (the aliasing bug Decision 45
-    // avoids). Patrol bounds come FROM the generator (Decision 41 — the OWNING run's world span).
+    // ── Enemies, ARCHETYPE-PICKED + DEPTH-SCALED (design §6.4/§6.6.4, Decision 45/68, AC45/AC59) ── each
+    // spawn picks an archetype off the biome's weighted enemyPool via a FRESH seeded RNG (NOT the
+    // generator's pinned draw sequence — so the level pin + determinism deep-equal stay intact, the
+    // §6.5/§6.6.4 discipline) and then scaleSpec()s THAT archetype by scaleAtDepth(depth) — a NEW spec
+    // per spawn, never mutating the shared config spec (the aliasing bug Decision 45 avoids). Patrol
+    // bounds come FROM the generator (Decision 41 — the OWNING run's world span).
     const scale = scaleAtDepth(this.runState.depth)
+    const archetypeRng = mulberry32((desc.seed ^ 0xa11ce5 ^ this.runState.depth) >>> 0) // off-the-pin RNG.
     for (const e of desc.enemies) {
-      const spec = scaleSpec(BRUTE_SPEC, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX })
+      const base = this._pickArchetype(biome, archetypeRng)
+      const spec = scaleSpec(base, scale)
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc })
     }
 
     // ── enemyCountBonus (design §6.4, Decision 45 / review MAJOR — IMPLEMENTABLE source) ── at depth,
@@ -301,8 +357,9 @@ export class GameScene extends Phaser.Scene {
     const wantBonus = Math.min(scale.enemyCountBonus, Math.max(0, biome.maxEnemies - liveCount))
     for (let i = 0; i < wantBonus && i < desc.spawnCandidates.length; i++) {
       const e = desc.spawnCandidates[i]
-      const spec = scaleSpec(BRUTE_SPEC, scale)
-      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX })
+      const base = this._pickArchetype(biome, archetypeRng) // same off-the-pin RNG (Decision 68).
+      const spec = scaleSpec(base, scale)
+      this._spawnEnemy(e.x, e.y, spec, { patrolMinX: e.patrolMinX, patrolMaxX: e.patrolMaxX, worldDesc: desc })
     }
 
     // ── Pickups (§6.5, Decision 54, AC48) ── the generator's desc.pickups (cell/gold) become REAL
@@ -330,7 +387,12 @@ export class GameScene extends Phaser.Scene {
 
     // ── Level colliders (re-wired per level — the static groups are new each rebuild) ──
     this._solidColliders.push(this.physics.add.collider(this.player.collider, this.tileMap.solids))
-    this._solidColliders.push(this.physics.add.collider(this.enemyHurtboxes, this.tileMap.solids))
+    // Enemies collide with solids — EXCEPT a flyer (its processCallback returns false so it passes
+    // through floors/ledges and hovers; Decision 68/AC59, review MINOR). _enemyNotFlyer is the shared
+    // predicate (a flyer's body has _noSolids set in _spawnEnemy).
+    this._solidColliders.push(
+      this.physics.add.collider(this.enemyHurtboxes, this.tileMap.solids, null, (enemyRect) => this._enemyNotFlyer(enemyRect), this),
+    )
     // Pickups collide with solids so they arc + SETTLE on the platform below (§6.5, Decision 54).
     this._solidColliders.push(this.physics.add.collider(this.pickupPool.group, this.tileMap.solids))
 
@@ -351,19 +413,152 @@ export class GameScene extends Phaser.Scene {
         this,
       ),
     )
-    // Enemies also respect the one-way platforms (land on top, pass up through) — same predicate.
+    // Enemies also respect the one-way platforms (land on top, pass up through) — same predicate, but a
+    // FLYER passes through them too (it hovers — _enemyNotFlyer gates the collision).
     this._solidColliders.push(
       this.physics.add.collider(
         this.enemyHurtboxes,
         this.tileMap.oneWay,
         null,
         (enemyRect, platform) => {
+          if (!this._enemyNotFlyer(enemyRect)) return false
           const eBody = enemyRect.body
           return eBody.velocity.y >= 0 && eBody.bottom <= platform.body.top + ONE_WAY_EPS
         },
         this,
       ),
     )
+  }
+
+  // ── _enemyNotFlyer(enemyRect) ── the shared collider predicate (Decision 68/AC59): true for a normal
+  // enemy (so it collides with solids/oneWay), false for a flyer (so it passes through + hovers). Reads
+  // the per-body _noSolids flag set in _spawnEnemy. The boss is NOT a flyer (it walks the arena floor).
+  _enemyNotFlyer(enemyRect) {
+    const e = enemyRect.enemyRef
+    return !(e && e._noSolids)
+  }
+
+  // ── _buildBossLevel() (design §6.6.3, Decision 66/67, AC56/AC57/AC58) ── build the boss ARENA: a flat
+  // walled room (generateLevel with bossArena:true), the player at the central entrance (HP carried,
+  // never refilled — same rule), the depth-scaled Boss at desc.bossSpawn, the live arena-hazard overlap,
+  // and the boss HP bar. It places NEITHER a Door NOR a doorCollider (review MAJOR — so _teardownLevel's
+  // `if (this.door)`/`if (this.doorCollider)` guards are safe AND the run-complete-via-Door path can
+  // NEVER fire here — the boss is the gate, the COMPLETION-GATE note). The boss body is added to the
+  // SAME enemyHurtboxes group so the EXISTING player→enemy/projectile overlaps hit it — no new wiring.
+  _buildBossLevel() {
+    const biome = this.runState.biome()
+    // The boss arena is a DISTINCT pure generator branch (Decision 66) — a flat walled room with a
+    // bossSpawn, hazards, NO normal enemies/pickups, NO real exit. Shallow-merge bossArena:true.
+    const desc = generateLevel(this.runState.seed, { ...biome, bossArena: true })
+    this.desc = desc
+    this.tileMap = new TileMap(this, desc)
+    this.isBossRoom = true // a flag the HUD-clear + teardown read (review MINOR — boss-bar lifecycle).
+
+    // Reposition the player at the central entrance (HP carried — Decision 46, never refilled here).
+    this.player.body.reset(desc.entrance.x, desc.entrance.y)
+    this.player.rect.setPosition(desc.entrance.x, desc.entrance.y)
+
+    this._levelObjects = []
+    const entMarker = this.add
+      .rectangle(desc.entrance.x, desc.entrance.y, TILE_SIZE * 0.5, TILE_SIZE * 1.4, biome.colors.entrance)
+      .setAlpha(0.55)
+    this._levelObjects.push(entMarker)
+
+    // ── Spawn the Boss (depth-scaled — the boss biome is the DEEPEST, so this is the hardest, AC61). ──
+    // scaleBossSpec (NOT the enemy scaleSpec) folds maxHp + every attack's damage by the curve so a
+    // deeper boss is tankier AND hits harder (review MAJOR — the honest boss-scaling fold). The boss
+    // draws its slam/dash from enemyHitboxes + its volley from enemyProjectilePool (Decision 64/65).
+    const bossSpec = scaleBossSpec(BOSSES[biome.boss], scaleAtDepth(this.runState.depth))
+    this.boss = new Boss(this, desc.bossSpawn.x, desc.bossSpawn.y, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
+      minX: TILE_SIZE * 1.5,
+      maxX: desc.worldWidth - TILE_SIZE * 1.5,
+    })
+    this.boss.onBossDeath = () => this._onBossDefeated()
+    this.boss.onDeath = () => {
+      this.runState.kills += 1 // the boss counts as a kill for the summary.
+    }
+    this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the boss.
+
+    // ── Arena hazard (AC57, review BLOCKER #1) ── promote the arena's HAZARD tiles to STATIC bodies
+    // (boss room ONLY — enableHazardBodies) so the player×hazards overlap can actually fire, then wire
+    // that overlap to contact damage on a cooldown (reusing the contact-damage path). Outside the boss
+    // room hazards stay render-only (this is the only call site), so normal levels aren't lethal.
+    this.tileMap.enableHazardBodies()
+    this._hazardCooldown = 0 // s — gates the hazard contact tick (don't shred HP every frame).
+    this._hazardCollider = this.physics.add.overlap(
+      this.player.collider,
+      this.tileMap.hazardBodies,
+      () => this._onHazardContact(),
+      () => this._hazardCooldown <= 0 && this.player.isHittable() && !this.gameOver,
+      this,
+    )
+
+    // ── NO Door (Decision 67) ── the boss IS the gate. We leave this.door / this.doorCollider null, so
+    // _teardownLevel's guards skip them AND _onDoorOverlap/_nextLevel/_completeRun can never fire here.
+    this.door = null
+    this.doorCollider = null
+
+    // ── Boss HP bar (AC56 readability, review MINOR) ── emit bossActive + bossHp/bossMaxHp to the
+    // registry; the HUD shows the bar ONLY while bossActive is true. _emitHud refreshes bossHp each
+    // frame; _onBossDefeated/_teardownLevel CLEAR bossActive so a stale bar never persists into the
+    // next run (the registry survives scene restarts — the same stale-leak footgun HP already guards).
+    this.registry.set('bossActive', true)
+    this.registry.set('bossName', bossSpec.name)
+    this.registry.set('bossHp', this.boss.hp)
+    this.registry.set('bossMaxHp', this.boss.maxHp)
+
+    // ── Level colliders (the player + the boss stand on the floor; pickups n/a here but harmless). ──
+    this._solidColliders.push(this.physics.add.collider(this.player.collider, this.tileMap.solids))
+    this._solidColliders.push(
+      this.physics.add.collider(this.enemyHurtboxes, this.tileMap.solids, null, (enemyRect) => this._enemyNotFlyer(enemyRect), this),
+    )
+    this._solidColliders.push(this.physics.add.collider(this.pickupPool.group, this.tileMap.solids))
+
+    // eslint-disable-next-line no-console
+    console.log(`[GameScene] BOSS ROOM — ${bossSpec.name} (hp ${bossSpec.maxHp}) at depth ${this.runState.depth}`)
+  }
+
+  // ── _onHazardContact() (design §6.6.2, AC57) ── the arena-hazard contact tick: a fixed bite of damage
+  // on a cooldown (so standing on the spikes hurts but isn't an instant kill). Reuses the player.onHit
+  // pipeline (a synthetic upward-knockback hit so the player is bumped off the spikes). Boss room only.
+  _onHazardContact() {
+    if (this._hazardCooldown > 0 || !this.player.isHittable() || this.gameOver) return
+    this._hazardCooldown = 0.7 // s — min gap between hazard ticks.
+    // A synthetic hit: a fixed damage + a pop straight up (knockback origin below the player so it's
+    // shoved upward off the spikes). allowBackstab:false (a hazard never crits).
+    const swing = { damage: HAZARD_DAMAGE, knockback: 0 }
+    const attacker = { cx: this.player.body.center.x, facing: this.player.facing }
+    const result = resolveHit(attacker, this.player.attackerShape, swing, { allowBackstab: false })
+    result.knockbackY = -260 // override: pop straight up off the spikes.
+    this.player.onHit(result)
+    this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
+  }
+
+  // ── _onBossDefeated() (design §6.6.3, Decision 67, AC58) ── the boss-kill run-end edge. Shares the
+  // SAME guard ordering as _onPlayerDeath (review MAJOR — `if (this.gameOver) return` FIRST, then set
+  // it), so a same-frame boss-death + player-death can't BOTH bank: whichever sets gameOver first wins,
+  // the second early-returns. Banks the run ONCE via the SAME bankRun single-writer (cells + bestDepth;
+  // gold/scrolls discarded — permadeath), clears the boss HP bar, snapshots the summary (completed:true),
+  // and routes to Victory → Hub.
+  _onBossDefeated() {
+    if (this.gameOver) return
+    this.gameOver = true
+    this.runState.hp = this.player.hp // final carried-HP snapshot (kept consistent; summary ignores it).
+    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth }) // the ONE bankRun writer.
+    this._clearBossHud() // drop the boss HP bar so it never persists into the next run (review MINOR).
+    // A short victory flourish (freeze/flash) then hand off to Victory with the run summary.
+    this.hitstopTimer = 0.2
+    this.cameras.main.flash(260, 88, 214, 141)
+    const summary = this.runState.summary(this.time.now, true)
+    this.time.delayedCall(900, () => this.scene.start('Victory', summary))
+  }
+
+  // Clear the boss HP-bar registry keys (review MINOR — the registry survives scene restarts, so a
+  // stale prior-run boss bar would otherwise flash on the next run's HUD until overwritten).
+  _clearBossHud() {
+    this.registry.set('bossActive', false)
+    this.registry.set('bossHp', null)
+    this.registry.set('bossMaxHp', null)
   }
 
   // ── Advance to the next generated level (Decision 40, review MAJOR re-entrancy) ── DEFERRED: the
@@ -426,6 +621,21 @@ export class GameScene extends Phaser.Scene {
       this.physics.world.removeCollider(this.doorCollider)
       this.doorCollider = null
     }
+    // Boss-room teardown (§6.6.3): remove the hazard overlap + boss; clear the boss HP bar (review
+    // MINOR — so a stale boss bar never persists into the next room/run).
+    if (this._hazardCollider) {
+      this.physics.world.removeCollider(this._hazardCollider)
+      this._hazardCollider = null
+    }
+    if (this.boss) {
+      this.enemyHurtboxes.remove(this.boss.collider, false, false)
+      this.boss.forceDespawn()
+      this.boss = null
+    }
+    if (this.isBossRoom) {
+      this._clearBossHud()
+      this.isBossRoom = false
+    }
     // Enemies: despawn each (destroys its GameObjects) + clear the hurtbox group membership.
     for (const e of this.enemies) {
       this.enemyHurtboxes.remove(e.collider, false, false)
@@ -449,6 +659,7 @@ export class GameScene extends Phaser.Scene {
     this.playerHitboxes.releaseAll()
     this.enemyHitboxes.releaseAll()
     this.projectilePool.releaseAll()
+    this.enemyProjectilePool.releaseAll() // §6.6.3 — drop any in-flight enemy/boss shots on rebuild.
   }
 
   _updateHint() {
@@ -461,10 +672,37 @@ export class GameScene extends Phaser.Scene {
     )
   }
 
-  // Spawn an Enemy: build it (its strike draws from the shared enemyHitboxes pool, Decision 30),
-  // register its collider body as a hurtbox, wire the kill-count + Cells-DROP hooks, and track it.
-  _spawnEnemy(x, y, spec, patrolBounds) {
-    const enemy = new Enemy(this, x, y, spec, this.enemyHitboxes, patrolBounds)
+  // ── _pickArchetype(biome, rng) (design §6.6.4, Decision 68, AC59) ── pick a base archetype spec off
+  // the biome's WEIGHTED enemyPool via the passed FRESH seeded RNG (off the generator's pinned draw, so
+  // the level pin is untouched). Returns the PURE config spec (config/enemies.js) for the chosen id; the
+  // caller scaleSpec()s it (a NEW per-spawn spec). Falls back to GRUNT for an unknown/empty pool (KISS).
+  _pickArchetype(biome, rng) {
+    const pool = biome.enemyPool && biome.enemyPool.length ? biome.enemyPool : [{ id: 'grunt', w: 1 }]
+    const total = pool.reduce((s, e) => s + (e.w || 1), 0)
+    let r = rng() * total
+    for (const entry of pool) {
+      r -= entry.w || 1
+      if (r <= 0) return ENEMY_SPECS[entry.id] || ENEMY_SPECS.grunt
+    }
+    return ENEMY_SPECS[pool[pool.length - 1].id] || ENEMY_SPECS.grunt
+  }
+
+  // Spawn an Enemy: build it (its melee strike draws from the shared enemyHitboxes pool, Decision 30;
+  // the SHOOTER fires from the enemyProjectilePool, Decision 65), register its collider body as a
+  // hurtbox, wire the kill-count + Cells-DROP hooks, and track it. A FLYER (spec.noGravity) opts OUT of
+  // the per-level solids/oneWay colliders (review MINOR — it isn't pulled by the group default + doesn't
+  // stand on the floor; its body gravity is off in the Enemy ctor) and patrols the WHOLE arena width.
+  _spawnEnemy(x, y, spec, { patrolMinX, patrolMaxX, worldDesc } = {}) {
+    // A flyer ignores the pit — its patrol bounds are the whole interior width (Decision 68/AC59).
+    if (spec.noGravity && worldDesc) {
+      patrolMinX = TILE_SIZE * 1.5
+      patrolMaxX = worldDesc.worldWidth - TILE_SIZE * 1.5
+    }
+    const enemy = new Enemy(this, x, y, spec, this.enemyHitboxes, {
+      patrolMinX,
+      patrolMaxX,
+      projectilePool: this.enemyProjectilePool,
+    })
     enemy.onDeath = () => {
       this.runState.kills += 1 // bump the run's kill count for the GameOver summary (free; AC46).
     }
@@ -474,6 +712,12 @@ export class GameScene extends Phaser.Scene {
     // review BLOCKER fix). Enemy stays self-contained (no pool import — just this callback).
     enemy.onDrop = (dropX, dropY, count) => this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count)
     this.enemyHurtboxes.add(enemy.collider)
+    // FLYER: exclude its body from the solids/oneWay colliders so it isn't stopped by / standing on the
+    // floor (it hovers). The collider was added to enemyHurtboxes above (so player hits still land); the
+    // per-level solid colliders are registered against the WHOLE group, so we tell Arcade to ignore this
+    // body by disabling its world gravity (done in the ctor) AND parking it OUT of the solids check via a
+    // per-body flag the collider's processCallback respects (see the oneWay/solid colliders below).
+    enemy._noSolids = !!spec.noGravity
     this.enemies.push(enemy)
     return enemy
   }
@@ -544,6 +788,24 @@ export class GameScene extends Phaser.Scene {
     this.projectilePool.release(projRect) // KISS: the shot dies on first hit (no pierce).
   }
 
+  // ── ENEMY projectile → player hit (§6.6.3, Decision 65, review BLOCKER/MAJOR) ── the INVERSE of
+  // _onProjectileHitEnemy: an 'enemy'-tagged shot (Shooter/boss volley) hitting the PLAYER. Reads the
+  // PROJECTILE's attackerShape (its live position + travel dir — NOT the firer's), builds a swing from
+  // the shot's spec, resolves via the SAME resolveHit pipeline with allowBackstab:false + damageMult:1
+  // (enemies NEVER get the player's melee/scroll mults — the review-pinned rule in damage.js), applies
+  // it to the player, and releases the shot on hit. A per-shot hitSet dedup (already filtered) stops a
+  // multi-frame-alive shot from re-hitting the player.
+  _onEnemyProjectileHitPlayer(projRect) {
+    const pj = projRect.pj
+    if (!pj.active || !this.player.isHittable() || pj.hitSet.has(this.player.id)) return
+    pj.hitSet.add(this.player.id)
+    const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
+    const result = resolveHit(pj.attackerShape, this.player.attackerShape, swing, { allowBackstab: false })
+    this.player.onHit(result)
+    this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
+    this.enemyProjectilePool.release(projRect) // the shot dies on first hit (no pierce).
+  }
+
   // ── Pickup collection (§6.5, Decision 54/55/63, AC48/AC49) ── ONE handler reads the kind tag and
   // routes to the right effect: cell → RunState.cells (banked at run end); gold → RunState.gold
   // (run-only); scroll → arm the run-only scroll effect on RunState; weapon → swap the equipped weapon
@@ -609,7 +871,12 @@ export class GameScene extends Phaser.Scene {
     const enemy = enemyRect.enemyRef
     if (!enemy || enemy.dead || enemy.contactCooldownTimer > 0 || !this.player.isHittable()) return
     enemy.contactCooldownTimer = enemy.spec.contactCooldown
-    const contactSwing = { damage: enemy.spec.contactDamage, knockback: CONTACT_KNOCKBACK }
+    // The contact bite. An entity may expose contactDamage() to vary it dynamically — the BOSS returns
+    // its DASH damage while dashing (a lunge that connects hits harder than a brush) and its base contact
+    // otherwise (§6.6.1). A normal enemy has no contactDamage() method → fall back to spec.contactDamage.
+    const dmg = typeof enemy.contactDamage === 'function' ? enemy.contactDamage() : enemy.spec.contactDamage
+    const kb = typeof enemy.contactKnockback === 'function' ? enemy.contactKnockback() : CONTACT_KNOCKBACK
+    const contactSwing = { damage: dmg, knockback: kb }
     const result = resolveHit(enemy.attackerShape, this.player.attackerShape, contactSwing, {
       allowBackstab: false,
     })
@@ -651,6 +918,9 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
     this.registry.set('weapon', this.player.equippedWeapon.name)
+    // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
+    // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.
+    if (this.boss && !this.boss.dead) this.registry.set('bossHp', this.boss.hp)
   }
 
   // ── Per-frame tick (design §6.1/§6.3 — the dt boundary + hit-stop) ──
@@ -660,6 +930,9 @@ export class GameScene extends Phaser.Scene {
     const gdt = this.hitstopTimer > 0 ? 0 : dt
 
     const inputState = this.input2.sample()
+    // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
+    if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
+
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight), but
     // keep ticking FX so the flash/pop plays out.
     if (!this.gameOver && !this.transitioning) {
@@ -670,6 +943,8 @@ export class GameScene extends Phaser.Scene {
       if (inputState.attackPressed) this.player.attack()
       this.player.update(gdt, inputState)
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
+      // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.
+      if (this.boss && !this.boss.removed) this.boss.update(gdt, { player: this.player, effects: this.effects })
     }
 
     this.playerHitboxes.tick(gdt)
@@ -678,6 +953,7 @@ export class GameScene extends Phaser.Scene {
     // 26/62) — consistent with hitboxes/enemies. Pickups settle on REAL dt (cosmetic — keep their visual
     // glued to the gravity-driven body even during a freeze).
     this.projectilePool.tick(gdt)
+    this.enemyProjectilePool.tick(gdt) // §6.6.3 — the enemy/boss shots, same hit-stop boundary.
     this.pickupPool.tick()
 
     if (this.enemies.some((e) => e.removed)) {

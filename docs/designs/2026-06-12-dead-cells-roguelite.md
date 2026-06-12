@@ -327,10 +327,73 @@ saves; level editor.
     fold whose output stats are ≥ the base (an upgrade never makes you weaker), and the weapon swing
     tables are well-formed (every weapon has a usable moveset). The economy/meta math stays Phaser-free.
 
-**Phase 6 — Bosses:**
+**Phase 6 — Bosses + richness — THIS PHASE — fully specified:**
 
-- **AC-P6.** A multi-phase boss telegraphs attacks, transitions phases at an HP threshold, and on
-  defeat triggers Victory.
+> NOTE ON SCOPE + AC NUMBERING. The orchestrator's "Bosses + richness" step delivers the satisfying-
+> playability cap on top of the live meta-loop: a **multi-phase boss** in a dedicated boss room ending
+> the last biome, a **VictoryScene** on the final-boss kill, plus the **VARIETY** the vision asks for
+> (≥4 enemy types, ≥4 weapons, ≥3 biomes already shipped — kept ≥3), and a **BALANCE pass** so a
+> skilled clean run is winnable and careless play loses. AC NUMBERING (continuing the §3 convention —
+> reuse the next free integers, never colliding with Combat's 20–26, Levels' 19/27–30, Run-structure's
+> 42–47, or Meta's 48–55): the fully-specified Phase-6 ACs are **56–62**. The old lettered `AC-P6`
+> placeholder is SUBSUMED by these.
+
+56. **Multi-phase Boss with telegraphed attacks + HP-threshold phase change.** `entities/Boss.js` is a
+    PLAIN class (the Decision-10 shape, like `Enemy`): it HOLDS an Arcade body (its hurtbox + contact
+    source), a big visible `rect`, and runs an explicit FSM with TELEGRAPHED attack patterns drawn from
+    a `phases[]` table. It has ≥2 PHASES gated by HP thresholds (e.g. phase 2 enters at ≤50% HP): on a
+    phase change it flashes/announces, may add a new attack to its pattern, and gets faster/denser. Each
+    attack TELEGRAPHS (a readable wind-up colour + pause) before the damaging strike, so attacks are
+    dodgeable (the genre contract). It reuses the SAME combat pipeline as `Enemy` (the shared
+    `enemyHitboxes` pool + `resolveHit` + `effects.hit`), takes player hits via `onHit(result)` (HP −,
+    knockback, hit-iframe, hurt reaction) and damages the player on contact + on its strikes.
+
+57. **Dedicated boss room at the end of the boss biome, gated by `endsInBoss`.** The LAST biome's
+    `endsInBoss` flag flips to `true`; the boss biome's FINAL level (its last `levelInBiome`) is a
+    **boss arena** — a flat, walled, pit-free room (NO exit Door) where the boss spawns instead of the
+    normal enemy pool. `RunState`/the generator expose enough for GameScene to know "this level is the
+    boss room" (`isBossLevel()`). The arena has at least one **arena hazard** wired live (the HAZARD
+    tiles deal contact damage in the boss room) so the space is dangerous, not a flat plain. Reaching
+    the boss room is reach-bounded + traversable like every other level (the verifier still passes).
+
+58. **Defeating the FINAL boss → VictoryScene.** When the boss biome's boss dies, GameScene hands off to
+    `scenes/VictoryScene.js` (no longer the Phase-0 stub bounce) carrying the run SUMMARY (depth, biome,
+    time, kills, cellsBanked) — the run is WON. The run's Cells + best depth are BANKED to permanent meta
+    EXACTLY ONCE (the same `bankRun` single-writer guard as death/run-complete), gold/scrolls discarded
+    (permadeath). Victory routes back to the **Hub** (banked Cells immediately spendable). The boss-kill
+    edge fires exactly once (guarded), and player death in the boss room still routes to GameOver.
+
+59. **≥4 distinct enemy types wired into the biome enemy pools.** `entities/Enemy.js` ships ≥4 concrete
+    SPECS with DISTINCT behaviour (the FSM is reused; the specs + a small per-archetype tick hook drive
+    the variety): a **melee Grunt** (the current Brute), a **ranged Shooter** (keeps distance, fires a
+    pooled projectile from the enemy `ProjectilePool`), a **Charger** (winds up then dashes across the
+    platform), and a **Flyer** (ignores gravity, hovers + swoops). `config/biomes.js` gains a per-biome
+    `enemyPool` (weighted archetype ids) so each biome spawns a DIFFERENT mix (Prison = grunts; Sewers
+    adds shooters; Ramparts adds chargers/flyers). The generator still emits generic spawn POINTS; the
+    SCENE picks the archetype per spawn off the seeded level RNG (deterministic, not on the pinned draw
+    sequence — same discipline as the §6.5 weapon pickup). `npm run verify` asserts every biome's
+    `enemyPool` is non-empty + references only known archetype ids.
+
+60. **≥4 weapons with distinct movesets.** `config/weapons.js` grows from 3 to **≥4** by adding one more
+    distinct weapon (a **Spear/Dagger** family — e.g. a long-reach low-commit `Spear` with a lunging
+    thrust, OR a fast `Daggers` with a high-crit short combo). It satisfies the SAME pure swing-table
+    contract (`type`, well-formed `swings`, `projectile` iff ranged) the verifier already checks, so the
+    Player/Pickup/Hub code is UNCHANGED (it reads the table generically). The new weapon joins the weapon-
+    pickup pool so it appears in runs.
+
+61. **BALANCE pass — winnable-but-punishing.** A tuning pass over the difficulty curve
+    (`config/difficulty.js`), the biome enemy bands/pools, the boss HP/damage, and player/weapon damage so
+    that: a SKILLED clean run (dodging telegraphs, backstabbing, managing HP) can reach + beat the final
+    boss; a CARELESS run (face-tanking, ignoring telegraphs) dies. The balance is expressed as DATA in the
+    pure configs (no magic numbers buried in scenes), so `npm run verify` re-proves the curve stays
+    monotone-non-decreasing across the whole run INCLUDING the boss room, and the boss biome remains the
+    hardest tier. A documented "winnability" sanity (TTK/DPS rough budget) is recorded in the Decision Log.
+
+62. **Polish + green gates + README.** `npm run build` AND `npm run verify` are BOTH green. `README.md` is
+    updated with the full controls, how-to-play (the Hub→Run→Boss→Victory loop), run instructions, and the
+    design-doc reference. The game plays as a coherent, replayable Dead-Cells-like vertical slice: Title →
+    Hub (spend Cells) → procedural multi-biome run (4 enemy types, 4 weapons, scaling difficulty) → boss
+    arena → Victory/GameOver → bank Cells → Hub. No new external assets (primitives only).
 
 **Phase 7 — *(SUBSUMED into Phase 5)*** — the Hub + localStorage meta-progression that the skeleton
 parked here is delivered as part of the Phase-5 meta-loop above (AC50–AC53). This slot is retained for
@@ -1111,6 +1174,91 @@ a future per-biome curve reset.
   fixed per-level chance) so swapping is a real mid-run choice, but the count stays low (KISS). The
   `inventory` placeholder on RunState (§6.4) is repurposed to hold the equipped `weaponId` (one field, not
   a list — the array placeholder becomes a scalar; the verifier doesn't read it, so no contract breaks).
+
+> Decisions 64–70 are the **Bosses + richness** phase (§6.6). They are final for this phase.
+
+**64. Boss = a SEPARATE plain class (not an `Enemy` subclass), pattern/phase FSM, reusing the shared pools**
+- Options: A) subclass `Enemy` and override states · B) a peer `entities/Boss.js` plain class with its own
+  pattern/phase FSM, sharing ONLY the pure `damage.js` + the existing pooled hitboxes/projectiles + the
+  enemy hurtbox group.
+- Decision: **B)** — `Enemy`'s state set is patrol/chase/attack (a roaming mob); a boss is choose→
+  telegraph→strike→recover patterns gated by HP-threshold PHASES. Subclassing would fight `Enemy`'s state
+  machine + spawn dead-weight states (patrol on a stationary boss). A peer class is KISS + SOLID (each
+  class one responsibility) and still DRY where it matters: the boss is added to the SAME `enemyHurtboxes`
+  group (so the existing player→enemy overlaps hit it with NO new wiring), its strikes acquire from the
+  SAME `enemyHitboxes` pool / the enemy `ProjectilePool`, and it takes hits via the SAME `onHit(result)`
+  shape ticked on the SAME `(gdt, ctx)` hit-stop boundary (Decision 26). Phases are a guarded HP-threshold
+  edge (mirrors the `gameOver`/phase-change single-fire guards). The boss does NOT take long hitstun (it
+  would trivialise the fight) — a brief flinch that never interrupts a committed, already-telegraphed
+  strike, so the dodge-the-telegraph contract holds.
+
+**65. Enemy projectiles = the SAME `ProjectilePool` class, instanced with an `'enemy'` tag**
+- Options: A) a new enemy-projectile class · B) reuse `combat/ProjectilePool.js` (already generic over an
+  owner tag) with `'enemy'` + an overlap targeting the PLAYER collider.
+- Decision: **B)** — the pool is already owner-agnostic (the Bow uses `'player'`). The Shooter archetype +
+  the boss volley fire from an `'enemy'`-tagged instance whose overlap hits the player collider (the mirror
+  of the player pool → enemy hurtboxes). One class, two instances, no new pooled type — DRY, the mandated
+  pooling discipline reused verbatim. Created once in `create()`, persists across rebuilds, released on
+  teardown (same lifecycle as the player pool).
+
+**66. Boss arena = a generator MODE + an `isBossLevel()` predicate + the existing `endsInBoss`/`hazards` seams**
+- Options: A) hand-build the boss room as a special-case scene branch with literal geometry · B) extend the
+  PURE generator with a `bossArena` mode that emits a flat walled room (same description SHAPE), gate it on
+  a PURE `RunState.isBossLevel()`, flip `RAMPARTS.endsInBoss=true`, and wire the already-exposed `hazards`
+  group for arena damage.
+- Decision: **B)** — keeps determinism + the headless verifier intact (the arena is still a pure
+  `generateLevel` output, separately pinned) and reuses the seams the earlier phases deliberately left:
+  `endsInBoss` is already a populated field (Decision 43), `TileMap.hazards` is already exposed "for Phase 5
+  to wire damage" (Decision 29 — now Phase 6 uses it, in the boss room ONLY so normal levels don't become
+  lethal + the §6.4 balance is preserved). `isBossLevel()` (PURE) is the SINGLE branch GameScene reads.
+  The arena is one floor → trivially reach-bounded + traversable, so AC27/AC28 still pass for it. No exit
+  Door — the boss IS the gate (Decision 67).
+
+**67. Boss-kill → VictoryScene → Hub; banking reuses the single-writer `bankRun` guard**
+- Options: A) a bespoke victory/banking path · B) point the boss-death hook at the EXISTING run-end shape:
+  `meta.bankRun()` ONCE under the `gameOver` guard, snapshot `summary(..., completed:true)`, `scene.start
+  ('Victory', summary)`, Victory → Hub.
+- Decision: **B)** — death, run-complete, and boss-victory are the SAME run-end event with different
+  headers; they MUST share the one banking writer (banked exactly once, gold/scrolls discarded — permadeath)
+  or the meta economy desyncs. VictoryScene becomes the gold twin of GameOverScene (reads the summary as
+  scene-start data, decoupled, routes to Hub so banked Cells are immediately spendable). Player death in the
+  arena still flows through the unchanged `_onPlayerDeath` → GameOver. One boss this slice, so every boss
+  death is the final one; the hook is named generically (`onBossDeath`) so a 2nd boss is a config add.
+
+**68. Enemy variety = ≥4 SPECS + a `behavior` switch in the ONE FSM, specs hoisted to PURE `config/enemies.js`**
+- Options: A) a subclass per archetype (Grunt/Shooter/Charger/Flyer) · B) keep `Enemy`'s single FSM, drive
+  variety from a `spec.behavior` tag with small `if (spec.behavior === …)` branches in the existing attack/
+  chase ticks, and MOVE the canonical specs to a PURE `config/enemies.js` so the verifier can import them.
+- Decision: **B)** — four subclasses would duplicate the patrol/chase/hurt/dead scaffolding (DRY
+  violation) for what is really "how does THIS one attack + move". A `behavior` field + a handful of guarded
+  branches (ranged fire vs melee swing; charge dash; fly hover) is KISS and keeps the FSM ONE switch.
+  Hoisting specs to a PURE config (mirrors biomes/weapons/upgrades) lets `verify-gen.mjs` assert the
+  archetype specs are well-formed + every biome `enemyPool` references only known ids — without importing
+  Phaser. `BRUTE_SPEC` is re-exported from `config/enemies.js` (as the `grunt` archetype) so the existing
+  import + the regression-pin `spec:'brute'` tag don't break. The SCENE picks the archetype per spawn off a
+  fresh seeded RNG (off the generator's pinned draw sequence — the §6.5 weapon-pickup discipline) so the
+  level pin + determinism deep-equal stay intact while the run still replays the same archetype mix.
+
+**69. 4th weapon = a SPEAR added to the PURE weapon table (no Player/Hub/verifier code change)**
+- Options: A) a special-cased weapon with bespoke handling · B) one more row in `config/weapons.js` honoring
+  the existing pure swing-table contract.
+- Decision: **B)** — the weapon system is already data-generic (the Player reads `equippedWeapon.swings`
+  + branches on `type`; the verifier checks the table shape). A SPEAR (long reach, low per-hit, fast lunging
+  combo — a spacing tool distinct from Sword/Hammer/Bow) is purely a config add: zero Player/Pickup/Hub
+  changes, and `WEAPON_ORDER.length` goes 3→4 (AC60). It joins `WEAPON_PICKUP_POOL` so it appears in runs.
+  KISS: it's a found weapon, not a new meta unlock (a 3rd `START_WEAPON_BY_LEVEL` entry is a trivial future
+  add, not built now — YAGNI).
+
+**70. Balance = DATA-only tuning recorded as a rough TTK/DPS budget; verifier still proves monotonicity**
+- Options: A) tune by feel with magic numbers in scenes · B) express ALL balance as DATA in the pure
+  configs (difficulty curve, biome bands/pools, weapon tables, boss/enemy specs), recorded against a rough
+  player-DPS vs enemy-TTK budget (§6.6.6), and keep the curve monotone so the verifier re-proves it.
+- Decision: **B)** — "winnable-but-punishing" is a TUNING property, but burying it in scene literals makes
+  it un-reviewable + un-verifiable. Keeping it in the pure configs means the verifier's whole-run
+  non-decreasing proof (Decision 49) still gates a re-tune (the boss biome stays tier 2 / the deepest
+  depths → the hardest), and the budget in the doc makes the numbers principled (a clean run kills the boss
+  in ≈45–75s; a careless unupgraded player dies to scaled contact + dodged-telegraph DPS). No new
+  verification machinery — the existing monotonicity check is the balance guardrail.
 
 ---
 
@@ -2237,7 +2385,253 @@ three PURE configs (upgrades/weapons + the meta fold), the Hub shop rewrite, and
 HUD wiring. The boss gate (§6.6), a deep upgrade tree, and multi-slot inventory are explicit deferrals,
 each a clean seam.
 
-### 6.6 Phase 6 — Bosses *(filled when Phase 6 is designed)*
+### 6.6 Phase 6 — Bosses + richness (THIS PHASE — the orchestrator's "Bosses + richness" step)
+
+**Goal (AC56–AC62).** Cap the slice with a satisfying boss fight + the variety the vision asks for, on top
+of the live meta-loop (§6.5) and run flow (§6.4). The headline is a **multi-phase Boss** in a **dedicated
+boss arena** ending the last biome; killing the final boss → **VictoryScene**. Around it: **≥4 enemy
+archetypes** wired into per-biome pools, a **4th weapon**, and a **balance pass** so a clean run wins and a
+careless run loses. ALL new gameplay code reuses the existing pipelines (the pooled hitboxes/projectiles,
+`resolveHit`, `Effects`, the FSM-tick shape); the new PURE configs (`enemyPool`, the 4th weapon, the boss
+table) extend the verifier's existing contracts. NO new external assets — primitives only.
+
+This phase is deliberately additive at clean SEAMS the prior phases left:
+- `endsInBoss` (already a populated field on every biome, Decision 43) flips to `true` on RAMPARTS.
+- `RunState`/the generator already know "which level am I on" — add `isBossLevel()` (no rewrite).
+- `Enemy` already takes a `spec` + is ticked by a ctx — add archetype specs + a tiny per-archetype hook.
+- `VictoryScene` is already a reachable stub — point the boss-kill edge at it (the GameOver twin).
+- The enemy `ProjectilePool` is the SAME pooled-projectile class the Bow uses — give it an `'enemy'` tag.
+
+> NOTE on enemy projectiles (Decision 65): `combat/ProjectilePool.js` is already generic over an owner tag
+> (`'player'`); the Shooter + the Boss fire from an `'enemy'`-tagged pool whose overlap targets the PLAYER
+> collider (mirror of the player pool targeting the enemy hurtboxes). One class, two instances — DRY.
+
+#### 6.6.1 Boss — `entities/Boss.js` (Decision 64, AC56/AC57/AC58)
+
+A PLAIN class (Decision-10 shape, a near-sibling of `Enemy` — but a SEPARATE class, not a subclass: the
+boss FSM is pattern-driven, not patrol/chase, so a subclass would fight `Enemy`'s state set — KISS to keep
+them peers and share only the pure `damage.js` + the pools). It HOLDS an Arcade body (big — the hurtbox +
+contact), a large `rect`, a telegraph overlay, and runs a phase/pattern FSM ticked by GameScene with the
+SAME `(gdt, ctx)` contract as `Enemy` (so the hit-stop dt boundary is identical, Decision 26).
+
+- **Phases (AC56).** A `BOSS_SPEC.phases[]` table (≥2). Each phase has its own `attacks[]` pattern, a
+  movement/aggro profile, and (phase 2+) a faster cadence / an extra attack. The boss tracks `phaseIndex`;
+  when `hp/maxHp` crosses a phase's `hpThreshold` it ADVANCES the phase ONCE (a guarded edge — like the
+  `gameOver` guard), plays a phase-change tell (flash + brief invuln + a shockwave FX), and switches to the
+  new pattern. Thresholds are descending (e.g. `[1.0, 0.5]` → phase 1 from 100%, phase 2 from 50%).
+- **Attack patterns (AC56), each TELEGRAPHED.** The FSM is `intro → choose → telegraph → strike → recover
+  → choose …`, plus `hurt`/`dead`. `choose` picks the next attack from the current phase's pattern
+  (round-robin or seeded — deterministic). `telegraph` is a timed wind-up (a distinct colour + a growing
+  warning shape where the strike will land) so EVERY attack is dodgeable. Concrete attacks (KISS — 3 reused
+  shapes, parameterised per phase): (a) a **melee slam** (a big `enemyHitboxes` swing in front — reuses the
+  swing schema); (b) a **projectile volley** (fires N pooled `'enemy'` projectiles in a small spread); (c)
+  a **dash/charge** across the arena (a telegraphed lunge with a body-contact hitbox). Phase 2 shortens
+  telegraphs + adds the volley count. Movement between attacks is a slow hover/step toward the player.
+- **Damage in/out.** Player hits resolve through the EXISTING overlap (`playerHitboxes`/projectiles ×
+  the enemy hurtbox group — the boss body is just added to that group, so NO new overlap wiring is needed
+  for player→boss). The boss's strikes acquire from `enemyHitboxes` (melee/dash) or the enemy
+  ProjectilePool (volley); both already overlap the player collider. `onHit(result)` mirrors `Enemy`:
+  subtract HP, knockback (scaled tiny — a boss is heavy, `knockbackTakeMult` low so it isn't juggled),
+  arm a hit-iframe, react. The boss does NOT enter a long hitstun (it would trivialise the fight); instead
+  a brief flinch that doesn't interrupt a committed strike (so the telegraph→strike contract holds).
+- **Death (AC58).** At 0 HP → `dead`: a longer death pop (multiple FX bursts), then fire `onBossDeath` ONCE
+  (the scene hook). GameScene routes to Victory (final boss) — there is only one boss this slice, so every
+  boss death is the final one; the hook is named generically so a 2nd boss is a config add, not a rewrite.
+
+#### 6.6.2 Boss arena + the `endsInBoss` gate (Decision 66, AC57)
+
+- **`config/biomes.js`.** `RAMPARTS.endsInBoss = true` (the only change to the flag). Add a `boss` id on
+  the boss biome (`boss: 'rampartsBoss'`) keyed into a new `config/bosses.js` table (PURE) so the boss spec
+  is data, like every other config. Add the per-biome `enemyPool` (AC59, below) to all three biomes.
+- **`core/RunState.js`.** Add `isBossLevel()` → `true` when `biome().endsInBoss && this.levelInBiome ===
+  biome().levels - 1` (the LAST level of the boss biome). PURE (no Phaser) — the verifier can call it. This
+  is the single predicate GameScene reads to branch "build a boss room, not a normal level".
+- **`world/LevelGenerator.js`.** Add a boss-arena MODE: when called with `biomeConfig.bossArena === true`
+  (GameScene passes a shallow-merged `{ ...biome, bossArena: true }` for the boss level), the generator
+  emits a SIMPLE flat walled room — a full-width floor, side walls, a ceiling, NO staircase, NO normal
+  enemy/pickup spawns, NO exit Door point, a single central `entrance`, and a band of HAZARD tiles along
+  part of the floor (the arena hazard, AC57). It returns the SAME description SHAPE (so TileMap is
+  unchanged) with `enemies: []`, `pickups: []`, a `bossSpawn: {x,y}` field, `isBossArena: true`, and a
+  placeholder `exit` EQUAL to the `entrance` (harmless — see the verifier note; the boss is the gate, no
+  Door is placed).
+- **Verifier boss-arena path — review BLOCKER #2 RESOLVED.** The headless `checkDescription` HARD-requires
+  `exit.col>0 && exit.row>0`, `exit !== entrance`, an EMPTY+standable exit, AND an entrance→exit BFS — ALL
+  of which a no-exit arena FAILS. So the boss-arena mode does NOT flow through `checkDescription`. The
+  verifier has a SEPARATE `checkBossArena(desc)` path with its OWN assertions: bounded (size in [MIN,MAX]);
+  `isBossArena===true`; a `bossSpawn`; `enemies`/`pickups` EMPTY; entrance + bossSpawn standable AND on the
+  SAME floor row (single-floor traversable by construction — nothing to fail); ≥1 HAZARD tile (the arena
+  hazard); and NO exit/traversability check at all. The N-seed sweep runs `checkBossArena` for the boss
+  biome's arena mode (and re-proves determinism: same seed → deep-equal), so AC57/AC62 (verify green) hold.
+- **Arena hazard (AC57) — review BLOCKER #1 RESOLVED.** TileMap renders HAZARD tiles into a RENDER-ONLY
+  `hazards` group (Decision 29 — plain `add.rectangle` GameObjects with NO Arcade bodies). An
+  `overlap(player.collider, hazards)` against a body-less group would NEVER fire (the reviewer's blocker).
+  FIX: TileMap gains a SEPARATE `hazardBodies` STATIC group (empty by default) + an `enableHazardBodies()`
+  method that promotes each hazard rect to a STATIC Arcade body (`staticGroup.add` → a body + `refresh()`).
+  GameScene calls it ONLY in `_buildBossLevel` and wires `overlap(player.collider, tileMap.hazardBodies)` →
+  `_onHazardContact()` (a fixed damage bite on a cooldown, reusing `player.onHit`). Outside the boss room
+  the method is never called, so normal-level hazards stay render-only (the §6.4 balance is preserved).
+  `destroy()` clears `hazardBodies` WITHOUT destroying its rects (they're shared with `this.hazards`, freed
+  once there) — no double-free across the rebuild lifecycle.
+
+#### 6.6.3 GameScene wiring (Decision 67, AC57/AC58)
+
+`_buildLevel()` gains ONE branch up top: `if (runState.isBossLevel())` → `_buildBossLevel()` else the
+existing path. `_buildBossLevel()`:
+- generates the arena (`generateLevel(seed, { ...biome, bossArena: true })`), builds the TileMap, places
+  the player at the central entrance (HP carried, never refilled — same rule),
+- spawns the Boss at `desc.bossSpawn` from `config/bosses.js`, DEPTH-SCALED by a BOSS-SPECIFIC fold
+  `scaleBossSpec(spec, scaleAtDepth(depth))` — review MAJOR RESOLVED: the enemy `scaleSpec` only scales
+  maxHp/contactDamage/speeds/swing.damage and would MISS the boss's `phases[]` + per-attack damage
+  (slam.swing.damage, volley.projectile.damage, dash.contactDamage). `scaleBossSpec` (config/difficulty.js)
+  scales maxHp + contactDamage + EVERY attack's damage by the curve (telegraph/cadence/counts UNSCALED so
+  it stays readable). The boss biome is the deepest so this is the hardest. HONEST scope: the verifier's
+  whole-run monotonicity walk reads `effectiveDifficulty(depth, biome)` (tier + curve), NOT boss HP/attack
+  tuning — so boss BALANCE is NOT proven by that walk; what IS proven is a boss-TABLE well-formedness check
+  + a depth-scaling guardrail (a deeper boss is never weaker), verify-gen.mjs §6 (Decision 70 honesty).
+- wires `onBossDeath` → `_onBossDefeated()` + `onDeath` (kill count), and adds the boss body to
+  `enemyHurtboxes` (so the EXISTING player→enemy melee/projectile overlaps hit it — no new wiring),
+- wires the arena-hazard overlap (player × `tileMap.hazardBodies`, after `enableHazardBodies()` — the
+  BLOCKER #1 fix above),
+- does NOT place an exit Door (the boss IS the gate): `_buildBossLevel` sets NEITHER `this.door` NOR
+  `this.doorCollider` (left null), so `_teardownLevel`'s `if (this.door)` / `if (this.doorCollider)` guards
+  are safe AND `_onDoorOverlap/_nextLevel/_completeRun` can never fire here (no Door to overlap). The HUD
+  shows a **boss HP bar** (a second registry-driven bar in HUDScene, AC56) shown ONLY while `bossActive` is
+  true: the scene sets `bossActive/bossHp/bossMaxHp/bossName` in `_buildBossLevel`, refreshes `bossHp` each
+  frame in `_emitHud`, and CLEARS them (`_clearBossHud` — `bossActive=false`, `bossHp/bossMaxHp=null`) on
+  boss death AND on teardown. `create()` seeds them to "no boss" so a replayed run never flashes the prior
+  run's bar (review MINOR — the registry survives scene restarts, the same stale-leak HP guards for).
+
+**Enemy projectile → player handler (review BLOCKER/MAJOR RESOLVED).** A genuinely NEW handler
+`_onEnemyProjectileHitPlayer(projRect)` — the inverse of `_onProjectileHitEnemy` — is registered ONCE in
+`create()`: `overlap(enemyProjectilePool.group, player.collider, handler, processFilter)`. The filter
+gates on `pj.active && player.isHittable() && !pj.hitSet.has(player.id)` (a per-shot dedup against the
+PLAYER id). The handler reads `pj.attackerShape` (the SHOT's live position + dir — NOT the firer's),
+builds a swing `{damage, knockback}` from `pj.spec`, calls `resolveHit(pj.attackerShape,
+player.attackerShape, swing, {allowBackstab:false})` (damageMult defaults to 1 — enemies never get the
+player's mults, the pinned damage.js rule), applies `player.onHit(result)`, and `release`s the shot on hit.
+This is distinct from the melee `_onEnemyHitPlayer` (which keys off a hitbox + the `enemies[]` list — a
+boss is NOT in `enemies[]` and a projectile is not a hitbox), so the Shooter/boss volley deal real damage.
+
+**`_onBossDefeated()` guard interleaving (review MAJOR RESOLVED).** It shares the EXACT guard ordering as
+`_onPlayerDeath`: `if (this.gameOver) return` FIRST, then `this.gameOver = true`. So a same-frame
+boss-death + player-death can't BOTH bank — whichever sets `gameOver` first wins; the second early-returns.
+All three run-end paths (`_onPlayerDeath`, `_completeRun`, `_onBossDefeated`) share the ONE `gameOver`
+guard + the ONE `meta.bankRun` single writer (cells + bestDepth; gold/scrolls discarded — permadeath), so
+banking happens exactly once. `_onBossDefeated` clears the boss HUD, snapshots the summary
+(`completed:true`), and `scene.start('Victory', summary)` after a short flourish. Player death in the arena
+still flows through the unchanged `_onPlayerDeath` → GameOver. The enemy ProjectilePool + its
+player-collider overlap are created once in `create()` alongside the player pool (persist across rebuilds,
+released on teardown).
+
+> COMPLETION-GATE semantics (the subtle correctness point the implementer must honour). The boss room IS
+> the boss biome's LAST level (`isBossLevel()` ⇒ `levelInBiome === levels-1` on the boss biome), which is
+> ALSO where `isRunComplete()` is true. With NO exit Door in the arena, the §6.4 run-complete-via-Door path
+> (`_onDoorOverlap → _nextLevel → isRunComplete → _completeRun`) can NEVER fire in the boss room (there's
+> no Door to overlap). The ONLY way out of the boss room is `_onBossDefeated` (→ Victory) or
+> `_onPlayerDeath` (→ GameOver). So the boss REPLACES the run-complete-Door as the final gate — exactly the
+> intent. `_completeRun` (the gold "RUN COMPLETE" GameOver) is now only reachable if a future biome has
+> `endsInBoss:false` as the last biome; with RAMPARTS gating a boss it's effectively superseded by Victory,
+> but it stays in place (harmless, and the seam for a future non-boss final biome). All three run-end paths
+> (`_onPlayerDeath`, `_completeRun`, `_onBossDefeated`) share the ONE `gameOver` guard + the ONE `bankRun`
+> writer — so banking still happens exactly once regardless of how the run ends.
+
+#### 6.6.4 Enemy variety — archetypes + per-biome pools (Decision 68, AC59)
+
+`entities/Enemy.js` keeps its ONE FSM; variety comes from (a) ≥4 SPECS and (b) a tiny per-archetype
+behaviour hook so the SHOOTER/CHARGER/FLYER differ without four FSMs (KISS — SOLID via a `behavior` field,
+not subclasses):
+- **GRUNT** (= the current `BRUTE_SPEC`, renamed/aliased so nothing breaks) — patrol/chase/melee.
+- **SHOOTER** — `behavior:'ranged'`: in `chase`, KEEPS a preferred distance (backs off if too close) and,
+  on the attack beat, fires a pooled `'enemy'` projectile instead of a melee swing (a new `_fireRanged`
+  branch in the attack tick gated on `spec.behavior`). Lower HP (a glass cannon).
+- **CHARGER** — `behavior:'charge'`: its attack is a longer telegraph then a fast horizontal DASH (a
+  burst of vx) with a body-contact hitbox, overshooting past the player; high contact damage, slow to
+  re-wind. Tanky.
+- **FLYER** — `behavior:'fly'`: `allowGravity=false`, hovers at a target height, swoops toward the player
+  on the attack beat (a 2-D lunge). Ignores the pit (it flies) so its patrol bounds are the whole arena.
+  COLLIDER OPT-OUT (review MINOR RESOLVED): `enemyHurtboxes` is `physics.add.group({ allowGravity:true })`
+  and the per-level solids/oneWay colliders are added to that WHOLE group, so a flyer would be pulled by
+  the group default + stand on the floor like a grunt. FIX: (a) the Enemy ctor calls
+  `body.setAllowGravity(false)` for a `spec.noGravity` archetype (overriding the group default for THAT
+  body); (b) `_spawnEnemy` stamps `enemy._noSolids` and the solids/oneWay colliders carry a `processCallback`
+  `_enemyNotFlyer(enemyRect)` that returns FALSE for a flyer — so it passes THROUGH floors/ledges and
+  hovers; (c) `_spawnEnemy` sets a flyer's patrol bounds to the whole interior width. The boss is NOT a
+  flyer (it walks the arena floor), so `_enemyNotFlyer` returns true for it.
+The archetype-specific code is small `if (spec.behavior === …)` branches in the existing tick methods (the
+FSM stays one switch). `config/biomes.js` gains `enemyPool` per biome — a weighted list of archetype ids
+(`[{id:'grunt',w:3}, …]`). GameScene, at spawn, picks an archetype off a fresh seeded RNG (the same
+off-the-generator-draw discipline as the §6.5 weapon pickup, so the level pin is untouched) and builds the
+scaled spec for it. `config/enemies.js` (PURE) holds the archetype id→spec map so the verifier can assert
+the pools reference only known ids + the specs are well-formed (no Phaser — the spec is plain data; the
+visual colours live on the spec, consumed only by the Phaser-coupled Enemy, exactly like biome colours).
+
+> Decision 68 detail (review MINOR RESOLVED): the canonical archetype specs LIVE in the PURE
+> `config/enemies.js` (verifier-importable); `Enemy.js` re-exports `GRUNT` as `BRUTE_SPEC` from there, so
+> the existing GameScene import + the regression-pin `spec:'brute'` tag don't break (the generator still
+> stamps `spec:'brute'` on each enemy — `enemySpawnFromCell` is unchanged — so `PIN_EXPECTED.enemies`
+> deep-equal holds; the scene picks the archetype off a FRESH RNG, not the pinned draw). This INVERTS the
+> old import direction the verifier noted (it could not import BRUTE_SPEC from Phaser-coupled Enemy.js):
+> the verifier now imports the REAL `GRUNT` from the pure config and uses it AS the `scaleSpec`
+> monotonicity base, REPLACING the duplicated `BASE_SPEC_STUB` (one source of truth — DRY).
+
+#### 6.6.5 4th weapon (Decision 69, AC60)
+
+`config/weapons.js` adds a **SPEAR** (`type:'melee'`): long reach, low damage-per-hit, a fast 2–3 hit combo
+with a forward lunge — a poke/spacing tool distinct from the Sword (balanced), Hammer (slow/heavy), Bow
+(ranged). It satisfies the existing pure swing-table contract verbatim, so the Player/Pickup/Hub generic
+code is UNCHANGED and the verifier's `WEAPON_ORDER.length ≥ 3` check now sees 4. It joins
+`WEAPON_PICKUP_POOL` in GameScene so it appears in runs. (The starting-weapon UPGRADE table stays as-is —
+the Spear is a found weapon, not a meta unlock, KISS; a 3rd unlock level is a trivial future config add.)
+
+#### 6.6.6 Balance pass (Decision 70, AC61)
+
+A DATA-only tuning pass (no logic changes), recorded as a rough budget so it's principled not vibes:
+- **Player DPS budget.** Sword finisher ≈ 16 dmg; a clean 3-hit combo ≈ 34 dmg in ≈0.9s ≈ 38 dmg/s, ×1.0
+  base melee mult, + backstab ×2 on flanks. A maxed +melee meta (+45%) and a damage scroll stack on top.
+- **Enemy TTK.** A depth-0 Grunt (60 HP) dies to ≈2 combos; at the boss biome (depth ≈6–8) the curve
+  (+18%/depth HP) makes a Grunt ≈ 130–170 HP → ≈4–5 combos — tanky but killable; careless face-tanking
+  loses because contact (scaled) + telegraphed strikes out-DPS an unupgraded player who never dodges.
+- **Boss budget.** `maxHp` sized so a clean run (good weapon + some meta) kills it in ≈45–75s of dodging
+  telegraphs + punishing recovery windows; its telegraphs are long enough to dodge but its strikes hit
+  hard enough (≈18–28 dmg, scaled) that 3–4 missed dodges kill an unupgraded player. Phase 2 (≤50%)
+  tightens telegraphs + adds the volley so the back half demands cleaner play.
+- The pass keeps `config/difficulty.js` monotone (the boss biome is tier 2, the deepest depths) so the
+  verifier's whole-run non-decreasing proof still holds INCLUDING the boss room's depth.
+
+**Shipped numbers (the recorded budget — AC61 winnability sanity).** The run is 3 biomes × 3 levels = 9
+levels, depth 0…8; the boss arena is depth 8 (RAMPARTS' last level). At depth 8 the curve gives
+`enemyHpMult = 1 + 0.18·8 = 2.44` and `enemyDamageMult = 1 + 0.10·8 = 1.80`.
+- **Boss HP.** base `maxHp = 520` → scaled `round(520·2.44) ≈ 1269`. Player base melee ≈ 38 dmg/s (sword
+  3-hit combo 8+10+16 ≈ 34 in ≈0.9s); with ~50% dodge-uptime the EFFECTIVE rate is ≈19 dmg/s → ≈67s for a
+  no-meta sword run (within the ≈45–75s budget; faster with the Hammer's ≈34/finisher, the +45% melee meta,
+  a Power scroll, or backstabs ×2). Phase 2 (≤50% HP) tightens telegraphs + adds the volley so the back
+  half demands cleaner play.
+- **Boss strikes (depth-scaled).** slam `round(22·1.8) = 40`, dash contact `round(26·1.8) = 47`, volley
+  `round(14·1.8) = 25`. Player base HP = 100 → ~3 missed dodges kill an unupgraded player; arena spikes
+  chip 8/tick on top. So face-tanking the boss loses; dodging the (long, readable) telegraphs wins.
+- **Normal enemies at the boss biome (depth 6–8).** a Grunt (60 base) → `round(60·2.08) ≈ 125` at depth 6
+  → ≈4 combos: tanky but killable. Chargers/Flyers add pressure; Shooters kite. Careless play out-DPSes an
+  unupgraded player who never dodges (Decision 70).
+
+#### 6.6.7 Explicit deferrals (YAGNI)
+
+ONE boss this slice (the hook/`config/bosses.js` table make a 2nd a config add — "2 if time" is left as a
+clean seam, not built). No boss loot table beyond the standard Cells bank. No new biome (3 ship — the
+vision's "≥3" is met). No remappable controls. No multi-slot weapon inventory (swap-in-place stays). The
+archetype hook is a `behavior` switch, NOT a behaviour-tree lib. Enemy projectiles reuse the player
+projectile class (no new pooled type).
+
+#### 6.6.8 Phase-6 file touch summary
+
+NEW: `entities/Boss.js`, `config/bosses.js` (PURE), `config/enemies.js` (PURE). EXTEND: `entities/Enemy.js`
+(archetype `behavior` branches + re-export specs from `config/enemies.js`), `config/weapons.js` (+Spear),
+`config/biomes.js` (`enemyPool` per biome, `RAMPARTS.endsInBoss=true`, `boss` id), `core/RunState.js`
+(`isBossLevel()`), `world/LevelGenerator.js` (boss-arena mode), `scenes/GameScene.js` (boss-level branch +
+enemy ProjectilePool + archetype pick + arena hazard + boss-kill→Victory), `scenes/VictoryScene.js`
+(summary + → Hub), `scenes/HUDScene.js` (boss HP bar), `config/difficulty.js` (balance tune),
+`scripts/verify-gen.mjs` (section 6: enemy-pool/archetype + boss-table + 4-weapon + boss-arena checks),
+`README.md`. Each is a clean extension of an existing seam — no rewrites.
+
 ### 6.7 Phase 7 — *(SUBSUMED into the §6.5 meta-loop — Hub + localStorage meta shipped there)*
 
 ### 6.8 Error handling / edge cases (Phase 0)
@@ -2460,7 +2854,38 @@ each a clean seam.
   `BASE_PLAYER_STATS`; assert cost monotonicity + `length===maxLevel`, `applyUpgrades` identity +
   non-mutation + stats ≥ base, and well-formed weapon movesets. Keeps every prior pin. No Phaser import.
 
-**Phases 6–7:** files listed in each phase's `Design` section when implemented (Phase 7 is SUBSUMED here).
+**Phase 6 — Bosses + richness (this phase):**
+
+- `src/entities/Boss.js` — NEW. A plain pattern/phase-FSM boss class (Decision 64): an Arcade body added to
+  the enemy hurtbox group, ≥2 HP-threshold phases, telegraphed slam/volley/dash attacks reusing the shared
+  `enemyHitboxes` pool + the enemy `ProjectilePool` + `resolveHit`/`Effects`; `onHit`/`onBossDeath` hooks.
+- `src/config/bosses.js` — NEW (PURE). The boss spec table (phases[], attack patterns, HP/damage/timings,
+  colours). Verifier-importable (no Phaser).
+- `src/config/enemies.js` — NEW (PURE). The archetype id→spec map (grunt/shooter/charger/flyer); re-exports
+  the canonical `BRUTE_SPEC` as `grunt` (Decision 68). Verifier-importable.
+- `src/entities/Enemy.js` — EXTEND. `spec.behavior` branches (ranged fire / charge dash / fly hover) in the
+  existing attack/chase ticks; re-export specs from `config/enemies.js` (one source).
+- `src/config/weapons.js` — EXTEND. +SPEAR row (4th weapon, Decision 69) — pure swing-table contract only.
+- `src/config/biomes.js` — EXTEND. Per-biome `enemyPool` (weighted archetype ids); `RAMPARTS.endsInBoss =
+  true` + `boss:'rampartsBoss'`.
+- `src/core/RunState.js` — EXTEND (small). `isBossLevel()` (PURE) — the single boss-room predicate.
+- `src/world/LevelGenerator.js` — EXTEND. A `bossArena` mode emitting a flat walled hazard room (same
+  description shape), separately pinned; the staircase path is unchanged.
+- `src/scenes/GameScene.js` — EXTEND. `_buildLevel` boss-level branch → `_buildBossLevel`; an `'enemy'`
+  ProjectilePool + its player-collider overlap; archetype pick per spawn (seeded, off the pinned draw); the
+  arena-hazard overlap; the boss HP emit; `_onBossDefeated` → Victory.
+- `src/scenes/VictoryScene.js` — EXTEND. Render the run summary (depth/biome/time/kills/cellsBanked) +
+  route to Hub (the gold twin of GameOver).
+- `src/scenes/HUDScene.js` — EXTEND (small). A boss HP bar (registry-driven, shown only while the boss
+  lives — decoupled, Decision 2).
+- `src/config/difficulty.js` — TUNE (data only). The balance pass (Decision 70); stays monotone.
+- `scripts/verify-gen.mjs` — GROW. Section 6 (AC59/AC60/AC61): import `config/enemies.js`/`config/bosses.js`;
+  assert every biome `enemyPool` is non-empty + references only known archetype ids, archetype + boss specs
+  are well-formed, `WEAPON_ORDER.length ≥ 4`, the boss-arena generator mode is deterministic + bounded +
+  traversable + pinned, and the whole-run curve stays monotone through the boss room. No Phaser import.
+- `README.md` — UPDATE. Full controls, how-to-play (Hub→Run→Boss→Victory), run instructions, doc reference.
+
+**Phase 7:** SUBSUMED into Phase 5 — no separate files.
 
 ---
 
@@ -2561,12 +2986,13 @@ solvability foundation), plus `npm run dev` observation:
 **Phase 4 — Run structure (this phase; §6.4):** primarily the HEADLESS monotonicity + determinism
 sweep, plus `npm run dev` observation:
 
-1. [AC42] `npm run verify` exits 0. Its NEW section asserts, over `depth 0..MAXD`, that every
+1. [AC42] `npm run verify` exits 0. Its section asserts, over `depth 0..MAXD`, that every
    `scaleAtDepth(depth)` scalar is non-decreasing AND that the SCALED enemy stat
-   (`scaleSpec(BASE_SPEC_STUB, scaleAtDepth(depth)).maxHp`) actually rises — the difficulty curve is
-   monotonic — AND that `scaleSpec` does not mutate the base. (A PURE `BASE_SPEC_STUB` is used because
-   `BRUTE_SPEC` lives in Phaser-coupled `Enemy.js`; scaleSpec only multiplies numeric fields, so the
-   property holds for any base.) Two fresh `npm run verify` runs print identical output (deterministic).
+   (`scaleSpec(GRUNT, scaleAtDepth(depth)).maxHp`) actually rises — the difficulty curve is monotonic —
+   AND that `scaleSpec` does not mutate the base. (Since §6.6 hoisted the canonical specs to the PURE
+   `config/enemies.js`, the verifier imports the REAL `GRUNT` as the base — replacing the old duplicated
+   `BASE_SPEC_STUB`, DRY; scaleSpec only multiplies numeric fields.) Two fresh `npm run verify` runs
+   print identical output (deterministic).
 2. [AC43] In the same sweep, `BIOME_ORDER.length ≥ 3`, `BIOME_ORDER[i].difficultyTier` is
    non-decreasing in `i`, every biome's `cols/rows` are within the size bounds, and `levels ≥ 1` (so
    AC28 holds for the WHOLE list — the 200-seed level sweep now runs for EACH biome, not just PRISON).
@@ -2625,4 +3051,38 @@ observation of the full loop:
    per-biome level sweep, the run-structure monotonicity/determinism) still passes — the SWINGS re-home +
    the new run-start/run-end wiring don't change the generator output or the curve.
 
-**Phases 6–7:** verification steps appended per phase when implemented (Phase 7 is SUBSUMED here).
+**Phase 6 — Bosses + richness (this phase; §6.6):** the HEADLESS pure-config sweep plus `npm run dev`
+observation of the boss fight + variety:
+
+1. [AC59/AC60/AC61] `npm run verify` exits 0. Its NEW section node-imports `config/enemies.js` +
+   `config/bosses.js` (a successful import re-proves they're PURE — no Phaser); asserts every biome
+   `enemyPool` is non-empty and references only ids present in `config/enemies.js`, each archetype spec +
+   each boss `phases[]` is well-formed (numeric HP/damage/timings, descending phase thresholds), and
+   `WEAPON_ORDER.length ≥ 4` with the SPEAR honoring the swing-table contract. The boss-arena generator
+   mode is swept for determinism + bounds + traversability and matches a separate regression pin. The
+   whole-run `effectiveDifficulty` non-decreasing proof still holds INCLUDING the boss room's depth (the
+   balance tune kept the curve monotone). Two fresh runs print identical output (deterministic).
+2. [AC59] In `npm run dev`: different biomes spawn a DIFFERENT enemy mix — Prison grunts only; Sewers adds
+   a ranged Shooter that keeps distance + fires projectiles you must dodge; Ramparts adds a Charger
+   (telegraphed dash) and a Flyer (hovers + swoops, ignores the pit). Each telegraphs its attack.
+3. [AC60] Pick up the SPEAR: the moveset changes to a long-reach lunging poke (distinct from Sword/Hammer/
+   Bow); the HUD weapon name updates; it still uses the shared hitbox pool + FX.
+4. [AC56/AC57] Clear RAMPARTS to its final level: instead of a normal room you enter a flat walled BOSS
+   ARENA (no exit Door) with a hazard band on the floor (touching it costs HP). The boss spawns; a boss HP
+   bar appears on the HUD. The boss runs telegraphed patterns (slam / projectile volley / dash) you can
+   dodge; at ≤50% HP it CHANGES PHASE (a tell + a tighter, denser pattern). It reacts to your hits.
+5. [AC58] Kill the boss: the screen hands off to **VictoryScene** (no longer the stub) showing the run
+   SUMMARY incl. CELLS BANKED; the run's Cells are banked to meta EXACTLY ONCE (re-enter the Hub → higher
+   banked total; reload → it persists); SPACE/click → Hub. Dying IN the arena still → GameOver.
+6. [AC61] A clean run (dodging telegraphs, backstabbing, some meta upgrades) can BEAT the boss; a careless
+   run (face-tanking, ignoring telegraphs, no upgrades) dies before/at the boss — the slice is winnable but
+   punishing.
+7. [AC62] `npm run build` exits 0 AND `npm run verify` exits 0 (both green). `README.md` documents the full
+   controls + the Hub→Run→Boss→Victory loop + run instructions + the design-doc reference. The whole loop
+   plays end-to-end as a coherent Dead-Cells-like vertical slice.
+8. Regression: every prior `verify-gen.mjs` pin (rng, combat purity/geometry, the per-biome level sweep, the
+   run-structure monotonicity/determinism, the §6.5 upgrade/weapon/applyUpgrades contracts) still passes —
+   the archetype/boss additions are pure-config extensions; the staircase generator output + the curve's
+   intra-run values are unchanged (the boss-arena mode is a separate branch, separately pinned).
+
+**Phase 7:** SUBSUMED into Phase 5 — no separate verification.

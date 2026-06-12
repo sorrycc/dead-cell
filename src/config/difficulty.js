@@ -62,6 +62,45 @@ export function scaleSpec(baseSpec, scale) {
   }
 }
 
+// ── scaleBossSpec(bossSpec, scale) → a NEW depth-scaled boss spec (design §6.6.1, Decision 64/66, AC61
+// — review MAJOR: the HONEST boss-scaling fold) ──────────────────────────────────────────────────────
+// The enemy scaleSpec above only touches maxHp/contactDamage/speeds/swing.damage — a Boss spec also has
+// `phases[]` + per-attack damage (slam.swing.damage, volley.projectile.damage, dash.contactDamage) that
+// scaleSpec does NOT see, so reusing it would make "a deeper boss is tankier" scale HP only, leaving its
+// ATTACKS at base (the review's MAJOR point). scaleBossSpec is a BOSS-SPECIFIC fold: it scales maxHp +
+// contactDamage by the curve AND every attack's damage, returning a fresh deep-cloned spec (NEVER
+// mutating the shared BOSSES table — the aliasing bug scaleSpec also avoids). Telegraph/cadence/counts
+// are deliberately UNSCALED so a deeper boss is tankier + hits harder but stays EQUALLY readable
+// (the dodge-the-telegraph contract holds at depth — same philosophy as the enemy ranges being unscaled).
+//
+// HONEST VERIFICATION SCOPE (Decision 70, review MAJOR): the verifier's whole-run monotonicity walk reads
+// effectiveDifficulty(depth, biome) = biome.tier + the depth curve — it does NOT read boss HP/attack
+// tuning, so the boss BALANCE is NOT proven by that walk. What IS proven for the boss is a TABLE
+// WELL-FORMEDNESS check (verify-gen.mjs §6: descending phase thresholds, known attack kinds, a non-empty
+// pattern per phase). This fold's OUTPUT is also asserted ≥ the base boss HP at depth (a re-tune that
+// makes a deeper boss WEAKER fails loudly) — but that is a guardrail, not a winnability proof.
+export function scaleBossSpec(bossSpec, scale) {
+  // Deep-clone the attack params so scaling never mutates the shared BOSSES table (referential safety).
+  const attacks = {}
+  for (const [id, atk] of Object.entries(bossSpec.attacks)) {
+    const next = { ...atk }
+    if (atk.swing) next.swing = { ...atk.swing, damage: Math.round(atk.swing.damage * scale.enemyDamageMult) }
+    if (atk.projectile) {
+      next.projectile = { ...atk.projectile, damage: Math.round(atk.projectile.damage * scale.enemyDamageMult) }
+    }
+    if (typeof atk.contactDamage === 'number') next.contactDamage = Math.round(atk.contactDamage * scale.enemyDamageMult)
+    attacks[id] = next
+  }
+  return {
+    ...bossSpec,
+    maxHp: Math.round(bossSpec.maxHp * scale.enemyHpMult),
+    contactDamage: Math.round(bossSpec.contactDamage * scale.enemyDamageMult),
+    // phases[] is value-data (thresholds/patterns) — clone the array shallowly so the scaled spec owns it.
+    phases: bossSpec.phases.map((p) => ({ ...p, attacks: [...p.attacks] })),
+    attacks,
+  }
+}
+
 // ── TIER_WEIGHT derivation (review MAJOR — an EXPLICIT lower bound + a module-load assertion, not a
 // "large enough" magic constant) ────────────────────────────────────────────────────────────────
 // effectiveDifficulty(depth, biome) = biome.difficultyTier·TIER_WEIGHT + curveTerm(depth), where

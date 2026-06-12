@@ -88,6 +88,18 @@ export function createRunState(startSeed, startedAt = 0, startStats = null) {
       return this.isLastBiome() && this.levelInBiome >= this.biome().levels - 1
     },
 
+    // ── isBossLevel() (design §6.6.2, Decision 66, AC57) ── true when the CURRENT level is the boss
+    // arena: the boss biome's (endsInBoss) FINAL level (levelInBiome === levels-1). PURE (no Phaser) so
+    // the verifier can call it. This is the SINGLE predicate GameScene reads to branch "build a boss
+    // room, not a normal level" (_buildBossLevel). NOTE: on the boss biome this coincides with
+    // isRunComplete() being true — the boss arena IS the last level of the last biome — but the boss
+    // arena has NO exit Door, so the run-complete-via-Door path can never fire there; the boss is the
+    // gate (the COMPLETION-GATE note, §6.6.3). The boss biome must NOT also be configured as a non-boss
+    // final biome — endsInBoss gates this so a future non-boss final biome keeps the Door path.
+    isBossLevel() {
+      return this.biome().endsInBoss === true && this.levelInBiome >= this.biome().levels - 1
+    },
+
     // ── advance() (Decision 46, BLOCKER 1) — next seed + next level/biome/depth ──
     // ALWAYS: next seed (deterministic), depth += 1 (run-global), levelInBiome += 1. Only roll to the
     // NEXT biome when the current biome's levels are exhausted (and we're not already on the last).

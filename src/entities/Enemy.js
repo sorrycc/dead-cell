@@ -1,16 +1,25 @@
 import Phaser from 'phaser'
 import { swingRect } from '../combat/hitbox.js'
+import { GRUNT } from '../config/enemies.js'
 
-// ── Base Enemy with a state-machine AI (design §6.3, Decisions 22/29/30, AC24) ──
+// ── Base Enemy with a state-machine AI (design §6.3 + §6.6.4, Decisions 22/29/30/68, AC24/AC59) ──
 // A plain class (Decision 10 shape, like the Player): it HOLDS an invisible `collider` (the Arcade
 // body — its hurtbox + contact source), a visible `rect`, and a `frontMarker`, and is ticked by
 // GameScene each frame with a ctx { player, effects }. ALL feel/AI tuning comes from a `spec`
-// object so the class is reusable; we ship ONE concrete spec (a melee "Brute", BRUTE_SPEC below).
+// object so the class is reusable; the canonical specs live in the PURE config/enemies.js (Decision
+// 68 — verifier-importable) and Enemy.js re-exports GRUNT as BRUTE_SPEC for back-compat (below).
 //
 // FSM (Decision 22): an explicit string enum (idle/patrol/chase/attack/hurt/dead) driven by one
 // switch in update(). Telegraph = a timed wind-up sub-phase inside `attack` (color-shift + pause)
 // so the strike is readable + dodgeable — the genre's contract. `hurt` interrupts the current
 // action; `dead` plays a pop then despawns.
+//
+// ARCHETYPE VARIETY (Decision 68, AC59): the ONE FSM is kept; variety comes from `spec.behavior`
+// ('melee'|'ranged'|'charge'|'fly') driving a few guarded branches in the existing chase/attack ticks
+// — NOT four subclasses (which would duplicate the patrol/chase/hurt/dead scaffolding, a DRY
+// violation). 'ranged' fires a pooled 'enemy' projectile on the attack beat (the SHOOTER kites);
+// 'charge' dashes with a body-contact hitbox (the CHARGER); 'fly' hovers + swoops with gravity off
+// (the FLYER). GameScene passes the enemy ProjectilePool in so 'ranged'/the boss can fire (Decision 65).
 //
 // dt BOUNDARY (§6.3): every timer here is in SECONDS and decays by the GAMEPLAY dt GameScene
 // passes (0 during hit-stop, so a hurt enemy's hitstun + a telegraph both freeze with the world —
@@ -20,54 +29,32 @@ import { swingRect } from '../combat/hitbox.js'
 // the room solids by GameScene (so it stands on floors/ledges like the player). Its patrol bounds
 // `[patrolMinX, patrolMaxX]` are chosen to PRE-EXCLUDE the room's pit, and CHASE clamps its target
 // x to those bounds too — so a chasing Brute can never walk off the span into the pit and out of
-// the room. (The general ground-ahead probe is a Phase-4 concern for generated rooms; the
-// bounds-clamp is the KISS correct answer for this hand-made room.)
+// the room. (The FLYER ignores the pit — gravity off — so its bounds are the whole arena, set by
+// GameScene; review MINOR.)
 
 const STATE = { IDLE: 'idle', PATROL: 'patrol', CHASE: 'chase', ATTACK: 'attack', HURT: 'hurt', DEAD: 'dead' }
 
 let _nextEnemyId = 1 // monotonic id source (used by the per-swing hitSet dedup + ownerId tag).
 
-// ── Concrete enemy spec: the melee "Brute" (Decision 22 — ONE config ships now). ──
-// reach/damage/knockback for its strike reuse the SAME swing shape as the player (combat/hitbox).
-export const BRUTE_SPEC = {
-  maxHp: 60,
-  bodyW: 38,
-  bodyH: 54,
-  color: 0xc0392b, // resting fill (brick red).
-  colorTelegraph: 0xf1c40f, // wind-up flash (yellow) so the attack is readable (AC24).
-  colorHurt: 0xffffff, // flash white on hit.
-  patrolSpeed: 70, // px/s — slow patrol cruise.
-  chaseSpeed: 160, // px/s — faster when locked on.
-  chaseAccel: 900, // px/s² — how hard it ramps toward chase speed.
-  detectRange: 360, // px — horizontal range to notice the player (and same-ish height).
-  detectHeight: 140, // px — vertical band; player must be within this to detect/chase.
-  loseRange: 480, // px — beyond this (for a grace period) it gives up → patrol.
-  loseGrace: 1.2, // s — how long the player can be out of range before chase drops.
-  attackRange: 70, // px — within this it commits an attack.
-  attackCooldown: 1.0, // s — min gap between attacks.
-  telegraph: 0.42, // s — wind-up before the strike (the dodge window, AC24).
-  attackActive: 0.12, // s — the strike's live hitbox window.
-  attackRecovery: 0.45, // s — recovery after the strike before re-engaging.
-  contactDamage: 6, // hp — touch damage tick (separate from the strike).
-  contactCooldown: 0.6, // s — min gap between contact ticks (don't shred HP every frame).
-  // The strike's swing shape (reach/damage/knockback) — reuses the SWINGS row schema (DRY).
-  swing: { reach: 56, halfHeight: 30, forward: 16, damage: 12, knockback: 320 },
-  hitstun: 0.28, // s — how long a `hurt` reaction freezes the AI.
-  hurtIframe: 0.12, // s — brief post-hit i-frame so one swing's dedup + this both stop re-hits.
-  knockbackTakeMult: 1.0, // scales incoming knockback (heavier enemies could lower this).
-}
+// ── BRUTE_SPEC re-export (Decision 68, review MINOR — DRY) ── the canonical specs MOVED to the PURE
+// config/enemies.js (so the verifier can import them); Enemy.js re-exports GRUNT as BRUTE_SPEC so the
+// existing GameScene import + the regression-pin `spec:'brute'` tag keep working unchanged (ONE source).
+export const BRUTE_SPEC = GRUNT
 
 const SQUASH_EASE_K = 16 // 1/s — death-pop + tint easing rate.
 
 export class Enemy {
-  // scene: GameScene. (x,y): spawn center. spec: a config object (BRUTE_SPEC). hitboxPool: a
-  // HitboxPool tagged for THIS enemy (its strike acquires from it). patrol bounds default to a
-  // span around spawn but the scene passes explicit, pit-excluding ones (Decision 29).
-  constructor(scene, x, y, spec, hitboxPool, { patrolMinX = x - 160, patrolMaxX = x + 160 } = {}) {
+  // scene: GameScene. (x,y): spawn center. spec: a config object (an archetype from config/enemies.js).
+  // hitboxPool: a HitboxPool tagged for THIS enemy (its melee strike acquires from it). projectilePool:
+  // the enemy ProjectilePool the 'ranged' behaviour fires from (Decision 65; null = no ranged). patrol
+  // bounds default to a span around spawn but the scene passes explicit, pit-excluding ones (Decision 29).
+  constructor(scene, x, y, spec, hitboxPool, { patrolMinX = x - 160, patrolMaxX = x + 160, projectilePool = null } = {}) {
     this.scene = scene
     this.spec = spec
+    this.behavior = spec.behavior || 'melee' // archetype behaviour tag (Decision 68); default melee.
     this.id = `enemy${_nextEnemyId++}`
     this.hitboxPool = hitboxPool
+    this.projectilePool = projectilePool // enemy ProjectilePool ('ranged' fires from it — Decision 65).
 
     // ── Physics collider (owns the body) + visual + facing marker (same shape as Player). ──
     this.collider = scene.add.rectangle(x, y, spec.bodyW, spec.bodyH, spec.color).setAlpha(0)
@@ -76,6 +63,11 @@ export class Enemy {
     this.body = this.collider.body
     this.body.setCollideWorldBounds(true)
     this.body.setMaxVelocity(spec.chaseSpeed * 2, 1100) // X cap loose; Y cap = terminal fall.
+    // FLYER (Decision 68/AC59 — review MINOR): a 'fly' spec disables body gravity HERE so it hovers
+    // instead of falling. GameScene additionally SKIPS the solids/oneWay colliders for a flyer (so it
+    // isn't pulled by the group default + doesn't stand on the floor). The per-body setAllowGravity
+    // overrides the enemyHurtboxes group's allowGravity:true default for THIS body only.
+    if (spec.noGravity) this.body.setAllowGravity(false)
     this.collider.enemyRef = this // back-ref so overlap callbacks resolve the Enemy from its body.
 
     this.rect = scene.add.rectangle(x, y, spec.bodyW, spec.bodyH, spec.color)
@@ -111,6 +103,11 @@ export class Enemy {
     this.hitstunTimer = 0
     this.hurtIframeTimer = 0
     this.loseTimer = 0 // counts time the player has been out of range during chase.
+    // ── Archetype-specific state (Decision 68 — read ONLY by that behaviour's branch) ──
+    this.dashDir = 1 // CHARGER: the dash direction, latched at telegraph end (a committed lunge).
+    this.dashActive = false // CHARGER/FLYER: true while the body-contact dash/swoop hitbox is live.
+    this.swoopVX = 0 // FLYER: the latched 2-D swoop velocity (x), set at telegraph end.
+    this.swoopVY = 0 // FLYER: the latched 2-D swoop velocity (y).
 
     this.deathTimer = 0 // > 0 while the death pop plays before despawn.
     this.scaleX = 1
@@ -191,12 +188,15 @@ export class Enemy {
   }
 
   // ── patrol: cruise between bounds; flip at a bound; detect player → chase (AC24) ──
+  // The FLYER hovers + drifts horizontally (gravity off — it holds a height); ground enemies cruise.
   _tickPatrol(dt, ctx) {
     const cx = this.body.center.x
     // Turn at the patrol bounds (which exclude the pit, Decision 29).
     if (cx <= this.patrolMinX) this.facing = 1
     else if (cx >= this.patrolMaxX) this.facing = -1
     this.body.setVelocityX(this.facing * this.spec.patrolSpeed)
+    // FLYER: hold altitude by zeroing vy (gravity is off, so nothing else moves it vertically).
+    if (this.behavior === 'fly') this.body.setVelocityY(0)
 
     if (this._canDetect(ctx.player)) {
       this.state = STATE.CHASE
@@ -204,34 +204,53 @@ export class Enemy {
     }
   }
 
-  // ── chase: accelerate toward the player (target x CLAMPED to patrol bounds so it never walks
-  // into the pit, Decision 29); attack in range; give up after a grace period out of range. ──
+  // ── chase: move toward the player; attack in range; give up after a grace period out of range. ──
+  // The FLYER does a 2-D hover-chase (gravity off); SHOOTER kites (backs off below preferredRange);
+  // GRUNT/CHARGER do the original ground chase (target x CLAMPED to patrol bounds so they never walk
+  // into the pit, Decision 29). The branch is a small per-behaviour guard — the FSM stays one switch.
   _tickChase(dt, ctx) {
     const player = ctx.player
     const cx = this.body.center.x
+    const cy = this.body.center.y
     const px = player.body.center.x
-    // Target x clamped to the pit-excluding patrol span — the concrete "don't fall out" fix.
-    const targetX = Phaser.Math.Clamp(px, this.patrolMinX, this.patrolMaxX)
-    const dir = Math.sign(targetX - cx) || this.facing
-    this.facing = px >= cx ? 1 : -1 // face the player even while clamped.
+    const py = player.body.center.y
+    this.facing = px >= cx ? 1 : -1 // always face the player.
 
-    // Accelerate vx toward chaseSpeed in `dir`, capped (frame-rate independent).
-    let vx = this.body.velocity.x
-    const target = dir * this.spec.chaseSpeed
-    if (vx < target) vx = Math.min(target, vx + this.spec.chaseAccel * dt)
-    else if (vx > target) vx = Math.max(target, vx - this.spec.chaseAccel * dt)
-    // If we're at the clamp edge and the player is past it, stop (don't grind into the pit edge).
-    if ((cx <= this.patrolMinX && dir < 0) || (cx >= this.patrolMaxX && dir > 0)) vx = 0
-    this.body.setVelocityX(vx)
+    if (this.behavior === 'fly') {
+      // FLYER (Decision 68): a 2-D hover toward the player, targeting a point hoverHeight ABOVE it, so
+      // it floats and swoops rather than walking. Gravity is off (constructor) — we drive BOTH axes.
+      const targetX = px
+      const targetY = py - (this.spec.hoverHeight || 140)
+      const ax = Math.sign(targetX - cx)
+      const ay = Math.sign(targetY - cy)
+      this.body.setVelocity(ax * this.spec.chaseSpeed, ay * this.spec.patrolSpeed)
+    } else {
+      // GROUND chase (GRUNT/SHOOTER/CHARGER): accelerate vx toward chaseSpeed, clamped to the pit-safe
+      // patrol span. SHOOTER kites: if the player is CLOSER than preferredRange, it backs AWAY instead.
+      const targetX = Phaser.Math.Clamp(px, this.patrolMinX, this.patrolMaxX)
+      let dir = Math.sign(targetX - cx) || this.facing
+      if (this.behavior === 'ranged' && Math.abs(px - cx) < (this.spec.preferredRange || 0)) {
+        dir = -Math.sign(px - cx) || -this.facing // retreat to keep its preferred spacing (kiting).
+      }
+      let vx = this.body.velocity.x
+      const target = dir * this.spec.chaseSpeed
+      if (vx < target) vx = Math.min(target, vx + this.spec.chaseAccel * dt)
+      else if (vx > target) vx = Math.max(target, vx - this.spec.chaseAccel * dt)
+      // At a clamp edge with the player past it, stop (don't grind into the pit/wall edge).
+      if ((cx <= this.patrolMinX && dir < 0) || (cx >= this.patrolMaxX && dir > 0)) vx = 0
+      this.body.setVelocityX(vx)
+    }
 
-    // In range + off cooldown → commit an attack (enter the telegraph).
+    // In range + off cooldown → commit an attack (enter the telegraph). The range check uses the
+    // archetype's attackRange (a SHOOTER's is large — it fires from afar; a CHARGER's commits the dash
+    // from a distance) and a vertical band (the FLYER's detectHeight is tall so a swoop engages).
     const inRange = Math.abs(px - cx) <= this.spec.attackRange &&
-      Math.abs(player.body.center.y - this.body.center.y) <= this.spec.detectHeight
+      Math.abs(py - cy) <= this.spec.detectHeight
     if (inRange && this.attackCooldownTimer <= 0) {
       this.state = STATE.ATTACK
       this.telegraphTimer = this.spec.telegraph
       this.strikeTimer = 0
-      this.body.setVelocityX(0)
+      if (this.behavior !== 'fly') this.body.setVelocityX(0) // ground enemies plant; flyer keeps hovering.
       return
     }
 
@@ -244,25 +263,44 @@ export class Enemy {
     }
   }
 
-  // ── attack: telegraph (wind-up, dodgeable) → strike (live hitbox) → recovery → chase ──
+  // ── attack: telegraph (wind-up, dodgeable) → strike → recovery → chase ──
+  // The strike DISPATCHES by behaviour (Decision 68): 'melee' → a pooled hitbox in front; 'ranged' →
+  // a fired pooled 'enemy' projectile; 'charge'/'fly' → a latched body-contact DASH/SWOOP (the body IS
+  // the hitbox — the existing contact overlap deals the high contact damage during the active window).
   _tickAttack(dt, ctx) {
-    this.body.setVelocityX(0) // committed: planted while attacking.
-
     if (this.telegraphTimer > 0) {
-      // Wind-up: just tick down. The visual flashes the telegraph color (see _updateVisual).
+      // Wind-up: plant (ground) / hold (flyer), tick down. The visual flashes the telegraph colour.
+      if (this.behavior === 'fly') this.body.setVelocity(0, 0)
+      else this.body.setVelocityX(0)
       this.telegraphTimer -= dt
       if (this.telegraphTimer <= 0) {
-        // Telegraph done → fire the strike hitbox ONCE (Decision 30 — same pooled mechanism).
-        this._fireStrike()
+        this._fireStrike(ctx) // commit the strike ONCE (dispatched by behaviour).
         this.strikeTimer = this.spec.attackActive + this.spec.attackRecovery
+        this.dashActive = this.behavior === 'charge' || this.behavior === 'fly' // body-contact window.
       }
       return
     }
 
-    // Strike active+recovery window: the hitbox lives on the pool (released by HitboxPool.tick).
+    // Strike active+recovery window. For a dash/swoop the body MOVES (the latched velocity) while the
+    // active window is live, then plants for the recovery; the body-contact hitbox is its strike.
     this.strikeTimer -= dt
+    const recoveryStart = this.spec.attackRecovery
+    const inActive = this.strikeTimer > recoveryStart // active phase precedes recovery (timer counts down).
+    if (this.behavior === 'charge') {
+      if (inActive && this.dashActive) this.body.setVelocityX(this.dashDir * (this.spec.chargeSpeed || 600))
+      else { this.body.setVelocityX(0); this.dashActive = false } // recovery: plant.
+    } else if (this.behavior === 'fly') {
+      if (inActive && this.dashActive) this.body.setVelocity(this.swoopVX, this.swoopVY)
+      else { this.body.setVelocity(0, 0); this.dashActive = false } // recovery: hover in place.
+    } else {
+      // MELEE/RANGED: planted while attacking (the original behaviour — the strike is a stationary swing
+      // or shot). Keeps the grunt's Phase-4 feel byte-for-byte.
+      this.body.setVelocityX(0)
+    }
+
     if (this.strikeTimer <= 0) {
       this.attackCooldownTimer = this.spec.attackCooldown
+      this.dashActive = false
       this.state = STATE.CHASE
       this.strikeRect = null // strike fully resolved — drop our handle (defensive; the ownerId guard
       //                        in _releaseStrike already prevents releasing a re-acquired rect).
@@ -281,13 +319,41 @@ export class Enemy {
     if (this.deathTimer <= 0) this._despawn()
   }
 
-  // Acquire the strike hitbox from the SHARED enemy pool, placed in front by facing (Decision 30).
-  // STORE the returned rect (review MAJOR / Phase-4 seam): with multiple enemies sharing one pool we
-  // must release only OUR live strike on an interrupt/death — never releaseAll() the whole pool (that
-  // would cancel a DIFFERENT enemy's live strike mid-swing). acquire() already returns the rect, so
-  // _releaseStrike() targets exactly ours. (Cleaner than a per-enemy pool — DRY, no pool proliferation.)
-  _fireStrike() {
+  // Commit the strike at telegraph end — DISPATCHED by behaviour (Decision 68). 'melee' acquires a
+  // pooled hitbox in front; 'ranged' fires a pooled 'enemy' projectile (Decision 65); 'charge'/'fly'
+  // LATCH a dash/swoop velocity (the body becomes the hitbox — contact damage during the active window).
+  // STORE the returned melee rect (review MAJOR / Phase-4 seam): with multiple enemies sharing one pool
+  // we release only OUR live strike on an interrupt/death — never releaseAll() (that would cancel a
+  // DIFFERENT enemy's live strike). acquire() returns the rect, so _releaseStrike() targets exactly ours.
+  _fireStrike(ctx) {
     const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
+    if (this.behavior === 'ranged') {
+      // SHOOTER: fire a pooled 'enemy' projectile along facing (its hit is resolved by GameScene's
+      // enemy-projectile overlap against the player — Decision 65). Null pool ⇒ cosmetic no-op (safe).
+      if (this.projectilePool && this.spec.projectile) {
+        this.projectilePool.acquire(attacker, this.spec.projectile, this.id)
+      }
+      return
+    }
+    if (this.behavior === 'charge') {
+      // CHARGER: latch the dash direction toward the player (committed — you dodge the telegraph).
+      const px = ctx?.player?.body?.center?.x ?? this.body.center.x
+      this.dashDir = px >= this.body.center.x ? 1 : -1
+      this.facing = this.dashDir
+      return
+    }
+    if (this.behavior === 'fly') {
+      // FLYER: latch a 2-D swoop velocity straight toward the player's CURRENT position (a lunge).
+      const p = ctx?.player?.body?.center
+      const dx = (p?.x ?? this.body.center.x) - this.body.center.x
+      const dy = (p?.y ?? this.body.center.y) - this.body.center.y
+      const len = Math.hypot(dx, dy) || 1
+      const s = this.spec.swoopSpeed || 440
+      this.swoopVX = (dx / len) * s
+      this.swoopVY = (dy / len) * s
+      return
+    }
+    // MELEE (GRUNT): the pooled hitbox in front (the original path).
     this.strikeRect = this.hitboxPool.acquire(attacker, this.spec.swing, this.id)
   }
 

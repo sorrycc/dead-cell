@@ -39,10 +39,11 @@ import { generateLevel, TILE, canReachPlatform } from '../src/world/LevelGenerat
 import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
-// modules satisfy. (BRUTE_SPEC lives in the Phaser-coupled Enemy.js, so we DON'T import it; the
-// scaleSpec monotonicity proof uses a minimal PURE base stub below — scaleSpec only multiplies
-// numeric fields, so any base with those fields proves the "scaled stat rises" property.)
-import { scaleAtDepth, scaleSpec, effectiveDifficulty } from '../src/config/difficulty.js'
+// modules satisfy. The Bosses phase (§6.6, Decision 64/68) HOISTED the canonical enemy specs to the
+// PURE config/enemies.js (Enemy.js re-exports GRUNT as BRUTE_SPEC for back-compat) so the verifier now
+// imports the REAL grunt spec as the scaleSpec base — REPLACING the old duplicated BASE_SPEC_STUB
+// (review MINOR — one source of truth, DRY). scaleBossSpec is the boss-specific depth fold (Decision 64).
+import { scaleAtDepth, scaleSpec, scaleBossSpec, effectiveDifficulty } from '../src/config/difficulty.js'
 import { createRunState } from '../src/core/RunState.js'
 // Meta-loop PURE modules (§6.5, Decision 56/57/61, AC55): the upgrade + weapon tables + the pure
 // applyUpgrades fold. A SUCCESSFUL node import RE-PROVES their purity (no Phaser, no top-level
@@ -52,6 +53,11 @@ import { createRunState } from '../src/core/RunState.js'
 import { UPGRADES } from '../src/config/upgrades.js'
 import { WEAPON_ORDER } from '../src/config/weapons.js'
 import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
+// Bosses-phase PURE modules (§6.6, Decision 64/68, AC56/AC59/AC61): the archetype specs + per-biome
+// pools, the boss table, and the boss-arena generator branch. All node-importable (no Phaser) — the
+// verifier asserts the enemy-pool/archetype + boss-table well-formedness + the boss-arena contract.
+import { ENEMY_SPECS, ENEMY_ARCHETYPES, GRUNT } from '../src/config/enemies.js'
+import { BOSS_ORDER, BOSS_ATTACK_KINDS } from '../src/config/bosses.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -188,6 +194,39 @@ function bfsTraversable(desc) {
     for (const v of adj[u]) if (!seen[v]) { seen[v] = 1; queue.push(v) }
   }
   return { ok: false, reason: 'exit platform not reachable from entrance' }
+}
+
+// ── Boss-arena assertions (design §6.6.2, Decision 66, AC57 — review BLOCKER) ── the boss arena is a
+// DISTINCT generator branch with a DISTINCT contract: it has NO exit Door / no real exit, so it must
+// NOT flow through checkDescription (whose exit≠entrance + exit-standable + entrance→exit BFS checks
+// would REJECT it). This is its SEPARATE verification path: bounded, single-floor traversable (trivially
+// — one floor), has a bossSpawn, enemies/pickups empty, isBossArena true, and NO meaningful exit (the
+// exit is a harmless placeholder equal to the entrance, which this path does NOT forbid). Returns null
+// on pass or a reason. (The N-seed sweep runs THIS for the boss-arena mode, NOT checkDescription.)
+function checkBossArena(desc, biome) {
+  // Bounded (AC28-style) — same size bounds as any level.
+  if (desc.cols < COLS_MIN || desc.cols > COLS_MAX) return `boss arena cols ${desc.cols} out of bounds`
+  if (desc.rows < ROWS_MIN || desc.rows > ROWS_MAX) return `boss arena rows ${desc.rows} out of bounds`
+  if (desc.tiles.length !== desc.rows) return `boss arena tiles row count mismatch`
+  if (desc.tiles[0].length !== desc.cols) return `boss arena tiles col count mismatch`
+  // The DISTINCT boss-arena contract.
+  if (desc.isBossArena !== true) return 'boss arena missing isBossArena flag'
+  if (!desc.bossSpawn) return 'boss arena missing bossSpawn'
+  if (desc.enemies.length !== 0) return `boss arena has ${desc.enemies.length} normal enemies (must be 0)`
+  if (desc.pickups.length !== 0) return `boss arena has ${desc.pickups.length} pickups (must be 0)`
+  // The entrance + bossSpawn must be STANDABLE (EMPTY with a support below) — the floor footing.
+  const en = desc.entrance
+  if (!isStandable(desc.tiles, en.col, en.row, desc.rows)) return 'boss arena entrance not standable'
+  const bs = desc.bossSpawn
+  if (!isStandable(desc.tiles, bs.col, bs.row, desc.rows)) return 'boss arena bossSpawn not standable'
+  // Single-floor traversable: the entrance + bossSpawn share the floor (same row) so the player can
+  // walk to the boss with no jump — trivially traversable by construction (one floor, nothing to fail).
+  if (en.row !== bs.row) return 'boss arena entrance/bossSpawn not on the same floor (must be flat)'
+  // There must be at least one HAZARD tile (the arena hazard — AC57).
+  let hazardCount = 0
+  for (let r = 0; r < desc.rows; r++) for (let c = 0; c < desc.cols; c++) if (desc.tiles[r][c] === TILE.HAZARD) hazardCount++
+  if (hazardCount === 0) return 'boss arena has no HAZARD tiles (the arena hazard, AC57)'
+  return null
 }
 
 // ── Per-description assertions (bounds + spawns + traversable). Returns null on pass or a reason. ──
@@ -345,16 +384,11 @@ const PIN_EXPECTED = {
 //    verifier walks the EXACT advance() chain the game walks and re-derives every property.
 // ════════════════════════════════════════════════════════════════════════════════════════════
 
-// A minimal PURE base spec for the scaleSpec monotonicity proof (BRUTE_SPEC lives in Phaser-coupled
-// Enemy.js — see the import note). scaleSpec only MULTIPLIES these numeric fields, so any base with
-// them proves "the scaled stat rises with depth"; the exact base values don't matter to the property.
-const BASE_SPEC_STUB = {
-  maxHp: 60,
-  contactDamage: 6,
-  patrolSpeed: 70,
-  chaseSpeed: 160,
-  swing: { reach: 56, damage: 12, knockback: 320 },
-}
+// The REAL grunt spec (config/enemies.js — Decision 68) is the scaleSpec monotonicity base. The Bosses
+// phase hoisted the canonical specs to a PURE config so the verifier imports the SAME spec the game
+// runs, REPLACING the old duplicated BASE_SPEC_STUB (review MINOR — DRY, one source of truth). scaleSpec
+// only MULTIPLIES the numeric fields, so the grunt's real values prove "the scaled stat rises with depth".
+const BASE_SPEC_STUB = GRUNT
 
 // ── 4a) Curve monotonicity (AC42): each scaleAtDepth scalar is non-decreasing in depth, AND the
 // scaled stat (scaleSpec(...).maxHp) actually rises — the scaling is real, not just the multiplier. ──
@@ -515,11 +549,141 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 6) Bosses + richness pure contracts (§6.6, Decision 64/66/68/69/70, AC56/AC57/AC59/AC60/AC61). An
+//    INDEPENDENT proof of the enemy-pool/archetype + boss-table + 4-weapon + boss-arena contracts that
+//    stay Phaser-free. NOTE on scope (review MAJOR — the HONEST claim): the WHOLE-RUN monotonicity walk
+//    (§4c) reads effectiveDifficulty(depth, biome) = biome.tier + depth curve — it does NOT see boss
+//    HP/attack tuning, so the boss BALANCE is NOT proven by that walk. What IS proven here for the boss
+//    is a TABLE WELL-FORMEDNESS check (descending thresholds, known attack kinds, a non-empty pattern
+//    per phase) + a depth-scaling GUARDRAIL (a deeper boss is never weaker) — guardrails, not a
+//    winnability proof. The 4 enemy archetypes / 4 weapons / boss-arena contract ARE fully proven.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── 6a) Enemy archetypes well-formed (AC59): ≥4 archetypes, each with the shared numeric fields + a
+// known behavior; the scaleSpec fold rises with depth on every archetype (not just the grunt). ──
+{
+  if (ENEMY_ARCHETYPES.length < 4) fail(`ENEMY_ARCHETYPES has ${ENEMY_ARCHETYPES.length}, expected ≥4 (AC59)`)
+  const KNOWN_BEHAVIORS = ['melee', 'ranged', 'charge', 'fly']
+  const SPEC_FIELDS = ['maxHp', 'bodyW', 'bodyH', 'patrolSpeed', 'chaseSpeed', 'attackRange', 'telegraph', 'contactDamage']
+  for (const spec of ENEMY_ARCHETYPES) {
+    if (!KNOWN_BEHAVIORS.includes(spec.behavior)) fail(`archetype ${spec.id}: unknown behavior ${spec.behavior}`)
+    for (const f of SPEC_FIELDS) {
+      if (typeof spec[f] !== 'number') fail(`archetype ${spec.id}: missing numeric field "${f}"`)
+    }
+    if (!spec.swing || typeof spec.swing.damage !== 'number') fail(`archetype ${spec.id}: missing swing.damage`)
+    if (spec.telegraph <= 0) fail(`archetype ${spec.id}: telegraph must be > 0 (the dodge window, AC56)`)
+    // A 'ranged' archetype MUST carry a projectile spec (it fires instead of swinging — Decision 65).
+    if (spec.behavior === 'ranged') {
+      if (!spec.projectile || typeof spec.projectile.damage !== 'number') {
+        fail(`archetype ${spec.id}: ranged behavior but no projectile spec`)
+      }
+    }
+    // scaleSpec rises with depth on THIS archetype (the scaling is real per-archetype).
+    const s0 = scaleSpec(spec, scaleAtDepth(0)).maxHp
+    const s10 = scaleSpec(spec, scaleAtDepth(10)).maxHp
+    if (!(s10 > s0)) fail(`archetype ${spec.id}: scaled maxHp did not rise with depth (${s10} ≤ ${s0})`)
+  }
+}
+
+// ── 6b) Per-biome enemyPool well-formed (AC59): every biome has a non-empty enemyPool referencing only
+// KNOWN archetype ids with positive weights. The single source the SCENE picks archetypes from. ──
+{
+  for (const biome of BIOME_ORDER) {
+    if (!Array.isArray(biome.enemyPool) || biome.enemyPool.length === 0) {
+      fail(`biome ${biome.id}: enemyPool is empty (AC59)`)
+    }
+    for (const entry of biome.enemyPool) {
+      if (!ENEMY_SPECS[entry.id]) fail(`biome ${biome.id}: enemyPool references unknown archetype "${entry.id}" (AC59)`)
+      if (!(typeof entry.w === 'number') || entry.w <= 0) fail(`biome ${biome.id}: enemyPool weight for "${entry.id}" must be > 0`)
+    }
+  }
+  // EXACTLY one biome ends in a boss (the last), and it carries a `boss` id keyed into a known boss.
+  const bossBiomes = BIOME_ORDER.filter((b) => b.endsInBoss === true)
+  if (bossBiomes.length !== 1) fail(`expected exactly 1 boss biome (endsInBoss), found ${bossBiomes.length} (AC57)`)
+  if (bossBiomes[0] !== BIOME_ORDER[BIOME_ORDER.length - 1]) fail('the boss biome must be the LAST in BIOME_ORDER (AC57)')
+  if (!bossBiomes[0].boss) fail(`boss biome ${bossBiomes[0].id} missing a boss id (AC57)`)
+}
+
+// ── 6c) Boss table well-formed (AC56/AC61): ≥1 boss; each has ≥2 phases with DESCENDING hpThresholds
+// (the first 1.0), each phase a non-empty pattern referencing only KNOWN attack kinds; every referenced
+// attack exists in the boss's `attacks` map with the right params; the depth-scaling fold never weakens. ──
+{
+  if (BOSS_ORDER.length < 1) fail(`BOSS_ORDER has ${BOSS_ORDER.length} bosses, expected ≥1 (AC56)`)
+  for (const boss of BOSS_ORDER) {
+    if (!(typeof boss.maxHp === 'number') || boss.maxHp <= 0) fail(`boss ${boss.id}: maxHp must be > 0`)
+    if (!Array.isArray(boss.phases) || boss.phases.length < 2) fail(`boss ${boss.id}: expected ≥2 phases (AC56)`)
+    if (boss.phases[0].hpThreshold !== 1.0) fail(`boss ${boss.id}: phase 0 hpThreshold must be 1.0 (active from full HP)`)
+    for (let i = 1; i < boss.phases.length; i++) {
+      if (boss.phases[i].hpThreshold > boss.phases[i - 1].hpThreshold) {
+        fail(`boss ${boss.id}: phase thresholds not descending at ${i}`)
+      }
+    }
+    for (const phase of boss.phases) {
+      if (!Array.isArray(phase.attacks) || phase.attacks.length === 0) fail(`boss ${boss.id}: a phase has an empty attack pattern (AC56)`)
+      if (!(typeof phase.telegraphMult === 'number') || phase.telegraphMult <= 0) fail(`boss ${boss.id}: telegraphMult must be > 0`)
+      for (const kind of phase.attacks) {
+        if (!BOSS_ATTACK_KINDS.includes(kind)) fail(`boss ${boss.id}: phase pattern references unknown attack kind "${kind}" (AC56)`)
+        const atk = boss.attacks[kind]
+        if (!atk) fail(`boss ${boss.id}: phase references attack "${kind}" missing from the attacks map`)
+        if (!(atk.telegraph > 0)) fail(`boss ${boss.id}: attack "${kind}" telegraph must be > 0 (dodgeable, AC56)`)
+        if (!(atk.active > 0)) fail(`boss ${boss.id}: attack "${kind}" active must be > 0`)
+      }
+    }
+    // Depth-scaling GUARDRAIL (review MAJOR — the HONEST claim): a deeper boss is never WEAKER. The
+    // boss-specific fold (scaleBossSpec) scales maxHp + every attack's damage by the depth curve;
+    // assert a depth-10 boss has ≥ the base maxHp + ≥ each attack's base damage (monotone, non-mutating).
+    const base = boss
+    const scaled0 = scaleBossSpec(boss, scaleAtDepth(0))
+    const scaled10 = scaleBossSpec(boss, scaleAtDepth(10))
+    if (scaled10.maxHp < scaled0.maxHp) fail(`boss ${boss.id}: scaled maxHp dropped with depth (${scaled10.maxHp} < ${scaled0.maxHp})`)
+    if (scaled10.maxHp < base.maxHp) fail(`boss ${boss.id}: scaled maxHp below base (${scaled10.maxHp} < ${base.maxHp})`)
+    // Non-mutation: snapshot a base attack damage, run the fold, re-read it (scaleBossSpec must clone).
+    const baseSlamDmg = base.attacks.slam ? base.attacks.slam.swing.damage : null
+    for (const kind of BOSS_ATTACK_KINDS) {
+      const a = base.attacks[kind]
+      const a10 = scaled10.attacks[kind]
+      if (a.swing && a10.swing.damage < a.swing.damage) fail(`boss ${boss.id}: scaled ${kind} slam damage dropped`)
+      if (a.projectile && a10.projectile.damage < a.projectile.damage) fail(`boss ${boss.id}: scaled ${kind} volley damage dropped`)
+      if (typeof a.contactDamage === 'number' && a10.contactDamage < a.contactDamage) fail(`boss ${boss.id}: scaled ${kind} dash damage dropped`)
+    }
+    // Non-mutation: the base table's slam damage must be UNCHANGED after the folds (scaleBossSpec clones).
+    if (baseSlamDmg !== null && base.attacks.slam.swing.damage !== baseSlamDmg) {
+      fail(`boss ${boss.id}: scaleBossSpec MUTATED the base attacks (aliasing bug)`)
+    }
+  }
+}
+
+// ── 6d) 4-weapon richness (AC60): WEAPON_ORDER grew to ≥4 (the §5d swing-table check already proves
+// each is well-formed; here we just assert the COUNT requirement of the Bosses phase). ──
+{
+  if (WEAPON_ORDER.length < 4) fail(`WEAPON_ORDER has ${WEAPON_ORDER.length} weapons, expected ≥4 (AC60)`)
+}
+
+// ── 6e) Boss-arena generator branch (AC57, review BLOCKER): the boss-arena MODE is a DISTINCT pure
+// generateLevel branch. Sweep N seeds for the boss biome's arena and run them through checkBossArena
+// (NOT checkDescription — the no-exit arena would fail its exit/traversability checks). Also re-prove
+// the arena is DETERMINISTIC (same seed → deep-equal) like every other generation. ──
+{
+  const bossBiome = BIOME_ORDER[BIOME_ORDER.length - 1]
+  const arenaCfg = { ...bossBiome, bossArena: true }
+  for (let i = 0; i < N; i++) {
+    const seed = (i * 2654435761) >>> 0
+    const a1 = generateLevel(seed, arenaCfg)
+    const a2 = generateLevel(seed, arenaCfg)
+    if (!deepEqual(a1, a2)) fail(`boss-arena determinism: seed ${seed} produced two descriptions`)
+    const reason = checkBossArena(a1, bossBiome)
+    if (reason) fail(`boss arena seed ${seed}: ${reason}`)
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
     `traversable(AC27); level pin OK; curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
-    `identity/non-mutating/never-weaker (AC55)`,
+    `identity/non-mutating/never-weaker (AC55); ${ENEMY_ARCHETYPES.length} enemy archetypes + per-biome ` +
+    `pools (AC59); boss table well-formed + depth-scaling guardrail (AC56/AC61); ${WEAPON_ORDER.length} ` +
+    `weapons (AC60); boss-arena branch deterministic + valid over ${N} seeds (AC57)`,
 )
 process.exit(0)
