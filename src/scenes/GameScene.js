@@ -371,6 +371,12 @@ export class GameScene extends Phaser.Scene {
     this.desc = desc
     this.tileMap = new TileMap(this, desc)
 
+    // Level-object tracking (destroyed on rebuild via _levelObjects). MUST be initialized BEFORE
+    // _applyRoomType — a tagged room pops a banner that pushes here (_popRoomBanner). The constructor
+    // never inits it, so on the FIRST create()-time build this would otherwise be undefined (crash), and
+    // a later reset would discard the banner reference (leak). One init point per build (boss path: line 619).
+    this._levelObjects = []
+
     // ── ROOM TYPE (Enrichment round-2, §6.15) ── roll a tagged room type off the LEVEL seed (a fresh sub-RNG,
     // OFF the generator's pinned draw — the weapon-pickup/shop discipline, so the level pin stays intact). A
     // miniboss level is NEVER tagged (it already IS the set-piece — see _buildLevel's miniboss branch). The
@@ -386,8 +392,8 @@ export class GameScene extends Phaser.Scene {
     this.player.body.reset(desc.entrance.x, desc.entrance.y)
     this.player.rect.setPosition(desc.entrance.x, desc.entrance.y)
 
-    // Entrance marker (cosmetic) so the start reads. Destroyed on rebuild via _levelObjects.
-    this._levelObjects = []
+    // Entrance marker (cosmetic) so the start reads. Pushed onto the already-initialized _levelObjects
+    // (set above, before _applyRoomType) so both it and any room banner are destroyed on rebuild.
     const entMarker = this.add
       .rectangle(desc.entrance.x, desc.entrance.y, TILE_SIZE * 0.5, TILE_SIZE * 1.4, biome.colors.entrance)
       .setAlpha(0.55)
