@@ -1,6 +1,8 @@
 import Phaser from 'phaser'
 import { DESIGN_WIDTH, UI_FONT } from '../config/constants.js'
 import { t } from '../i18n/index.js'
+import { COLOR_IDS, COLORS } from '../config/colors.js'
+import type { ColorId } from '../config/colors.js'
 
 // ── HUDScene (design §6.0 + §6.3 + §6.4 + §6.5 + §6.6, Decision 2, AC23/AC45/AC49/AC54/AC56) ──
 // Runs in PARALLEL over GameScene (launched, not started). It is DECOUPLED from gameplay (SOLID):
@@ -39,6 +41,10 @@ export class HUDScene extends Phaser.Scene {
   private skill1Label!: Phaser.GameObjects.Text
   private skill2Label!: Phaser.GameObjects.Text
   private mutationsLabel!: Phaser.GameObjects.Text
+  // color-scaling-stats §6 (AC10) — three small per-colour pips ("B n · T n · S n"), each its own fixed-x Text
+  // so they stay pixel-anchored under the proportional CJK fallback (the Hub/Shop alignment discipline). Each is
+  // tinted to its colour; the equipped weapon's colour is highlighted (brighter + bracketed). Registry-only.
+  private colorPips!: Phaser.GameObjects.Text[]
   private levelTimeLabel!: Phaser.GameObjects.Text
   private bossTrack!: Phaser.GameObjects.Rectangle
   private bossFill!: Phaser.GameObjects.Rectangle
@@ -105,6 +111,18 @@ export class HUDScene extends Phaser.Scene {
       .text(BAR_X, BAR_Y + BAR_H + 154, '', { fontFamily: UI_FONT, fontSize: '17px', color: '#2ecc71' })
       .setOrigin(0, 0)
       .setScrollFactor(0)
+
+    // ── Colour-scaling pips (color-scaling-stats §6, AC10) ── three fixed-x per-colour Texts ("B n · T n · S n")
+    // under the mutations line, each tinted to its colour (red/purple/green). Pixel-anchored (each its own x) so
+    // they align under the proportional CJK fallback. update() fills the levels + highlights the equipped colour.
+    const COLOR_PIP_Y = BAR_Y + BAR_H + 178
+    const COLOR_PIP_DX = 64 // px between pip columns (fixed cells — alignment-safe under CJK).
+    this.colorPips = COLOR_IDS.map((id, i) =>
+      this.add
+        .text(BAR_X + i * COLOR_PIP_DX, COLOR_PIP_Y, '', { fontFamily: UI_FONT, fontSize: '17px', color: '#' + COLORS[id].tint.toString(16).padStart(6, '0') })
+        .setOrigin(0, 0)
+        .setScrollFactor(0),
+    )
 
     // ── Per-level fast-clear TIMER (build-&-replay slice, AC5) ── top-RIGHT (under the HUD tag) so it reads
     // as a speed-run clock. Shown only on a TIMED level (levelTime > 0 — a normal, non-set-piece level); turns
@@ -175,6 +193,25 @@ export class HUDScene extends Phaser.Scene {
     // (a fresh run / a run with no mutation picked). Registry-only (decoupled). Defaults keep it sane.
     const mutations = this.registry.get('mutations') ?? ''
     this.mutationsLabel.setText(mutations ? t('hud.mutations', { list: mutations }) : '')
+
+    // ── Colour-scaling pips (color-scaling-stats §6, AC10) ── per-colour "Name n" tinted to its colour; the
+    // equipped weapon's colour is HIGHLIGHTED (bracketed + white) so the active build colour reads. Defaults to
+    // 0 (a fresh run shows "Brutality 0", etc. — the identity). Registry-only (decoupled).
+    const equippedColor = (this.registry.get('equippedColor') ?? 'brutality') as ColorId
+    const levels: Record<ColorId, number> = {
+      brutality: this.registry.get('brutalityLevel') ?? 0,
+      tactics: this.registry.get('tacticsLevel') ?? 0,
+      survival: this.registry.get('survivalLevel') ?? 0,
+    }
+    for (let i = 0; i < COLOR_IDS.length; i++) {
+      const id = COLOR_IDS[i]
+      const letter = t(`color.${id}`).charAt(0) // first char of the localized name (B/T/S · 残/战/生) — a small pip.
+      const n = levels[id]
+      const equipped = id === equippedColor
+      // The equipped colour: bracketed + white (the highlight); the rest: its tint. Short "X n" keeps the pip small.
+      this.colorPips[i].setText(equipped ? `[${letter} ${n}]` : `${letter} ${n}`)
+      this.colorPips[i].setColor(equipped ? '#ffffff' : '#' + COLORS[id].tint.toString(16).padStart(6, '0'))
+    }
 
     // Per-level fast-clear TIMER (build-&-replay slice, AC5) — ms elapsed on the current timed level. 0 = an
     // untimed boss/miniboss arena → hide the clock. Turns AMBER in the last quarter of the bonus window (so

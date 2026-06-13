@@ -83,6 +83,20 @@ export const ZH_CN: Dict = {
     'mutation.subtitle': '进入新的生物群系 —— 选择一个本局永久强化',
     'mutation.help': '上/下 选择 · E/SPACE/ENTER 确认',
 
+    // ── 颜色加成 (color-scaling-stats §6, AC11) —— 颜色名、选择弹窗、HUD 行标签、描述 ──
+    'color.brutality': '残暴',
+    'color.tactics': '战术',
+    'color.survival': '生存',
+    'color.brutality.desc': '+1 残暴 —— 红色，近战伤害',
+    'color.tactics.desc': '+1 战术 —— 紫色，远程与技能伤害',
+    'color.survival.desc': '+1 生存 —— 绿色，长矛伤害与最大生命',
+    'color.title': '提升一种属性颜色',
+    'color.subtitle': '进入新的生物群系 —— 本局永久提升一种属性颜色',
+    'color.help': '上/下 选择 · E/SPACE/ENTER 确认',
+    'scroll.brutality': '残暴卷轴',
+    'scroll.tactics': '战术卷轴',
+    'scroll.survival': '生存卷轴',
+
     // ── 商店 / 商人 ──
     'shop.title': '商店',
     'shop.gold': '金币 {n}',

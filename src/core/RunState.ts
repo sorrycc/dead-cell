@@ -91,6 +91,14 @@ export interface RunState {
   vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
   statusTickMult: number // ×applied DoT tickDmg (Virulent — "ticks harder"). 1 = neutral.
   spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
+  // ── Per-colour run LEVELS (color-scaling-stats §6, Decision 4, AC4) ── the run's Brutality/Tactics/Survival
+  // levels (run-only — lost on death, carried across level rebuilds like every other run field, NEVER seeded
+  // from meta). Each defaults to 0 (the neutral identity): colorMult(0) === 1 and survivalHpBonus(0) === 0, so
+  // a fresh run plays byte-identically. A colour scroll / the biome-transition picker bumps one by +1. The hit
+  // sites read the equipped weapon's colour level; a fired skill reads its own colour's level (GameScene folds).
+  brutalityLevel: number // red — melee weapon (sword/hammer/glaive) + firebomb skill scaling.
+  tacticsLevel: number // purple — bow + ranged/utility skill scaling.
+  survivalLevel: number // green — spear scaling + flat +max HP (via survivalHpBonus in _syncPlayerScrollStats).
   // ── Equipped weapon (primary) ──
   weaponId: string
   weaponAffixId: string | null
@@ -196,6 +204,14 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     vsAfflictedDamageMult: 1, // ×player damage vs an afflicted enemy (Hemorrhage); folded at both hit sites.
     statusTickMult: 1, // ×applied DoT tickDmg when arming a damaging status (Virulent); applied in _scaleStatus.
     spreadAffliction: false, // killing an afflicted enemy spreads its dominant DoT (Hemorrhage); read in onDeath.
+
+    // ── Per-colour run LEVELS (color-scaling-stats §6, Decision 4, AC4) ── all seeded 0 (the neutral identity:
+    // colorMult(0) === 1, survivalHpBonus(0) === 0 → a fresh run plays byte-identically). NEVER seeded from meta
+    // (a fresh run always starts all 0 — the integration map's "meta tier seeds starting levels" was CUT, KISS).
+    // Carried across level rebuilds like every other run field (the scene reuses this persisted RunState object).
+    brutalityLevel: 0,
+    tacticsLevel: 0,
+    survivalLevel: 0,
 
     // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
     // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──

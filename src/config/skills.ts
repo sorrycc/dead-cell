@@ -28,6 +28,7 @@
 //              Pickup reads weaponId/scrollId/healFrac and weapons read swings/projectile.
 
 import type { ProjectileSpec, WeaponStatus } from './weapons.js'
+import type { ColorId } from './colors.js'
 
 // The KNOWN skill kinds — the effect family GameScene._useSkill dispatches on (a small KNOWN set).
 export type SkillKind = 'volley' | 'blast' | 'turret'
@@ -39,6 +40,11 @@ export interface SkillSpec {
   name: string
   desc: string
   kind: SkillKind
+  // ── COLOUR-SCALING tag (color-scaling-stats §6.3, Decision 5, AC3) ── the stat colour this skill scales
+  // with. REQUIRED — every skill is colour-tagged (the verifier asserts a KNOWN colour). A fired skill scales
+  // by ITS colour's run level (NOT the equipped weapon's), baked into the fired damage at _useSkill time
+  // (Decision 9). At level 0 the baked damage equals the spec damage (the identity).
+  scaling: ColorId
   cooldown: number // s — the per-slot gate (> 0; the verifier asserts).
   // ── volley ── fire `count` projectiles fanned across `spread` radians along facing. `projectile` is
   // the SAME ProjectileSpec shape the bow uses (ProjectilePool.acquire reads it).
@@ -75,6 +81,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Throwing Knives',
     desc: 'Throw a fan of 3 knives',
     kind: 'volley',
+    scaling: 'tactics', // ranged burst → purple/Tactics (Decision 5).
     cooldown: 2.0,
     count: 3,
     spread: 0.34, // rad — a tight fan (~20° total) so all three land on a single target up close.
@@ -87,6 +94,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Ice Shards',
     desc: 'Spray 5 freezing shards',
     kind: 'volley',
+    scaling: 'tactics', // ranged spray → purple/Tactics (Decision 5).
     cooldown: 4.0,
     count: 5,
     spread: 0.7, // rad — a wide spray (~40° total) to cover an approaching group.
@@ -100,6 +108,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Frost Grenade',
     desc: 'Radial freeze blast',
     kind: 'blast',
+    scaling: 'tactics', // thrown CC → purple/Tactics (Decision 5).
     cooldown: 5.0,
     radius: 150,
     damage: 14,
@@ -113,6 +122,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Firebomb',
     desc: 'Radial burn blast',
     kind: 'blast',
+    scaling: 'brutality', // the heavy radial damage burn (brawler payoff) → red/Brutality (Decision 5).
     cooldown: 6.0,
     radius: 140,
     damage: 20,
@@ -127,6 +137,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Turret',
     desc: 'Deploy an auto-firing turret',
     kind: 'turret',
+    scaling: 'tactics', // deployed ranged → purple/Tactics (Decision 5).
     cooldown: 9.0,
     duration: 8.0,
     fireInterval: 0.7,
@@ -142,6 +153,7 @@ export const SKILLS: SkillSpec[] = [
     name: 'Shockwave',
     desc: 'Heavy radial knockback blast',
     kind: 'blast',
+    scaling: 'tactics', // thrown radial knockback → purple/Tactics (Decision 5).
     cooldown: 7.0,
     radius: 170,
     damage: 22,

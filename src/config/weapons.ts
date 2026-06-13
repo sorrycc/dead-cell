@@ -19,6 +19,8 @@
 // PROJECTILE SPEC (ranged only, Decision 62): { speed, damage, knockback, lifetime, w, h } — the
 // pooled projectile reads these. Present iff type==='ranged' (the verifier asserts the iff, AC55).
 
+import type { ColorId } from './colors.js'
+
 // A single swing row — the SAME shape combat/hitbox.js + HitboxPool + Player read (DRY, see SWING SCHEMA above).
 export interface SwingRow {
   reach: number
@@ -97,6 +99,12 @@ export interface WeaponSpec {
   id: string
   name: string
   type: string
+  // ── COLOUR-SCALING tag (color-scaling-stats §6.2, Decision 5, AC2) ── the stat colour this weapon scales
+  // with (brutality | tactics | survival). REQUIRED — every weapon is colour-tagged (the verifier asserts
+  // it's a KNOWN colour). foldWeaponAffix carries it through the `...weapon` spread (it's an immutable PATTERN
+  // tag, never scaled by an affix — like `moveset`). The hit site reads `equippedWeapon.scaling` → its run
+  // level → colorMult; at level 0 the mult is 1 (the identity, so a default run plays byte-unchanged).
+  scaling: ColorId
   swings: SwingRow[]
   status?: WeaponStatus
   projectile?: ProjectileSpec
@@ -140,6 +148,7 @@ export const SWORD: WeaponSpec = {
   id: 'sword',
   name: 'Sword',
   type: 'melee',
+  scaling: 'brutality', // the default balanced melee → red/Brutality (Decision 5).
   swings: [
     // Swing 1 — quick jab. Short reach, low commit, generous chain window.
     { reach: 46, halfHeight: 26, forward: 18, damage: 8, knockback: 220, active: 0.08, recovery: 0.12, comboWindow: 0.34, lunge: 80 },
@@ -163,6 +172,7 @@ export const HAMMER: WeaponSpec = {
   id: 'hammer',
   name: 'Hammer',
   type: 'melee',
+  scaling: 'brutality', // heavy melee, big hits → red/Brutality (Decision 5).
   // ── STATUS (design §6.13, Decision 79, AC66) ── the Hammer STUNS on hit: a brief crowd-control freeze
   // on the struck enemy (the genre's "heavy weapon staggers"). A short window so it's a tempo tool, not a
   // lock. status is read by GameScene's melee-hit handler → applied to the enemy's statuses[] (status.js).
@@ -192,6 +202,7 @@ export const BOW: WeaponSpec = {
   id: 'bow',
   name: 'Bow',
   type: 'ranged',
+  scaling: 'tactics', // the ranged weapon → purple/Tactics (Decision 5).
   // ── STATUS (design §6.13, Decision 79, AC66) ── the Bow POISONS on a projectile hit: weak but longer DoT
   // than the spear's bleed (a "tag and kite" identity for the ranged build). Applied by GameScene's
   // projectile-hit handler to the struck enemy's statuses[] (status.js), so the ranged path has identity too.
@@ -231,6 +242,7 @@ export const SPEAR: WeaponSpec = {
   id: 'spear',
   name: 'Spear',
   type: 'melee',
+  scaling: 'survival', // long-reach poke/bleed spacing — the sustain/attrition identity → green/Survival (Decision 5).
   // ── STATUS (design §6.13, Decision 79, AC66) ── the Spear BLEEDS on hit: damage-over-time that rewards
   // poking + repositioning (its identity — low per-hit, but the bleed adds up). A few ticks of small damage
   // over a couple seconds. status is applied to the struck enemy by GameScene's melee-hit handler (status.js).
@@ -263,6 +275,7 @@ export const GLAIVE: WeaponSpec = {
   id: 'glaive',
   name: 'Glaive',
   type: 'melee',
+  scaling: 'brutality', // sweeping melee crowd-control → red/Brutality (Decision 5).
   blueprint: 'bp_weapon_glaive', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
   status: { kind: 'bleed', duration: 2.0, tickInterval: 0.4, tickDmg: 3 }, // a light bleed on the sweep.
   swings: [
@@ -410,11 +423,13 @@ export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | 
   }))
   const folded: FoldedWeaponSpec = {
     // The `...weapon` spread ALSO copies `moveset` onto the folded weapon (per-weapon-movesets §6.1,
-    // Decision 3, AC3) — a shallow ref-copy of immutable PATTERN data (charge/flurry/finisher/pierce are
-    // never mutated, so sharing the ref is safe, mirroring how `status` rode the spread before the
+    // Decision 3, AC3) AND the colour-scaling `scaling` tag (color-scaling-stats §6.2, Decision 5, AC2) —
+    // both shallow ref-copies of immutable PATTERN data (charge/flurry/finisher/pierce + the colour tag are
+    // never mutated, so sharing the ref/value is safe, mirroring how `status` rode the spread before the
     // addStatus override). The moveset's `damageMult` is NOT scaled by the affix (it describes a pattern,
-    // not a stat); the affix-scaled `swings`/`projectile` below carry the damage mult, and the moveset's
-    // mult composes ON TOP at the hit site. The verifier asserts the fold keeps the moveset (§10).
+    // not a stat); `scaling` is a colour TAG, not a stat — so an affix never touches it (a Keen sword is
+    // still a Brutality sword). The affix-scaled `swings`/`projectile` below carry the damage mult, and the
+    // moveset's mult composes ON TOP at the hit site. The verifier asserts the fold keeps both (§10).
     ...weapon,
     swings,
     affixId: affix.id,

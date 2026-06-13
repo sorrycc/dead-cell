@@ -80,6 +80,21 @@ export const EN: Dict = {
     'mutation.subtitle': 'A new biome — pick one perk for the rest of the run',
     'mutation.help': 'UP/DOWN select · E/SPACE/ENTER confirm',
 
+    // ── Colour scaling (color-scaling-stats §6, AC11) — colour names, picker chrome, HUD row label, descs. ──
+    'color.brutality': 'Brutality',
+    'color.tactics': 'Tactics',
+    'color.survival': 'Survival',
+    'color.brutality.desc': '+1 Brutality — red, melee damage',
+    'color.tactics.desc': '+1 Tactics — purple, ranged & skill damage',
+    'color.survival.desc': '+1 Survival — green, spear damage & +max HP',
+    'color.title': 'RAISE A STAT COLOUR',
+    'color.subtitle': 'A new biome — boost one stat colour for the rest of the run',
+    'color.help': 'UP/DOWN select · E/SPACE/ENTER confirm',
+    // Colour-scroll names (scrolls are apply-only — these mirror the others for future list rendering).
+    'scroll.brutality': 'Scroll of Brutality',
+    'scroll.tactics': 'Scroll of Tactics',
+    'scroll.survival': 'Scroll of Survival',
+
     // ── Shop overlay + vendor ──
     'shop.title': 'SHOP',
     'shop.gold': 'GOLD {n}',

@@ -88,6 +88,11 @@ import { WEAPONS } from '../src/config/weapons.js'
 // its purity, and the §11 sweep below asserts it's well-formed (a non-empty list, known kinds, positive
 // cooldowns, kind-specific params present + numeric) — the same guardrail every config table gets.
 import { SKILLS, SKILL_KINDS, SKILLS_BY_ID, SKILL_ORDER } from '../src/config/skills.js'
+// Color-scaling-stats PURE table: the COLOURS table + the scaling math (§14). Node-importable (config/colors.js
+// imports NOTHING — pure data + two pure functions) — a successful import re-proves its purity, and the §14
+// sweep below asserts the colour space is well-formed + colorMult/survivalHpBonus are monotone with an EXACT
+// identity at level 0 (the byte-identity pin) — the same guardrail every config table gets.
+import { COLOR_IDS, COLORS, PER_LEVEL, SURVIVAL_HP_PER_LEVEL, colorMult, survivalHpBonus } from '../src/config/colors.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -931,7 +936,16 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       }
       if (m.finisher && w.type !== 'melee') fail(`weapon ${w.id}: finisher only on a melee weapon`)
     }
+    // ── color-scaling-stats §6.2 (Decision 5/10, AC2) — every weapon carries a KNOWN scaling colour (a weapon
+    // with no/unknown colour fails loudly). AND foldWeaponAffix PRESERVES the tag (it rides the `...weapon`
+    // spread — a pattern tag, never scaled by an affix; a Keen sword is still a Brutality sword). ──
+    if (!COLOR_IDS.includes(w.scaling)) fail(`weapon ${w.id}: scaling "${w.scaling}" not a known colour (${COLOR_IDS.join('/')})`)
+    if (foldWeaponAffix(w, WEAPON_KEEN).scaling !== w.scaling) fail(`weapon ${w.id}: foldWeaponAffix did not preserve scaling`)
   }
+  // Optional (Decision 5/10): every colour is USED by ≥1 weapon OR skill — no dead colour config. Brutality:
+  // sword/hammer/glaive/firebomb; tactics: bow + 5 skills; survival: spear. Assert the colour space is live.
+  const usedColors = new Set([...WEAPON_ORDER.map((w) => w.scaling), ...SKILLS.map((s) => s.scaling)])
+  for (const c of COLOR_IDS) if (!usedColors.has(c)) fail(`colour "${c}" is not used by any weapon/skill (dead colour config)`)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -1254,8 +1268,9 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   // ── 9a) SCROLLS well-formed (AC52 — build variety): ≥4 scrolls (the round-3 ask), each with a string
   // id + name + a function apply; the id list is unique (SCROLL_IDS deduped). The genre's build divergence
   // needs a pool, not 2 flat bumps. ──
-  if (!Array.isArray(SCROLLS) || SCROLLS.length < 4) {
-    fail(`SCROLLS has ${SCROLLS?.length} entries, expected ≥4 (round-3 build variety)`)
+  // color-scaling-stats §6 (Decision 10, AC8) — the three colour scrolls grow the pool to ≥9.
+  if (!Array.isArray(SCROLLS) || SCROLLS.length < 9) {
+    fail(`SCROLLS has ${SCROLLS?.length} entries, expected ≥9 (round-3 build variety + 3 colour scrolls)`)
   }
   const seenScrollIds = new Set()
   for (const s of SCROLLS) {
@@ -1282,10 +1297,14 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       cd: run.scrollDodgeCdMult,
       ifr: run.scrollDodgeIframeBonus,
       flasksMax: run.maxFlasks,
+      // color-scaling-stats §6 (Decision 10) — the three colour levels are bigger-is-better (a level only helps).
+      brut: run.brutalityLevel,
+      tac: run.tacticsLevel,
+      surv: run.survivalLevel,
     }
     s.apply(run) // must not throw.
-    // Damage / max-HP / lifesteal / status / flask are bigger-is-better; the dodge-cooldown mult is
-    // smaller-is-better (a shorter cooldown). Assert NONE moved the wrong way (a boost never weakens).
+    // Damage / max-HP / lifesteal / status / flask / colour levels are bigger-is-better; the dodge-cooldown mult
+    // is smaller-is-better (a shorter cooldown). Assert NONE moved the wrong way (a boost never weakens).
     if (run.scrollDamageMult < before.dmg) fail(`scroll ${s.id}: scrollDamageMult decreased`)
     if (run.scrollMaxHpBonus < before.hp) fail(`scroll ${s.id}: scrollMaxHpBonus decreased`)
     if (run.scrollLifestealFrac < before.life) fail(`scroll ${s.id}: scrollLifestealFrac decreased`)
@@ -1293,13 +1312,37 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (run.scrollDodgeIframeBonus < before.ifr) fail(`scroll ${s.id}: scrollDodgeIframeBonus decreased`)
     if (run.maxFlasks < before.flasksMax) fail(`scroll ${s.id}: maxFlasks decreased`)
     if (run.scrollDodgeCdMult > before.cd) fail(`scroll ${s.id}: scrollDodgeCdMult increased (a longer dodge cooldown is a weaken)`)
+    if (run.brutalityLevel < before.brut) fail(`scroll ${s.id}: brutalityLevel decreased`)
+    if (run.tacticsLevel < before.tac) fail(`scroll ${s.id}: tacticsLevel decreased`)
+    if (run.survivalLevel < before.surv) fail(`scroll ${s.id}: survivalLevel decreased`)
     // At least ONE field must have changed (a no-op scroll is a content bug — a found scroll must DO something).
     const changed =
       run.scrollDamageMult !== before.dmg || run.scrollMaxHpBonus !== before.hp ||
       run.scrollLifestealFrac !== before.life || run.scrollStatusDurationMult !== before.stat ||
       run.scrollDodgeCdMult !== before.cd || run.scrollDodgeIframeBonus !== before.ifr ||
-      run.maxFlasks !== before.flasksMax
+      run.maxFlasks !== before.flasksMax ||
+      run.brutalityLevel !== before.brut || run.tacticsLevel !== before.tac || run.survivalLevel !== before.surv
     if (!changed) fail(`scroll ${s.id}: apply() changed no run-only field (a no-op scroll)`)
+  }
+
+  // ── color-scaling-stats §6 (Decision 10, AC8) — each colour scroll raises EXACTLY its own level by +1 and
+  // leaves the other two unchanged (applied to a fresh createRunState). A miswired apply (bumps the wrong colour
+  // or two at once) fails loudly. SCROLLS_BY_ID resolves them; the verifier maps each id → its expected field. ──
+  const COLOR_SCROLLS = [
+    { id: 'scrollBrutality', field: 'brutalityLevel' },
+    { id: 'scrollTactics', field: 'tacticsLevel' },
+    { id: 'scrollSurvival', field: 'survivalLevel' },
+  ]
+  const ALL_COLOR_FIELDS = ['brutalityLevel', 'tacticsLevel', 'survivalLevel']
+  for (const { id, field } of COLOR_SCROLLS) {
+    const sc = SCROLLS.find((s) => s.id === id)
+    if (!sc) fail(`colour scroll "${id}" missing from SCROLLS (AC8)`)
+    const run = createRunStateForScrolls(0xc0ffee, 0)
+    sc.apply(run)
+    if (run[field] !== 1) fail(`colour scroll ${id}: must raise ${field} to 1 (got ${run[field]})`)
+    for (const other of ALL_COLOR_FIELDS) {
+      if (other !== field && run[other] !== 0) fail(`colour scroll ${id}: must NOT change ${other} (got ${run[other]})`)
+    }
   }
 
   // ── 9c) ELITE_AFFIXES well-formed (AC64 — elite variety): a weighted set of ≥3 affixes ({ affix, w }),
@@ -1455,6 +1498,9 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (typeof s.desc !== 'string' || !s.desc) fail(`skill ${s.id}: missing desc`)
     if (!SKILL_KINDS.includes(s.kind)) fail(`skill ${s.id}: unknown kind "${s.kind}" (AC7 — must be in SKILL_KINDS)`)
     kindsSeen.add(s.kind)
+    // color-scaling-stats §6.3 (Decision 5/10, AC3) — every skill carries a KNOWN scaling colour (a skill with
+    // no/unknown colour fails loudly; _useSkill bakes ITS colour mult into the fired damage).
+    if (!COLOR_IDS.includes(s.scaling)) fail(`skill ${s.id}: scaling "${s.scaling}" not a known colour (${COLOR_IDS.join('/')})`)
     if (!(typeof s.cooldown === 'number') || s.cooldown <= 0) fail(`skill ${s.id}: cooldown must be > 0`)
     // SKILLS_BY_ID must resolve this id back to THIS spec (the lookup is the real source GameScene uses).
     if (SKILLS_BY_ID[s.id] !== s) fail(`skill ${s.id}: SKILLS_BY_ID does not resolve to the same spec`)
@@ -1762,6 +1808,56 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 14) COLOURS table + scaling math (color-scaling-stats §6, Decision 10, AC1/AC12). An INDEPENDENT proof of
+//     the PURE colours table + the scaling functions: the colour space is well-formed (3 ids, lockstep lookup,
+//     numeric tints), colorMult is monotone non-decreasing with an EXACT identity at level 0 (the byte-identity
+//     pin — load-bearing), and survivalHpBonus is monotone non-decreasing from 0. Mirrors the other table
+//     sweeps' style — a malformed colour table / a broken identity fails loudly under node, never reaching the game.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 14a) Colour table well-formed: COLOR_IDS is EXACTLY the 3 colours (length 3); each id resolves in COLORS
+  // with COLORS[id].id === id, a non-empty name, and a numeric tint. ──
+  if (!Array.isArray(COLOR_IDS) || COLOR_IDS.length !== 3) fail(`COLOR_IDS must have exactly 3 colours, got ${COLOR_IDS?.length}`)
+  const EXPECTED_COLOR_IDS = ['brutality', 'tactics', 'survival']
+  for (let i = 0; i < EXPECTED_COLOR_IDS.length; i++) {
+    if (COLOR_IDS[i] !== EXPECTED_COLOR_IDS[i]) fail(`COLOR_IDS[${i}] = "${COLOR_IDS[i]}", expected "${EXPECTED_COLOR_IDS[i]}" (the pinned order)`)
+  }
+  for (const id of COLOR_IDS) {
+    const c = COLORS[id]
+    if (!c) fail(`colour id "${id}" has no COLORS entry (lookup drift)`)
+    if (c.id !== id) fail(`COLORS["${id}"].id = "${c.id}" (lookup not in lockstep)`)
+    if (typeof c.name !== 'string' || !c.name) fail(`colour ${id}: missing name`)
+    if (typeof c.tint !== 'number') fail(`colour ${id}: tint must be a number (0xRRGGBB)`)
+  }
+
+  // ── 14b) colorMult identity + monotonicity (AC12 — the byte-identity pin): colorMult(0) === 1 EXACTLY (the
+  // load-bearing identity — composing × 1 at level 0 reproduces the pinned damages). PER_LEVEL > 0; over levels
+  // 1..20 colorMult is monotone non-decreasing AND > 1 (a level actually helps). colorMult(<0) clamps to 1. ──
+  if (colorMult(0) !== 1) fail(`colorMult(0) = ${colorMult(0)}, expected EXACTLY 1 (the identity pin)`)
+  if (!(PER_LEVEL > 0)) fail(`PER_LEVEL must be > 0, got ${PER_LEVEL}`)
+  if (colorMult(-1) !== 1) fail(`colorMult(-1) = ${colorMult(-1)}, expected 1 (defensive negative clamp)`)
+  let prevMult = colorMult(0)
+  for (let lvl = 1; lvl <= 20; lvl++) {
+    const m = colorMult(lvl)
+    if (m < prevMult) fail(`colorMult dipped at level ${lvl} (${m} < ${prevMult})`)
+    if (!(m > 1)) fail(`colorMult(${lvl}) = ${m}, expected > 1 (a colour level must help)`)
+    prevMult = m
+  }
+
+  // ── 14c) survivalHpBonus identity + monotonicity: SURVIVAL_HP_PER_LEVEL ≥ 0; survivalHpBonus(0) === 0 (the
+  // identity — _syncPlayerScrollStats derives the same maxHp at level 0); monotone non-decreasing over 0..20. ──
+  if (!(SURVIVAL_HP_PER_LEVEL >= 0)) fail(`SURVIVAL_HP_PER_LEVEL must be ≥ 0, got ${SURVIVAL_HP_PER_LEVEL}`)
+  if (survivalHpBonus(0) !== 0) fail(`survivalHpBonus(0) = ${survivalHpBonus(0)}, expected EXACTLY 0 (the identity)`)
+  if (survivalHpBonus(-1) !== 0) fail(`survivalHpBonus(-1) = ${survivalHpBonus(-1)}, expected 0 (defensive negative clamp)`)
+  let prevHp = survivalHpBonus(0)
+  for (let lvl = 1; lvl <= 20; lvl++) {
+    const h = survivalHpBonus(lvl)
+    if (h < prevHp) fail(`survivalHpBonus dipped at level ${lvl} (${h} < ${prevHp})`)
+    prevHp = h
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -1780,6 +1876,7 @@ console.log(
     `${SKILLS.length} skills well-formed (${SKILL_KINDS.length} kinds, AC7 — the loadout layer); ` +
     `${MUTATIONS.length} mutations well-formed + identity-safe/never-weaken (build-&-replay AC1/AC6); ` +
     `${BOSS_CELL_TIERS.length} boss-cell tiers (curve identity@t0 + whole-run monotonic ∀ tier, AC42/AC43) + ` +
-    `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11)`,
+    `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11); ` +
+    `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged`,
 )
 process.exit(0)

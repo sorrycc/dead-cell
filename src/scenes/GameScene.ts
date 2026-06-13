@@ -8,6 +8,7 @@ import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
+import { ColorOverlay } from '../entities/ColorOverlay.js'
 import { QuitConfirmOverlay } from '../entities/QuitConfirmOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
@@ -31,6 +32,8 @@ import type { BossAttackSpec } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
 import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD, runMutationPool } from '../config/mutations.js'
 import type { MutationSpec } from '../config/mutations.js'
+import { colorMult, survivalHpBonus, COLORS } from '../config/colors.js'
+import type { ColorId } from '../config/colors.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
@@ -219,6 +222,13 @@ export class GameScene extends Phaser.Scene {
   // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
   private mutationOpen!: boolean
   private mutationOverlay!: MutationOverlay | null
+  // ── Colour-up picker state (color-scaling-stats §6, Decision 7) — null/false until a biome transition offers
+  // a +1-colour choice. Mirrors mutationOpen/mutationOverlay (the same frozen-modal + update-gate idiom).
+  // _colorPickPending defers the colour modal until the mutation modal closes (two SEQUENTIAL modals — the
+  // mutation first, then the colour — Decision 7); it's also the fallback when no mutation is offered. ──
+  private colorPickOpen!: boolean
+  private colorOverlay!: ColorOverlay | null
+  private _colorPickPending!: boolean
   // ── Quit-to-Title confirm state (esc-quit-confirm) — null/false until ESC opens the confirm modal. The ESC
   // handler is persistent (.on, re-arms for the whole run); _onEsc holds the bound ref so SHUTDOWN can remove it. ──
   private quitConfirmOpen!: boolean
@@ -340,6 +350,12 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('mutations', '')
     this.registry.set('levelTime', 0) // ms elapsed on the current level (0 = untimed: a boss/miniboss arena).
     this.registry.set('levelBonusTime', CLEAR_BONUS_TIME) // the fast-clear threshold the HUD turns amber near.
+    // color-scaling-stats §6 (AC10) — seed the three colour-level HUD keys + the equipped weapon's colour so a
+    // fresh run shows 0/0/0 (the identity) and the parallel HUD never flashes a stale prior-run value.
+    this.registry.set('brutalityLevel', this.runState.brutalityLevel)
+    this.registry.set('tacticsLevel', this.runState.tacticsLevel)
+    this.registry.set('survivalLevel', this.runState.survivalLevel)
+    this.registry.set('equippedColor', WEAPONS[this.runState.weaponId].scaling)
     // §6.6.3 (review MINOR) — seed the boss HP-bar keys to "no boss" so a replayed run never flashes the
     // PREVIOUS run's boss bar (the registry survives scene restarts — the same stale-leak HP guards for).
     this.registry.set('bossActive', false)
@@ -366,6 +382,11 @@ export class GameScene extends Phaser.Scene {
     // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
     this.mutationOpen = false // true while the mutation overlay is up (gameplay is paused beneath it).
     this.mutationOverlay = null // the live MutationOverlay UI while open, else null.
+    // ── Colour-up picker state (color-scaling-stats §6, Decision 7) — null/false until a biome transition offers
+    // a +1-colour choice (offered AFTER the mutation modal closes — two sequential frozen modals, Decision 7). ──
+    this.colorPickOpen = false // true while the colour overlay is up (gameplay is paused beneath it).
+    this.colorOverlay = null // the live ColorOverlay UI while open, else null.
+    this._colorPickPending = false // a colour pick deferred behind the mutation modal (offered on its close).
     // ── Quit-to-Title confirm state (esc-quit-confirm) — gates update() like shop/mutation; ESC toggles it. ──
     this.quitConfirmOpen = false // true while the confirm modal is up (gameplay is paused beneath it).
     this.quitConfirmOverlay = null // the live QuitConfirmOverlay UI while open, else null.
@@ -1034,11 +1055,16 @@ export class GameScene extends Phaser.Scene {
     this._teardownLevel()
     this._buildLevel() // reads the advanced biome/seed/depth from RunState (HP NOT refilled).
     this._updateHint()
-    // ── Offer a MUTATION on a biome transition (build-&-replay §6.5, AC2) ── AFTER the new level is built (so
-    // the overlay draws over the rebuilt world + the player is at the new entrance), offer a seeded 3-of-N
-    // mutation choice when we just rolled into a NEW biome (the same seam the flask refill / power scroll use).
-    // It freezes gameplay (mutationOpen gates update) until the player picks. No-op on a within-biome advance.
-    if (this.runState.biomeIndex !== prevBiomeIndex) this._offerMutation()
+    // ── Offer a MUTATION + a COLOUR-up on a biome transition (build-&-replay §6.5, AC2; color-scaling-stats §6,
+    // Decision 7, AC9) ── AFTER the new level is built (so the overlays draw over the rebuilt world + the player
+    // is at the new entrance), offer the seeded 3-of-N mutation, THEN — on its close — the +1-colour pick (two
+    // SEQUENTIAL frozen modals, Decision 7). Arm the colour pick as PENDING, then offer the mutation; if no
+    // mutation modal actually opens (none to offer), fire the colour pick immediately. No-op within a biome.
+    if (this.runState.biomeIndex !== prevBiomeIndex) {
+      this._colorPickPending = true
+      this._offerMutation()
+      if (!this.mutationOpen) this._offerColorPick() // no mutation modal up → offer the colour pick now.
+    }
     // eslint-disable-next-line no-console
     console.log(
       `[GameScene] advanced — depth ${this.runState.depth}, biome ${this.runState.biome().name} ` +
@@ -1128,6 +1154,15 @@ export class GameScene extends Phaser.Scene {
       this.mutationOverlay = null
     }
     this.mutationOpen = false
+    // Colour-up overlay teardown (color-scaling-stats §6, Decision 7) — defensive force-close mirroring the
+    // mutation overlay: a dangling colour modal never leaks across a rebuild; colorPickOpen forced false so the
+    // update() gate re-opens gameplay; the pending flag is cleared so a teardown mid-transition can't re-offer.
+    if (this.colorOverlay) {
+      this.colorOverlay.close()
+      this.colorOverlay = null
+    }
+    this.colorPickOpen = false
+    this._colorPickPending = false
     // Clear any dangling modal-pause stamp (build-&-replay §6.4) so a half-open modal at teardown can't leak a
     // paused interval into the next level's fresh timer (_buildLevel re-stamps levelStartedAt from scratch).
     this._modalPausedAt = 0
@@ -1341,6 +1376,11 @@ export class GameScene extends Phaser.Scene {
     const cx = this.player.body.center.x
     const cy = this.player.body.center.y
     const facing = this.player.facing
+    // ── COLOUR MULT (color-scaling-stats §6, Decision 9, AC6) ── bake the SKILL's OWN colour mult into the fired
+    // damage here (a skill scales by ITS colour's level, NOT the equipped weapon's). m === colorMult(0) === 1 at
+    // level 0 → Math.round(damage × 1) === the spec damage (byte-identical, the identity). NEVER mutate the
+    // shared SKILLS spec — pass colour-scaled FRESH copies into the pools (the aliasing safety every fold keeps).
+    const m = colorMult(this._colorLevel(spec.scaling))
     if (spec.kind === 'volley') {
       // Fire `count` projectiles fanned across `spread` radians centered on facing. The base aim is 0 (right)
       // or π (left); each shot offsets by an even slice of the spread so the fan is symmetric about facing.
@@ -1348,23 +1388,31 @@ export class GameScene extends Phaser.Scene {
         const baseAngle = facing >= 0 ? 0 : Math.PI
         const spread = spec.spread ?? 0
         const n = spec.count
+        // A fresh colour-scaled projectile (never mutate the shared spec — Decision 9).
+        const proj = { ...spec.projectile, damage: Math.round(spec.projectile.damage * m) }
         for (let i = 0; i < n; i++) {
           // Map i ∈ [0, n-1] to a symmetric offset in [-spread/2, +spread/2] (a single shot fires straight).
           const t = n === 1 ? 0 : i / (n - 1) - 0.5
           const angle = baseAngle + t * spread
-          this.projectilePool.acquire({ cx, cy, facing }, spec.projectile, this.player.id, spec.status ?? null, { angle })
+          this.projectilePool.acquire({ cx, cy, facing }, proj, this.player.id, spec.status ?? null, { angle })
         }
       }
     } else if (spec.kind === 'blast') {
       // Instant radial AoE: damage every enemy/boss within radius, knock them away, apply the optional status,
-      // then pop a particle ring so the blast reads. Reuses resolveHit + effects (no new combat math).
-      this._radialDamage(cx, cy, spec.radius ?? 0, spec.damage ?? 0, spec.knockback ?? 0, spec.status)
+      // then pop a particle ring so the blast reads. Reuses resolveHit + effects (no new combat math). The
+      // colour mult scales the blast damage (×1 at level 0 → identity).
+      this._radialDamage(cx, cy, spec.radius ?? 0, Math.round((spec.damage ?? 0) * m), spec.knockback ?? 0, spec.status)
       this._blastRingFx(cx, cy, spec.radius ?? 0)
     } else if (spec.kind === 'turret') {
       // Deploy a stationary auto-firer at the player's feet for spec.duration (DeployablePool — the cut-line
       // entity). It scans this.enemies+boss each fire beat + fires the PLAYER pool, so its hits resolve
       // through the existing projectile→enemy overlap. Placed on the player's body so it sits where you stand.
-      this.deployables.acquire(cx, cy, spec)
+      // The turret reads spec.projectile over its lifetime, so pass a colour-scaled COPY of the spec (with a
+      // cloned projectile) — never mutate the shared SKILLS row (Decision 9). ×1 at level 0 → identity.
+      const turretSpec = spec.projectile
+        ? { ...spec, projectile: { ...spec.projectile, damage: Math.round(spec.projectile.damage * m) } }
+        : spec
+      this.deployables.acquire(cx, cy, turretSpec)
     }
     this.sfx.skill(spec.kind) // skills slice (AC3) — the skill-use cue, timbre per kind.
   }
@@ -1778,7 +1826,8 @@ export class GameScene extends Phaser.Scene {
     // _mutationDamageMult folds the Berserker (low-HP) + Assassin (full-HP target) perks (1× when no mutation).
     const result = resolveHit(this.player.attackerShape, enemy.attackerShape, hb.swing, {
       allowBackstab: true,
-      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
+      // color-scaling-stats §6 (Decision 8) — × the equipped weapon's colour mult (×1 at level 0 → identity).
+      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy) * this._weaponColorMult(),
     })
     // ── Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) ── _mutationDamageMult folded the riposte
     // bump into `result` above; zero the buff now so it's SPENT on THIS connecting hit (one-shot). 0 by default
@@ -1837,6 +1886,19 @@ export class GameScene extends Phaser.Scene {
     const scaled = { ...spec, duration: (spec.duration ?? 0) * dur }
     if (spec.tickDmg) scaled.tickDmg = spec.tickDmg * tick
     return scaled
+  }
+
+  // ── _colorLevel(colorId) (color-scaling-stats §6, Decision 8, AC5) ── read the run level for a colour id off
+  // RunState (the single source). All default 0 → colorMult(0) === 1 (the identity). A plain switch (KISS).
+  _colorLevel(c: ColorId): number {
+    return c === 'brutality' ? this.runState.brutalityLevel : c === 'tactics' ? this.runState.tacticsLevel : this.runState.survivalLevel
+  }
+
+  // ── _weaponColorMult() (color-scaling-stats §6, Decision 8, AC5) ── the ×damage multiplier for the EQUIPPED
+  // weapon's colour at its current run level. Multiplied INTO the player's damageMult at BOTH player hit sites
+  // (melee + projectile — DRY). colorMult(0) === 1 → at all-0 levels this is ×1 (byte-identical, the identity).
+  _weaponColorMult(): number {
+    return colorMult(this._colorLevel(this.player.equippedWeapon.scaling))
   }
 
   // ── _mutationDamageMult(target) (build-&-replay design §6.3, Decision 4, AC3) ── the per-hit MUTATION damage
@@ -1950,7 +2012,8 @@ export class GameScene extends Phaser.Scene {
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
     const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
       allowBackstab: true,
-      damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
+      // color-scaling-stats §6 (Decision 8) — × the equipped weapon's colour mult (×1 at level 0 → identity).
+      damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy) * this._weaponColorMult(),
     })
     // Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) — _mutationDamageMult folded the bump into
     // `result`; zero it so the buff is SPENT on this connecting shot (one-shot). 0 by default → no-op (AC10).
@@ -2078,7 +2141,11 @@ export class GameScene extends Phaser.Scene {
     // Both default to the neutral identity on RunState, so a run with no synergy leaves the player as before.
     this.player.vsAfflictedDamageMult = this.runState.vsAfflictedDamageMult
     this.player.statusTickMult = this.runState.statusTickMult
-    const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus
+    // color-scaling-stats §6 (Decision 6) — fold the Survival flat +max HP into the SAME scrollMaxHpBonus
+    // derivation (zero new max-HP wiring; the heal-on-grow comes free). survivalHpBonus(0) === 0 → at level 0
+    // this adds nothing (the identity). When a Survival level is gained, the next sync grows max HP + heals by
+    // the delta (the colour-pick/scroll apply calls this — mirroring _applyMutation, AC7).
+    const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus + survivalHpBonus(this.runState.survivalLevel)
     const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
     this.player.maxHp = newMax
     if (grew > 0) this.player.hp = Math.min(newMax, this.player.hp + grew) // heal by the grown amount.
@@ -2150,7 +2217,7 @@ export class GameScene extends Phaser.Scene {
       this._closeQuitConfirm()
       return
     }
-    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen) return
+    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen) return
     this._openQuitConfirm()
   }
 
@@ -2336,6 +2403,42 @@ export class GameScene extends Phaser.Scene {
     this._resumeLevelTimer() // re-stamp the timer past the frozen offer-reading interval (review MINOR).
     this.cameras.main.flash(200, 46, 204, 113) // a brief green pulse so the granted perk reads.
     this._emitHud() // refresh the HUD's mutation list immediately (don't wait for the next tick).
+    // color-scaling-stats §6 (Decision 7) — on the mutation modal's close, offer the deferred COLOUR-up pick
+    // (the second sequential frozen modal). No-op when no pick is pending (a within-biome advance never arms it).
+    if (this._colorPickPending) this._offerColorPick()
+  }
+
+  // ── _offerColorPick() (color-scaling-stats §6, Decision 7, AC9) ── on a biome transition, offer a +1-colour
+  // choice in a paused overlay (the build commitment moment). Always the three FIXED colours (COLOR_IDS,
+  // ordered — no shuffle, there are exactly 3), so no seeding is needed (a future 4th colour would seed off the
+  // same run-seed⊕biome thread as _pickMutationOffers, OFF the generator's pinned RNG). Freezes gameplay
+  // (colorPickOpen gates update) + opens the overlay; the pick callback applies the level. Defensive: if one is
+  // already open, no-op. Clears the pending flag so it fires exactly once per transition.
+  _offerColorPick(): void {
+    this._colorPickPending = false
+    if (this.colorPickOpen || this.colorOverlay) return // already offering (defensive — should never re-enter).
+    this.colorPickOpen = true
+    this._pauseLevelTimer() // exclude the (mandatory) offer-reading time from the fast-clear timer (review MINOR).
+    this.player.body.setVelocity(0, 0) // zero momentum so the body doesn't drift under the frozen overlay.
+    this.colorOverlay = new ColorOverlay(this, (id) => this._applyColorPick(id))
+  }
+
+  // ── _applyColorPick(colorId) (color-scaling-stats §6, Decision 7, AC9) ── the overlay's onPick callback:
+  // bump the chosen colour's run level by +1 (mutating RunState IN PLACE — it persists for the rest of the run),
+  // sync the player (so a Survival pick grows + tops up max HP via survivalHpBonus — Decision 6), refresh the
+  // HUD, flash the camera in the colour's tint, and un-freeze gameplay. The overlay already tore itself down.
+  _applyColorPick(colorId: ColorId): void {
+    if (colorId === 'brutality') this.runState.brutalityLevel += 1
+    else if (colorId === 'tactics') this.runState.tacticsLevel += 1
+    else this.runState.survivalLevel += 1
+    this._syncPlayerScrollStats() // push the survival flat-HP grow/heal to the live player (DRY — one sync site).
+    this.sfx.uiSelect() // a confirm cue for the pick (reuses the UI-select blip — no new SFX).
+    this.colorPickOpen = false // un-freeze gameplay (the update() gate re-opens).
+    this.colorOverlay = null
+    this._resumeLevelTimer() // re-stamp the timer past the frozen offer-reading interval (review MINOR).
+    const tint = COLORS[colorId].tint // flash in the picked colour's tint so the build direction reads.
+    this.cameras.main.flash(200, (tint >> 16) & 0xff, (tint >> 8) & 0xff, tint & 0xff)
+    this._emitHud() // refresh the HUD's colour pips immediately (don't wait for the next tick).
   }
 
   // ── _pauseLevelTimer() (build-&-replay §6.4, review MINOR — real-vs-gameplay-dt fix) ── stamp the wall-clock a
@@ -2521,6 +2624,12 @@ export class GameScene extends Phaser.Scene {
     // elapsed on the current timed level; 0 = an untimed boss/miniboss level → the HUD hides the timer).
     this.registry.set('mutations', this.runState.mutations.map((id) => tName('mutation', id, MUTATIONS_BY_ID[id]?.name ?? id)).join(', '))
     this.registry.set('levelTime', this.levelStartedAt > 0 ? this.time.now - this.levelStartedAt : 0)
+    // color-scaling-stats §6 (AC10) — the three colour levels + the equipped weapon's colour (so the HUD can
+    // highlight the active build colour). Registry-only (the HUD is decoupled). 0/0/0 on a fresh run (identity).
+    this.registry.set('brutalityLevel', this.runState.brutalityLevel)
+    this.registry.set('tacticsLevel', this.runState.tacticsLevel)
+    this.registry.set('survivalLevel', this.runState.survivalLevel)
+    this.registry.set('equippedColor', this.player.equippedWeapon.scaling)
     // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
     // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.
     if (this.boss && !this.boss.dead) this.registry.set('bossHp', this.boss.hp)
@@ -2535,7 +2644,7 @@ export class GameScene extends Phaser.Scene {
     // open (§6.10 / build-&-replay §6.5 / esc-quit-confirm), exactly as they freeze during a hit-stop. FX still
     // tick on REAL dt so the overlay's
     // flashes/pops play.
-    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.quitConfirmOpen ? 0 : dt
+    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.quitConfirmOpen ? 0 : dt
 
     const inputState = this.input2.sample()
     // audio §6.5 (Decision 7) — M toggles global mute (flips Phaser's game.sound.mute via the façade
@@ -2546,7 +2655,7 @@ export class GameScene extends Phaser.Scene {
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
     // shop / MUTATION / QUIT-CONFIRM overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.quitConfirmOpen) {
+    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.colorPickOpen && !this.quitConfirmOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held

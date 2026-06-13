@@ -34,6 +34,12 @@ export interface ScrollRunState {
   scrollDodgeIframeBonus: number
   maxFlasks: number
   flasks: number
+  // ── Per-colour run LEVELS (color-scaling-stats §6, Decision 8, AC8) ── the colour scrolls bump these by +1
+  // (survival relies on the survivalHpBonus DERIVATION via _syncPlayerScrollStats, not a direct HP write). All
+  // default 0 (run-only — lost on death). The never-weaken sweep asserts each colour scroll only RAISES its level.
+  brutalityLevel: number
+  tacticsLevel: number
+  survivalLevel: number
 }
 
 // One scroll row: a pure-data { id, name, apply(run) } that mutates the live RunState for THIS run.
@@ -99,6 +105,32 @@ export const SCROLLS: ScrollSpec[] = [
     apply: (run) => {
       run.maxFlasks += 1
       run.flasks += 1 // grant the charge immediately (the new cap also holds it).
+    },
+  },
+  // ── COLOUR SCROLLS (color-scaling-stats §6, Decision 8, AC8) ── three new run-only scrolls, each bumping
+  // ITS colour's level by +1 (the second acquisition vector beside the biome-transition picker — both feed the
+  // same run-level fields). A colour level scales that colour's weapons/skills (colorMult); Survival ALSO grows
+  // max HP via the survivalHpBonus derivation in _syncPlayerScrollStats (NOT a direct HP write here, Decision 6).
+  // The existing 6 scrolls above are byte-unchanged (the identity); these are purely additive (SCROLL_IDS → 9).
+  {
+    id: 'scrollBrutality',
+    name: 'Scroll of Brutality',
+    apply: (run) => {
+      run.brutalityLevel += 1 // +1 Brutality (red, melee damage).
+    },
+  },
+  {
+    id: 'scrollTactics',
+    name: 'Scroll of Tactics',
+    apply: (run) => {
+      run.tacticsLevel += 1 // +1 Tactics (purple, ranged/skill damage).
+    },
+  },
+  {
+    id: 'scrollSurvival',
+    name: 'Scroll of Survival',
+    apply: (run) => {
+      run.survivalLevel += 1 // +1 Survival (green, spear damage + flat max HP via the derivation).
     },
   },
 ]
