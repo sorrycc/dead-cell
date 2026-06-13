@@ -1,4 +1,5 @@
 import Phaser from 'phaser'
+import { applyStatus, tickStatuses, hasStatus } from '../combat/status.js'
 
 // ── Multi-phase Boss (design §6.6.1, Decision 64, AC56/AC57/AC58) ──
 // A PLAIN class (Decision-10 shape, a near-sibling of Enemy — but a SEPARATE class, NOT an Enemy
@@ -91,6 +92,21 @@ export class Boss {
 
     this.scaleX = 1
     this.scaleY = 1
+
+    // ── Status effects (design §6.13, Decision 79, AC66) ── full PARITY with Enemy (a boss can bleed/
+    // poison/stun like any enemy). The live {kind,timer,...} list applied by weapon hits via applyStatus,
+    // ticked in update() on the gameplay dt. Empty by default (the identity — a no-status hit never touches
+    // it, so a normal boss is byte-identical to before). status.js owns the pure tick math (DRY with Enemy).
+    this.statuses = []
+    this._statusFxTimer = 0 // > 0 while a DoT FX pop is on cooldown (so a tick doesn't spam particles).
+  }
+
+  // ── applyStatus(spec) (design §6.13, Decision 79, AC66) ── arm/refresh a status on this boss from a
+  // weapon's status spec. Called by GameScene's hit handlers (the SAME call sites Enemy uses — the crash
+  // these methods fix). No-op if dead or spec is null. Refresh-on-re-hit semantics live in status.js.
+  applyStatus(spec) {
+    if (this.dead || !spec) return
+    applyStatus(this.statuses, spec)
   }
 
   // The boss is hittable unless dead / in a hit-iframe / in the phase-change invuln window.
@@ -149,6 +165,30 @@ export class Boss {
     this.contactCooldownTimer = Math.max(0, this.contactCooldownTimer - dt)
     this.hurtIframeTimer = Math.max(0, this.hurtIframeTimer - dt)
     this.phaseInvulnTimer = Math.max(0, this.phaseInvulnTimer - dt)
+
+    // ── Status tick (design §6.13, Decision 79, AC66; boss-parity fix) ── advance bleed/poison/stun on
+    // the gameplay dt: DoT drains HP (and can KILL via _die → onBossDeath/Victory), stun freezes the FSM.
+    // Mirrors Enemy.update's placement (after the timer decay, before the switch) so the dt-boundary +
+    // early-return semantics match. _face is intentionally skipped in both early-returns below: facing is
+    // moot when dead (and _face early-returns on DEAD anyway) or frozen.
+    const stunned = this._tickStatus(dt, ctx)
+    if (this.dead && this.state === STATE.DEAD) {
+      // DoT just killed us → run only the death-pop visual this frame (the FSM is moot). From here on this
+      // is the sole DEAD-tick path; an onHit-kill instead flows through the switch's case STATE.DEAD. Both
+      // reach _tickDead, and _die()'s once-guard keeps onBossDeath/onDeath single-fire (AC3).
+      this._tickDead(dt)
+      this._updateVisual(dt)
+      return
+    }
+    if (stunned) {
+      // STUNNED: plant + skip the whole FSM (no choose/telegraph/strike/recover). Clear the dash window so a
+      // frozen boss deals no heavy DASH contact damage (base contact still applies — Decision 6). Boss has no
+      // persisted HURT state, so (unlike Enemy) the only state to exclude is DEAD — handled by the return above.
+      this.body.setVelocity(0, 0)
+      this.dashActive = false
+      this._updateVisual(dt)
+      return
+    }
 
     switch (this.state) {
       case STATE.INTRO:
@@ -260,6 +300,35 @@ export class Boss {
     this.body.setVelocityX(0)
     this.deathTimer -= dt
     if (this.deathTimer <= 0) this._despawn()
+  }
+
+  // ── _tickStatus(dt, ctx) → stunned (design §6.13, Decision 79, AC66) ── PORTED from Enemy._tickStatus
+  // (the proven impl — DRY via the shared pure status.js math). Advance the status list, apply DoT damage to
+  // HP (which can KILL → _die() once at ≤0, firing onBossDeath/Victory), pop a throttled DoT FX, and return
+  // whether a stun is live. DoT BYPASSES isHittable/onHit on purpose: a bleed ticks while the boss is
+  // otherwise un-re-hittable and must NOT re-trigger onHit (no knockback/phase-advance from poison — phase
+  // advancement stays in onHit, Decision 3). It also ticks through the phase-invuln window (Decision 2).
+  _tickStatus(dt, ctx) {
+    if (this._statusFxTimer > 0) this._statusFxTimer = Math.max(0, this._statusFxTimer - dt)
+    if (this.statuses.length === 0) return false
+    const { damage, stunned } = tickStatuses(this.statuses, dt)
+    if (damage > 0 && !this.dead) {
+      this.hp -= damage
+      if (this._statusFxTimer <= 0 && ctx && ctx.effects) {
+        ctx.effects.statusTick(this.body.center.x, this.body.center.y, damage, this._dominantDotKind())
+        this._statusFxTimer = 0.18 // ~5 pops/s max — readable, not spammy.
+      }
+      if (this.hp <= 0) this._die() // DoT can finish a low-HP boss — routes to Victory via onBossDeath.
+    }
+    return stunned
+  }
+
+  // The kind of the active damaging status for the FX tint (bleed vs poison). Bleed first (KISS — a single
+  // dominant cue). Identical to Enemy._dominantDotKind.
+  _dominantDotKind() {
+    if (hasStatus(this.statuses, 'bleed')) return 'bleed'
+    if (hasStatus(this.statuses, 'poison')) return 'poison'
+    return 'bleed'
   }
 
   // Fire the chosen attack at telegraph end (DISPATCH by kind, Decision 64; round-3 adds 'sweep').
@@ -468,6 +537,12 @@ export class Boss {
       color = this.spec.colorPhase
     } else if (this.hurtIframeTimer > 0) {
       color = this.spec.colorHurt
+    } else if (this.statuses.length > 0) {
+      // Status tint (the resting cue — lowest precedence so the urgent telegraph/phase/hurt flashes win):
+      // stun grey-blue, bleed dark red, poison sickly green. Identical values to Enemy._updateVisual.
+      if (hasStatus(this.statuses, 'stun')) color = 0x95a5a6
+      else if (hasStatus(this.statuses, 'bleed')) color = 0xa93226
+      else if (hasStatus(this.statuses, 'poison')) color = 0x27ae60
     }
     this.rect.setFillStyle(color)
   }
