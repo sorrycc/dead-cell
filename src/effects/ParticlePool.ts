@@ -1,4 +1,5 @@
 import Phaser from 'phaser'
+import { UI_FONT } from '../config/constants.js'
 
 // ── Pooled hit FX: sparks + floating damage numbers (design §6.3, Decision 23, AC25) ──
 // The mandated pooling convention applied to game-feel: a FIXED pool of small spark rectangles
@@ -63,7 +64,7 @@ export class ParticlePool {
     this._numbers = []
     for (let i = 0; i < numberCap; i++) {
       const t = scene.add
-        .text(0, 0, '', { fontFamily: 'monospace', fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
+        .text(0, 0, '', { fontFamily: UI_FONT, fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
         .setOrigin(0.5)
         .setVisible(false)
         .setDepth(60) as NumberText

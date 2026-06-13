@@ -17,6 +17,7 @@ import type { PlayerStats } from '../config/upgrades.js'
 import { PLAYER_MAX_HP } from '../config/constants.js'
 import { tierAt, MAX_TIER } from '../config/tiers.js'
 import type { BossCellTier } from '../config/tiers.js'
+import type { Locale } from '../i18n/index.js'
 
 // ── BASE_PLAYER_STATS (Decision 57/60) ── the starting-stats object the meta fold STARTS from and the
 // Player reads. A fresh meta (no upgrades) folds to THIS unchanged → the Phase-4 player exactly (the
@@ -88,6 +89,12 @@ export interface MetaStateInstance {
   isBlueprintUnlocked(id: string): boolean
   bankRun(arg?: { cells?: number; depth?: number; blueprints?: string[]; completedAtTier?: number | null }): number
   startStats(): PlayerStats
+  // ── Language preference (i18n) ── the persisted locale choice (undefined until the player picks one —
+  // main.ts falls back to detectLocale() in that case). setLanguage saves it; the Hub's LANGUAGE row calls
+  // it then setLocale() + scene.restart() to re-render. Kept on the SAME persistence seam as every other
+  // meta read/write (Decision 58 — scenes touch meta only through MetaState, never util/save.js directly).
+  getLanguage(): Locale | undefined
+  setLanguage(l: Locale): void
 }
 
 // ── createMetaState() → the persistence wrapper instance (Decision 56) ──
@@ -184,6 +191,16 @@ export function createMetaState(): MetaStateInstance {
     // Fold the OWNED upgrades into the base starting stats (Decision 60) — the run-start power source.
     startStats() {
       return applyUpgrades(BASE_PLAYER_STATS, meta.upgrades)
+    },
+
+    // ── Language preference (i18n) ── read the saved locale (undefined = never chosen → main.ts auto-
+    // detects); setLanguage persists the choice (the Hub also calls setLocale() to flip the live locale).
+    getLanguage() {
+      return meta.language
+    },
+    setLanguage(l: Locale) {
+      meta.language = l
+      saveMeta(meta)
     },
   }
 }

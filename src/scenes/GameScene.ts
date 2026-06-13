@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { GRAVITY } from '../config/constants.js'
+import { GRAVITY, UI_FONT } from '../config/constants.js'
 import { Input } from '../core/Input.js'
 import { Player } from '../entities/Player.js'
 import { Enemy } from '../entities/Enemy.js'
@@ -34,6 +34,7 @@ import { BLUEPRINTS } from '../config/blueprints.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { mulberry32 } from '../util/rng.js'
+import { t, tName } from '../i18n/index.js'
 import type { Input as InputType } from '../core/Input.js'
 import type { RunState, RunStartStats } from '../core/RunState.js'
 import type { MetaStateInstance } from '../core/MetaState.js'
@@ -311,14 +312,14 @@ export class GameScene extends Phaser.Scene {
     // the PREVIOUS run's values until the first update() tick. Seed sane defaults from the fresh
     // RunState here so the parallel HUD never flashes stale data on a fresh run.
     this.registry.set('depth', this.runState.depth)
-    this.registry.set('biomeName', this.runState.biome().name)
+    this.registry.set('biomeName', tName('biome', this.runState.biome().id, this.runState.biome().name))
     this.registry.set('playerHp', this.runState.hp)
     this.registry.set('playerMaxHp', this.runState.maxHp)
     this.registry.set('comboIndex', -1)
     // §6.5 — seed the currency/weapon HUD keys too so the parallel HUD never flashes stale values.
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
-    this.registry.set('weapon', WEAPONS[this.runState.weaponId].name)
+    this.registry.set('weapon', tName('weapon', this.runState.weaponId, WEAPONS[this.runState.weaponId].name))
     // §6.9 — seed the flask (heal valve) HUD keys so the parallel HUD never flashes stale charges.
     this.registry.set('flasks', this.runState.flasks)
     this.registry.set('maxFlasks', this.runState.maxFlasks)
@@ -526,7 +527,7 @@ export class GameScene extends Phaser.Scene {
 
     // Dev hint label (camera-fixed): controls + the current level seed.
     this.hint = this.add
-      .text(16, 16, '', { fontFamily: 'monospace', fontSize: '18px', color: '#8b949e' })
+      .text(16, 16, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#8b949e' })
       .setScrollFactor(0)
       .setDepth(100)
     this._updateHint()
@@ -791,7 +792,7 @@ export class GameScene extends Phaser.Scene {
     // teardown clear it so it never persists. NOTE: isBossRoom stays FALSE (the Door + normal-room path hold);
     // teardown clears the bar explicitly via this.boss handling + the _clearBossHud call below on death.
     this.registry.set('bossActive', true)
-    this.registry.set('bossName', bossSpec.name)
+    this.registry.set('bossName', tName('boss', bossSpec.id, bossSpec.name))
     this.registry.set('bossHp', this.boss.hp)
     this.registry.set('bossMaxHp', this.boss.maxHp)
     this.sfx.bossSpawn() // audio §6.3 (AC5) — the miniboss-entrance swell (same set-piece tell as the finale).
@@ -893,7 +894,7 @@ export class GameScene extends Phaser.Scene {
     // frame; _onBossDefeated/_teardownLevel CLEAR bossActive so a stale bar never persists into the
     // next run (the registry survives scene restarts — the same stale-leak footgun HP already guards).
     this.registry.set('bossActive', true)
-    this.registry.set('bossName', bossSpec.name)
+    this.registry.set('bossName', tName('boss', bossSpec.id, bossSpec.name))
     this.registry.set('bossHp', this.boss.hp)
     this.registry.set('bossMaxHp', this.boss.maxHp)
     this.sfx.bossSpawn() // audio §6.3 (AC5) — the boss-entrance swell announces the set-piece.
@@ -952,6 +953,7 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.flash(260, 88, 214, 141)
     this.sfx.bossDefeat() // audio §6.3 (AC5) — the win flourish on the final boss kill.
     const summary = this.runState.summary(this.time.now, true, this.runSeed)
+    summary.biomeName = tName('biome', this.runState.biome().id, summary.biomeName) // i18n: translate at the scene boundary.
     this.time.delayedCall(900, () => this.scene.start('Victory', summary))
   }
 
@@ -1042,7 +1044,9 @@ export class GameScene extends Phaser.Scene {
       completedAtTier: this.meta.getSelectedTier(),
     })
     this.sfx.bossDefeat() // audio §6.3 (AC5) — a win flourish on a completed run (the gold "RUN COMPLETE" path).
-    this.scene.start('GameOver', this.runState.summary(this.time.now, true, this.runSeed))
+    const completeSummary = this.runState.summary(this.time.now, true, this.runSeed)
+    completeSummary.biomeName = tName('biome', this.runState.biome().id, completeSummary.biomeName) // i18n: translate at the scene boundary.
+    this.scene.start('GameOver', completeSummary)
   }
 
   // Destroy everything the CURRENT level owns; keep the persistent player/pools/FX/HUD/overlaps.
@@ -1128,12 +1132,19 @@ export class GameScene extends Phaser.Scene {
   _updateHint(): void {
     if (!this.hint) return
     const rs = this.runState
+    // RUN seed (the shareable run id, Decision 71) + the live LEVEL seed. The run seed identifies the
+    // WHOLE run (same run seed → same biome/level/layout chain — AC47); the level seed is its chained head.
+    // Keyboard tokens stay literal inside the translated template (they name physical keys); the biome
+    // name is resolved to the active locale.
     this.hint.setText(
-      `MOVE arrows/WASD  JUMP Space  ATTACK J/click  DODGE Shift/K  SWAP R  [ESC] Title   |   ` +
-        `DEPTH ${rs.depth} · ${rs.biome().name} ${rs.levelInBiome + 1}/${rs.biome().levels}  ` +
-        // RUN seed (the shareable run id, Decision 71) + the live LEVEL seed. The run seed identifies the
-        // WHOLE run (same run seed → same biome/level/layout chain — AC47); the level seed is its chained head.
-        `run 0x${this.runSeed.toString(16)}  level 0x${rs.seed.toString(16)}  →reach the yellow DOOR`,
+      t('game.hint', {
+        depth: rs.depth,
+        biome: tName('biome', rs.biome().id, rs.biome().name),
+        level: rs.levelInBiome + 1,
+        levels: rs.biome().levels,
+        runSeed: this.runSeed.toString(16),
+        levelSeed: rs.seed.toString(16),
+      }),
     )
   }
 
@@ -1471,8 +1482,8 @@ export class GameScene extends Phaser.Scene {
   _popRoomBanner(roomType: RoomType): void {
     this.cameras.main.flash(260, (roomType.bannerColor >> 16) & 0xff, (roomType.bannerColor >> 8) & 0xff, roomType.bannerColor & 0xff)
     const banner = this.add
-      .text(this.cameras.main.width / 2, 70, roomType.name, {
-        fontFamily: 'monospace',
+      .text(this.cameras.main.width / 2, 70, tName('roomType', roomType.id, roomType.name), {
+        fontFamily: UI_FONT,
         fontSize: '28px',
         color: '#ffffff',
         fontStyle: 'bold',
@@ -2293,8 +2304,8 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.flash(220, 244, 208, 63)
     this.sfx.pickup('gold')
     const pop = this.add
-      .text(this.cameras.main.width / 2, 110, `FAST CLEAR  +${CLEAR_BONUS_GOLD}g +${CLEAR_BONUS_CELLS} cells`, {
-        fontFamily: 'monospace',
+      .text(this.cameras.main.width / 2, 110, t('game.fastClear', { gold: CLEAR_BONUS_GOLD, cells: CLEAR_BONUS_CELLS }), {
+        fontFamily: UI_FONT,
         fontSize: '24px',
         color: '#f4d03f',
         fontStyle: 'bold',
@@ -2359,6 +2370,7 @@ export class GameScene extends Phaser.Scene {
     this.sfx.death() // audio §6.3 (AC5) — the death knell (distinct from an enemy death; plays once via the guard).
     // Snapshot the summary NOW (RunState may be torn down with the scene) and route to GameOver → Hub.
     const summary = this.runState.summary(this.time.now, false, this.runSeed)
+    summary.biomeName = tName('biome', this.runState.biome().id, summary.biomeName) // i18n: translate at the scene boundary.
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
   }
 
@@ -2368,17 +2380,26 @@ export class GameScene extends Phaser.Scene {
   // weapon, the inactive one is appended in muted brackets (e.g. "Bow ✦ Keen  [Sword]") so the swap target
   // reads on the HUD. One source so the HUD label is consistent.
   _weaponLabel(): string {
+    // i18n: resolve the weapon + affix NAMES to the active locale here (this helper re-runs on every HUD
+    // update — swap/pickup — so the label stays translated mid-run, not just at create). A run's locale is
+    // fixed (it only changes in the Hub), so resolving at the read site needs no live re-translation.
     const active = this.player.equippedWeapon as any
-    const activeLabel = active.affixName ? `${active.name} ✦ ${active.affixName}` : active.name
+    const activeLabel = this._weaponSlotLabel(active)
     // The OTHER slot (round-3 item 3): show it bracketed as the swap target when present + the slot's unlocked.
     if (this.player.secondSlotUnlocked) {
       const other = this.player.weapons[this.player.activeWeaponIndex === 0 ? 1 : 0] as any
       if (other) {
-        const otherLabel = other.affixName ? `${other.name} ✦ ${other.affixName}` : other.name
-        return `${activeLabel}  [${otherLabel}] (R)`
+        return `${activeLabel}  [${this._weaponSlotLabel(other)}] (R)`
       }
     }
     return activeLabel
+  }
+
+  // ── _weaponSlotLabel(w) ── one slot's label: the (translated) weapon name, plus the (translated) affix
+  // name when affixed (e.g. "剑 ✦ 锋利"). DRY — both slots resolve through here.
+  _weaponSlotLabel(w: any): string {
+    const name = tName('weapon', w.id, w.name)
+    return w.affixName ? `${name} ✦ ${tName('affix', w.affixId, w.affixName)}` : name
   }
 
   // ── _skillLabel(slot) (skills design §6.6, AC6) ── the HUD label for a skill slot: the equipped skill's
@@ -2386,7 +2407,7 @@ export class GameScene extends Phaser.Scene {
   // is decoupled — it never reads the Player directly).
   _skillLabel(slot: number): string {
     const spec = this.player.skills[slot]
-    return spec ? spec.name : '—'
+    return spec ? tName('skill', spec.id, spec.name) : '—'
   }
 
   // ── _skillCooldownFrac(slot) (skills design §6.6, AC6) ── the slot's cooldown as a 0..1 fraction (0 = ready,
@@ -2407,7 +2428,7 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('playerMaxHp', this.player.maxHp)
     this.registry.set('comboIndex', this.player.comboIndex)
     this.registry.set('depth', this.runState.depth)
-    this.registry.set('biomeName', this.runState.biome().name)
+    this.registry.set('biomeName', tName('biome', this.runState.biome().id, this.runState.biome().name))
     // §6.5 (Decision 2/AC49) — live currency counters + equipped weapon name for the decoupled HUD.
     this.registry.set('cells', this.runState.cells)
     this.registry.set('gold', this.runState.gold)
@@ -2425,7 +2446,7 @@ export class GameScene extends Phaser.Scene {
     // HUD is decoupled). Empty until the first pick (a fresh run shows no mutation line). Resolved id → name
     // off the pure MUTATIONS table (DRY). build-&-replay slice (AC5) — the per-level fast-clear TIMER (ms
     // elapsed on the current timed level; 0 = an untimed boss/miniboss level → the HUD hides the timer).
-    this.registry.set('mutations', this.runState.mutations.map((id) => MUTATIONS_BY_ID[id]?.name ?? id).join(', '))
+    this.registry.set('mutations', this.runState.mutations.map((id) => tName('mutation', id, MUTATIONS_BY_ID[id]?.name ?? id)).join(', '))
     this.registry.set('levelTime', this.levelStartedAt > 0 ? this.time.now - this.levelStartedAt : 0)
     // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
     // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.

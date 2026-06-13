@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
 import { Sound } from '../audio/Sound.js'
+import { t } from '../i18n/index.js'
 
 // ── TitleScene (design §6.0 + §6.5, AC5/AC52, Decision 58) ──
 // Shows the game title and a Start control. As of the meta-loop phase the flow is Title → HUB → Game
@@ -24,8 +25,8 @@ export class TitleScene extends Phaser.Scene {
     const sfx = new Sound(this)
 
     this.add
-      .text(cx, cy - 80, 'DEAD CELL', {
-        fontFamily: 'monospace',
+      .text(cx, cy - 80, t('title.heading'), {
+        fontFamily: UI_FONT,
         fontSize: '72px',
         color: '#e6edf3',
         fontStyle: 'bold',
@@ -33,16 +34,16 @@ export class TitleScene extends Phaser.Scene {
       .setOrigin(0.5)
 
     this.add
-      .text(cx, cy + 20, 'A roguelite action-platformer', {
-        fontFamily: 'monospace',
+      .text(cx, cy + 20, t('title.subtitle'), {
+        fontFamily: UI_FONT,
         fontSize: '22px',
         color: '#8b949e',
       })
       .setOrigin(0.5)
 
     this.add
-      .text(cx, cy + 110, 'Press SPACE / ENTER or click to ENTER HUB', {
-        fontFamily: 'monospace',
+      .text(cx, cy + 110, t('title.start'), {
+        fontFamily: UI_FONT,
         fontSize: '24px',
         color: '#58d68d',
       })

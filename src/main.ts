@@ -7,6 +7,19 @@ import { GameScene } from './scenes/GameScene.js'
 import { HUDScene } from './scenes/HUDScene.js'
 import { GameOverScene } from './scenes/GameOverScene.js'
 import { VictoryScene } from './scenes/VictoryScene.js'
+import { loadMeta } from './util/save.js'
+import { setLocale, detectLocale, getLocale } from './i18n/index.js'
+
+// ── i18n boot (run BEFORE new Phaser.Game so every scene create() renders in the right locale) ──
+// Use the saved preference if the player has chosen one; otherwise auto-detect from the browser
+// (navigator.language → zh-CN for a Chinese browser, else en). loadMeta is Phaser-free + defensive
+// (a disabled storage degrades to defaults), so this never throws. Reflect it on <html lang> too.
+setLocale(loadMeta().language ?? detectLocale())
+try {
+  if (typeof document !== 'undefined') document.documentElement.lang = getLocale()
+} catch {
+  /* no-op — a non-DOM/headless host has no document; the locale is already set above. */
+}
 
 // ── Single boot site (design §6.0, Decision 1) ──
 // Builds ONE Phaser.Game config and registers all seven scenes. The scene registration

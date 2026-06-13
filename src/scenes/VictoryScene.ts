@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
+import { t } from '../i18n/index.js'
 
 // ── VictoryScene (design §6.6.3, Decision 67, AC58) ──
 // The WON-run screen — the gold twin of GameOverScene. GameScene hands off here on the FINAL boss kill
@@ -46,36 +47,36 @@ export class VictoryScene extends Phaser.Scene {
 
     // ── Header: a bold green VICTORY (the boss is down — the run is WON). ──
     this.add
-      .text(cx, cy - 150, 'VICTORY', { fontFamily: 'monospace', fontSize: '72px', color: '#58d68d', fontStyle: 'bold' })
+      .text(cx, cy - 150, t('victory.title'), { fontFamily: UI_FONT, fontSize: '72px', color: '#58d68d', fontStyle: 'bold' })
       .setOrigin(0.5)
     this.add
-      .text(cx, cy - 92, 'The Warden falls. The run is yours.', { fontFamily: 'monospace', fontSize: '20px', color: '#a9dfbf' })
+      .text(cx, cy - 92, t('victory.flavor'), { fontFamily: UI_FONT, fontSize: '20px', color: '#a9dfbf' })
       .setOrigin(0.5)
 
     // ── Summary block (depth / biome / time / kills / cells banked) — a label per stat, aligned. ──
     const rows = [
-      ['DEPTH REACHED', `${summary.depthReached}`],
-      ['BIOME', `${summary.biomeName}`],
-      ['TIME', formatTime(summary.timeMs)],
-      ['KILLS', `${summary.kills}`],
-      ['CELLS BANKED', `${summary.cellsBanked}`], // §6.6.3 (AC58) — the Cells added to permanent meta.
-      ['RUN SEED', formatSeed(summary.runSeed)], // §6.9 (Decision 71) — the shareable run id (replay in Hub).
+      [t('summary.depthReached'), `${summary.depthReached}`],
+      [t('summary.biome'), `${summary.biomeName}`], // biomeName is passed already-translated by GameScene.
+      [t('summary.time'), formatTime(summary.timeMs)],
+      [t('summary.kills'), `${summary.kills}`],
+      [t('summary.cellsBanked'), `${summary.cellsBanked}`], // §6.6.3 (AC58) — the Cells added to permanent meta.
+      [t('summary.runSeed'), formatSeed(summary.runSeed)], // §6.9 (Decision 71) — the shareable run id (replay in Hub).
     ]
     const rowH = 38
     const blockTop = cy - 40
     rows.forEach(([label, value], i) => {
       const y = blockTop + i * rowH
       this.add
-        .text(cx - 20, y, label, { fontFamily: 'monospace', fontSize: '24px', color: '#8b949e' })
+        .text(cx - 20, y, label, { fontFamily: UI_FONT, fontSize: '24px', color: '#8b949e' })
         .setOrigin(1, 0.5)
       this.add
-        .text(cx + 20, y, value, { fontFamily: 'monospace', fontSize: '24px', color: '#e6edf3' })
+        .text(cx + 20, y, value, { fontFamily: UI_FONT, fontSize: '24px', color: '#e6edf3' })
         .setOrigin(0, 0.5)
     })
 
     this.add
-      .text(cx, blockTop + rows.length * rowH + 40, 'Press SPACE / click → HUB', {
-        fontFamily: 'monospace',
+      .text(cx, blockTop + rows.length * rowH + 40, t('over.toHub'), {
+        fontFamily: UI_FONT,
         fontSize: '22px',
         color: '#8b949e',
       })

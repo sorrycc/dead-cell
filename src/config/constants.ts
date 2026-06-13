@@ -30,3 +30,12 @@ export const GRAVITY = 1500
 // convention), and Player imports the same number — ONE source, no drift (DRY). The HUD reads the
 // live value off the player each frame, so it stays consistent automatically.
 export const PLAYER_MAX_HP = 100
+
+// ── UI font stack (i18n — CJK support) ──
+// EVERY text site uses this single constant instead of a bare 'monospace' so Chinese (zh-CN) renders.
+// A bare 'monospace' falls back to a Latin-only font (Courier/Menlo) that has NO CJK glyphs → tofu boxes.
+// The fallback chain keeps the programmer-art monospace look for Latin, then hands CJK glyphs to a
+// system-installed CJK font (no external/bundled asset — honours the "programmer-art only" constraint,
+// Decision 4). TRADE-OFF (accepted, KISS): the CJK fallback is NOT monospaced, so the Hub/Shop padEnd
+// columns read slightly ragged in Chinese; English stays perfectly aligned.
+export const UI_FONT = 'monospace, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif'

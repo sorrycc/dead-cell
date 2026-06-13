@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
+import { t } from '../i18n/index.js'
 
 // ── GameOverScene (design §6.4 + §6.5, Decision 47/48/59, AC46/AC47/AC51/AC52) ──
 // The run-end screen. GameScene hands off here on player death (completed:false → red "GAME OVER")
@@ -46,11 +47,11 @@ export class GameOverScene extends Phaser.Scene {
     const cy = DESIGN_HEIGHT / 2
 
     // ── Header: gold "RUN COMPLETE" (Decision 48) or red "GAME OVER" (Decision 47). ──
-    const headerText = summary.completed ? 'RUN COMPLETE' : 'GAME OVER'
+    const headerText = summary.completed ? t('over.runComplete') : t('over.gameOver')
     const headerColor = summary.completed ? '#f4d03f' : '#e5484d'
     this.add
       .text(cx, cy - 130, headerText, {
-        fontFamily: 'monospace',
+        fontFamily: UI_FONT,
         fontSize: '64px',
         color: headerColor,
         fontStyle: 'bold',
@@ -59,12 +60,12 @@ export class GameOverScene extends Phaser.Scene {
 
     // ── Summary block (depth / biome / time / kills) — a label per stat, monospace-aligned. ──
     const rows: [string, string][] = [
-      ['DEPTH REACHED', `${summary.depthReached}`],
-      ['BIOME', `${summary.biomeName}`],
-      ['TIME', formatTime(summary.timeMs)],
-      ['KILLS', `${summary.kills}`],
-      ['CELLS BANKED', `${summary.cellsBanked}`], // §6.5 (AC51) — the Cells added to permanent meta.
-      ['RUN SEED', formatSeed(summary.runSeed)], // §6.9 (Decision 71) — the shareable run id (replay in Hub).
+      [t('summary.depthReached'), `${summary.depthReached}`],
+      [t('summary.biome'), `${summary.biomeName}`], // biomeName is passed already-translated by GameScene.
+      [t('summary.time'), formatTime(summary.timeMs)],
+      [t('summary.kills'), `${summary.kills}`],
+      [t('summary.cellsBanked'), `${summary.cellsBanked}`], // §6.5 (AC51) — the Cells added to permanent meta.
+      [t('summary.runSeed'), formatSeed(summary.runSeed)], // §6.9 (Decision 71) — the shareable run id (replay in Hub).
     ]
     const rowH = 38
     const blockTop = cy - 40
@@ -72,16 +73,16 @@ export class GameOverScene extends Phaser.Scene {
       const y = blockTop + i * rowH
       // Label (right-aligned to the centerline) + value (left-aligned) so the colon column lines up.
       this.add
-        .text(cx - 20, y, label, { fontFamily: 'monospace', fontSize: '24px', color: '#8b949e' })
+        .text(cx - 20, y, label, { fontFamily: UI_FONT, fontSize: '24px', color: '#8b949e' })
         .setOrigin(1, 0.5)
       this.add
-        .text(cx + 20, y, value, { fontFamily: 'monospace', fontSize: '24px', color: '#e6edf3' })
+        .text(cx + 20, y, value, { fontFamily: UI_FONT, fontSize: '24px', color: '#e6edf3' })
         .setOrigin(0, 0.5)
     })
 
     this.add
-      .text(cx, blockTop + rows.length * rowH + 40, 'Press SPACE / click → HUB', {
-        fontFamily: 'monospace',
+      .text(cx, blockTop + rows.length * rowH + 40, t('over.toHub'), {
+        fontFamily: UI_FONT,
         fontSize: '22px',
         color: '#8b949e',
       })

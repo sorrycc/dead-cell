@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
 import type { MutationSpec } from '../config/mutations.js'
+import { t, tName, tDesc } from '../i18n/index.js'
 
 interface MutationOverlayOpts {
   offers: MutationSpec[] // the 3 seeded mutation choices (already drawn by GameScene).
@@ -87,13 +88,13 @@ export class MutationOverlay {
     this.panel.setStrokeStyle(3, PANEL_STROKE, 0.9)
 
     this.title = scene.add
-      .text(cx, panelTop + 28, 'CHOOSE A MUTATION', { fontFamily: 'monospace', fontSize: '32px', color: '#2ecc71', fontStyle: 'bold' })
+      .text(cx, panelTop + 28, t('mutation.title'), { fontFamily: UI_FONT, fontSize: '32px', color: '#2ecc71', fontStyle: 'bold' })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(DEPTH + 2)
     this.subtitle = scene.add
-      .text(cx, panelTop + 62, 'A new biome — pick one perk for the rest of the run', {
-        fontFamily: 'monospace',
+      .text(cx, panelTop + 62, t('mutation.subtitle'), {
+        fontFamily: UI_FONT,
         fontSize: '16px',
         color: '#8b949e',
       })
@@ -115,12 +116,12 @@ export class MutationOverlay {
       const rowY = this._rowBaseY + i * ROW_H
       const m = this.offers[i]
       const nameT = scene.add
-        .text(cx - PANEL_W / 2 + 30, rowY - 12, m.name, { fontFamily: 'monospace', fontSize: '22px', color: '#e6edf3', fontStyle: 'bold' })
+        .text(cx - PANEL_W / 2 + 30, rowY - 12, tName('mutation', m.id, m.name), { fontFamily: UI_FONT, fontSize: '22px', color: '#e6edf3', fontStyle: 'bold' })
         .setOrigin(0, 0.5)
         .setScrollFactor(0)
         .setDepth(DEPTH + 2)
       const descT = scene.add
-        .text(cx - PANEL_W / 2 + 30, rowY + 12, m.desc, { fontFamily: 'monospace', fontSize: '17px', color: '#8b949e' })
+        .text(cx - PANEL_W / 2 + 30, rowY + 12, tDesc('mutation', m.id, m.desc), { fontFamily: UI_FONT, fontSize: '17px', color: '#8b949e' })
         .setOrigin(0, 0.5)
         .setScrollFactor(0)
         .setDepth(DEPTH + 2)
@@ -129,8 +130,8 @@ export class MutationOverlay {
     }
 
     this.help = scene.add
-      .text(cx, panelTop + PANEL_H - 20, 'UP/DOWN select · E/SPACE/ENTER confirm', {
-        fontFamily: 'monospace',
+      .text(cx, panelTop + PANEL_H - 20, t('mutation.help'), {
+        fontFamily: UI_FONT,
         fontSize: '16px',
         color: '#8b949e',
       })

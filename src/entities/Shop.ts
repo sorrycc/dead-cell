@@ -1,5 +1,7 @@
 import Phaser from 'phaser'
 import { TILE_SIZE } from '../world/LevelGenerator.js'
+import { UI_FONT } from '../config/constants.js'
+import { t } from '../i18n/index.js'
 
 // ── Shop — the in-run vendor (design §6.10, Decision 74/76, AC63 — the GOLD SINK) ──
 // A plain class (Decision 10 shape, like Door/Player/Enemy) holding a drawn vendor rectangle + an Arcade
@@ -54,11 +56,11 @@ export class Shop {
 
     // A small "$" marker on the stall + a floating "Press E" prompt shown only while in range (the tell).
     this.tag = scene.add
-      .text(x, y - SHOP_H * 0.5 - 6, '$', { fontFamily: 'monospace', fontSize: '22px', color: '#f1c40f', fontStyle: 'bold' })
+      .text(x, y - SHOP_H * 0.5 - 6, '$', { fontFamily: UI_FONT, fontSize: '22px', color: '#f1c40f', fontStyle: 'bold' })
       .setOrigin(0.5, 1)
       .setDepth(5)
     this.prompt = scene.add
-      .text(x, y - SHOP_H * 0.5 - 28, '[E] SHOP', { fontFamily: 'monospace', fontSize: '18px', color: '#e6edf3' })
+      .text(x, y - SHOP_H * 0.5 - 28, t('shop.prompt'), { fontFamily: UI_FONT, fontSize: '18px', color: '#e6edf3' })
       .setOrigin(0.5, 1)
       .setDepth(5)
       .setVisible(false)

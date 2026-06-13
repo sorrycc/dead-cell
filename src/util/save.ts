@@ -25,6 +25,8 @@ export function set(key: string, value: unknown): boolean {
   }
 }
 
+import type { Locale } from '../i18n/index.js'
+
 // ── Typed meta-progression wrapper ──
 // The meta-loop (§6.5) banks Cells + permanent upgrades + best depth here; the schema is owned in
 // ONE place (the save key + the default shape) layered over the defensive get/set above. core/
@@ -48,6 +50,12 @@ export interface MetaState {
   unlockedTier: number // highest Boss-Cell tier ever unlocked (0 = base; raised on a completed run).
   selectedTier: number // the tier the next run launches at (clamped 0..unlockedTier on read).
   blueprints: string[] // permanently-unlocked blueprint ids (run pools draw from starters ∪ these).
+  // ── Language preference (i18n) ── OPTIONAL + intentionally ABSENT from DEFAULT_META so a fresh / pre-
+  // i18n save leaves it undefined. main.ts then does `meta.language ?? detectLocale()`, so a first-time
+  // visitor auto-detects from the browser; a defaulted 'en' here would suppress that. Set + saved only on
+  // an explicit Hub language switch (MetaState.setLanguage). loadMeta won't back-fill it (it's not in
+  // DEFAULT_META), which is exactly the behaviour we want.
+  language?: Locale
 }
 
 // Spread defaults over

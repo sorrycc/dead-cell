@@ -1,7 +1,8 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import type { ShopItem } from '../config/shop.js'
+import { t, tName, tDesc } from '../i18n/index.js'
 
 interface ShopOverlayOpts {
   getGold(): number
@@ -93,12 +94,12 @@ export class ShopOverlay {
     this.panel.setStrokeStyle(3, PANEL_STROKE, 0.9)
 
     this.title = scene.add
-      .text(cx, panelTop + 28, 'SHOP', { fontFamily: 'monospace', fontSize: '34px', color: '#9b59b6', fontStyle: 'bold' })
+      .text(cx, panelTop + 28, t('shop.title'), { fontFamily: UI_FONT, fontSize: '34px', color: '#9b59b6', fontStyle: 'bold' })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(DEPTH + 2)
     this.goldHeader = scene.add
-      .text(cx, panelTop + 60, '', { fontFamily: 'monospace', fontSize: '20px', color: '#f1c40f' })
+      .text(cx, panelTop + 60, '', { fontFamily: UI_FONT, fontSize: '20px', color: '#f1c40f' })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(DEPTH + 2)
@@ -114,7 +115,7 @@ export class ShopOverlay {
     this.rowTexts = []
     for (let i = 0; i < SHOP_ITEMS.length; i++) {
       const t = scene.add
-        .text(cx - PANEL_W / 2 + 30, this._rowBaseY + i * ROW_H, '', { fontFamily: 'monospace', fontSize: '20px', color: '#e6edf3' })
+        .text(cx - PANEL_W / 2 + 30, this._rowBaseY + i * ROW_H, '', { fontFamily: UI_FONT, fontSize: '20px', color: '#e6edf3' })
         .setOrigin(0, 0.5)
         .setScrollFactor(0)
         .setDepth(DEPTH + 2)
@@ -123,8 +124,8 @@ export class ShopOverlay {
     this.closeRowIndex = SHOP_ITEMS.length
     this.rowCount = SHOP_ITEMS.length + 1
     this.closeText = scene.add
-      .text(cx, this._rowBaseY + this.closeRowIndex * ROW_H, 'LEAVE', {
-        fontFamily: 'monospace',
+      .text(cx, this._rowBaseY + this.closeRowIndex * ROW_H, t('shop.leave'), {
+        fontFamily: UI_FONT,
         fontSize: '22px',
         color: '#8b949e',
         fontStyle: 'bold',
@@ -134,8 +135,8 @@ export class ShopOverlay {
       .setDepth(DEPTH + 2)
 
     this.help = scene.add
-      .text(cx, panelTop + PANEL_H - 20, 'UP/DOWN select · E/SPACE/ENTER buy or LEAVE', {
-        fontFamily: 'monospace',
+      .text(cx, panelTop + PANEL_H - 20, t('shop.help'), {
+        fontFamily: UI_FONT,
         fontSize: '16px',
         color: '#8b949e',
       })
@@ -187,12 +188,14 @@ export class ShopOverlay {
   _render() {
     if (this._destroyed) return
     const gold = this._getGold()
-    this.goldHeader.setText(`GOLD ${gold}`)
+    this.goldHeader.setText(t('shop.gold', { n: gold }))
     for (let i = 0; i < SHOP_ITEMS.length; i++) {
       const it = SHOP_ITEMS[i]
       const affordable = gold >= it.price
       const color = affordable ? '#e6edf3' : '#e5484d' // white if affordable, red if not.
-      this.rowTexts[i].setText(`${it.name.padEnd(18)} ${String(it.price).padStart(3)}g   ${it.desc}`).setColor(color)
+      const name = tName('shop', it.id, it.name)
+      const desc = tDesc('shop', it.id, it.desc)
+      this.rowTexts[i].setText(`${name.padEnd(18)} ${String(it.price).padStart(3)}g   ${desc}`).setColor(color)
     }
     // Move the highlight bar behind the selected row (the CLOSE row is the synthetic last, centered).
     const selY = this.cursor === this.closeRowIndex

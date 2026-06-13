@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { DESIGN_WIDTH, DESIGN_HEIGHT } from '../config/constants.js'
+import { DESIGN_WIDTH, DESIGN_HEIGHT, UI_FONT } from '../config/constants.js'
 import { createMetaState } from '../core/MetaState.js'
 import type { MetaStateInstance } from '../core/MetaState.js'
 import { UPGRADES } from '../config/upgrades.js'
@@ -7,6 +7,8 @@ import { MAX_TIER } from '../config/tiers.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
 import { GameScene } from './GameScene.js'
 import { Sound } from '../audio/Sound.js'
+import { t, tName, tDesc, getLocale, setLocale } from '../i18n/index.js'
+import type { Locale } from '../i18n/index.js'
 
 // ── HubScene — the between-runs shop (design §6.5/§6.9, Decision 58/71, AC52) ──
 // The meta-progression hub where banked Cells buy PERMANENT upgrades. A KEYBOARD-driven vertical list
@@ -48,6 +50,7 @@ export class HubScene extends Phaser.Scene {
   // ── Row index scheme (meta-progression §6.9, Decision 9) ── synthetic rows at fixed indices off
   // UPGRADES.length / BLUEPRINTS.length so the cursor math stays a single clamp (KISS). Layout (top→bottom):
   //   tierRowIndex (0) · upgrade rows (1..UPGRADES.length) · blueprint rows · SEEDED RUN · START RUN.
+  private languageRowIndex!: number // i18n — the LANGUAGE row (index 0, above the TIER row).
   private tierRowIndex!: number
   private upgradeRowStart!: number // index of the FIRST upgrade row.
   private blueprintRowStart!: number // index of the FIRST blueprint row.
@@ -57,6 +60,7 @@ export class HubScene extends Phaser.Scene {
   private cursor!: number
   private cellsHeader!: Phaser.GameObjects.Text
   private cursorBar!: Phaser.GameObjects.Rectangle
+  private languageRowText!: Phaser.GameObjects.Text
   private tierRowText!: Phaser.GameObjects.Text
   private rowTexts!: Phaser.GameObjects.Text[]
   private blueprintTexts!: Phaser.GameObjects.Text[]
@@ -82,24 +86,26 @@ export class HubScene extends Phaser.Scene {
     // Rows (meta-progression §6.9, Decision 9): a TIER selector row, then every upgrade, then one BLUEPRINT row
     // per BLUEPRINTS entry, then the synthetic SEEDED RUN + START RUN rows. All sit at fixed indices off
     // UPGRADES.length / BLUEPRINTS.length so the cursor math stays a single clamp (KISS).
-    this.tierRowIndex = 0
-    this.upgradeRowStart = 1
-    this.blueprintRowStart = 1 + UPGRADES.length
-    this.seedRowIndex = 1 + UPGRADES.length + BLUEPRINTS.length // the SEEDED RUN row.
+    // i18n — a LANGUAGE row is inserted at index 0; every other row shifts down by one.
+    this.languageRowIndex = 0
+    this.tierRowIndex = 1
+    this.upgradeRowStart = 2
+    this.blueprintRowStart = 2 + UPGRADES.length
+    this.seedRowIndex = 2 + UPGRADES.length + BLUEPRINTS.length // the SEEDED RUN row.
     this.startRowIndex = this.seedRowIndex + 1 // the START RUN row (the last).
     this.rowCount = this.startRowIndex + 1
     this.cursor = this.startRowIndex // start on START RUN so a player who just wants to play hits one key.
 
     // ── Header: title + banked-Cells readout + best depth. ──
     this.add
-      .text(DESIGN_WIDTH / 2, 80, 'HUB', { fontFamily: 'monospace', fontSize: '56px', color: '#e6edf3', fontStyle: 'bold' })
+      .text(DESIGN_WIDTH / 2, 80, t('hub.title'), { fontFamily: UI_FONT, fontSize: '56px', color: '#e6edf3', fontStyle: 'bold' })
       .setOrigin(0.5)
     this.cellsHeader = this.add
-      .text(DESIGN_WIDTH / 2, 140, '', { fontFamily: 'monospace', fontSize: '24px', color: '#4dd0e1' })
+      .text(DESIGN_WIDTH / 2, 140, '', { fontFamily: UI_FONT, fontSize: '24px', color: '#4dd0e1' })
       .setOrigin(0.5)
     this.add
-      .text(DESIGN_WIDTH / 2, DESIGN_HEIGHT - 40, 'UP/DOWN select · SPACE/ENTER buy or start', {
-        fontFamily: 'monospace',
+      .text(DESIGN_WIDTH / 2, DESIGN_HEIGHT - 40, t('hub.footer'), {
+        fontFamily: UI_FONT,
         fontSize: '18px',
         color: '#8b949e',
       })
@@ -112,15 +118,21 @@ export class HubScene extends Phaser.Scene {
 
     // ── TIER selector row (meta-progression §6.9, Decision 9, AC10) ── shows selected/unlocked + the tier name
     // + desc; Buy CYCLES selectedTier within 0..unlockedTier (saved via setSelectedTier). Sits at the top.
+    // ── LANGUAGE row (i18n) ── the top row; Buy (SPACE/ENTER) cycles en ↔ zh-CN then scene.restart()s to
+    // re-render the whole Hub in the new language. Left-aligned like the upgrade/tier rows.
+    this.languageRowText = this.add
+      .text(COL_X, LIST_TOP + this.languageRowIndex * ROW_H, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#4dd0e1' })
+      .setOrigin(0, 0.5)
+
     this.tierRowText = this.add
-      .text(COL_X, LIST_TOP + this.tierRowIndex * ROW_H, '', { fontFamily: 'monospace', fontSize: '18px', color: '#e67e22' })
+      .text(COL_X, LIST_TOP + this.tierRowIndex * ROW_H, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#e67e22' })
       .setOrigin(0, 0.5)
 
     // ── One text object per upgrade row (re-rendered on buy/move). Offset by upgradeRowStart. ──
     this.rowTexts = []
     for (let i = 0; i < UPGRADES.length; i++) {
       const t = this.add
-        .text(COL_X, LIST_TOP + (this.upgradeRowStart + i) * ROW_H, '', { fontFamily: 'monospace', fontSize: '18px', color: '#e6edf3' })
+        .text(COL_X, LIST_TOP + (this.upgradeRowStart + i) * ROW_H, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#e6edf3' })
         .setOrigin(0, 0.5)
       this.rowTexts.push(t)
     }
@@ -130,18 +142,18 @@ export class HubScene extends Phaser.Scene {
     this.blueprintTexts = []
     for (let i = 0; i < BLUEPRINTS.length; i++) {
       const t = this.add
-        .text(COL_X, LIST_TOP + (this.blueprintRowStart + i) * ROW_H, '', { fontFamily: 'monospace', fontSize: '18px', color: '#8b949e' })
+        .text(COL_X, LIST_TOP + (this.blueprintRowStart + i) * ROW_H, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#8b949e' })
         .setOrigin(0, 0.5)
       this.blueprintTexts.push(t)
     }
     // ── SEEDED RUN row (Decision 71) ── shows RANDOM or the pinned hex seed; Buy toggles/edits it.
     this.seedRowText = this.add
-      .text(COL_X, LIST_TOP + this.seedRowIndex * ROW_H, '', { fontFamily: 'monospace', fontSize: '18px', color: '#f4d03f' })
+      .text(COL_X, LIST_TOP + this.seedRowIndex * ROW_H, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#f4d03f' })
       .setOrigin(0, 0.5)
 
     this.startRowText = this.add
-      .text(DESIGN_WIDTH / 2, LIST_TOP + this.startRowIndex * ROW_H + 12, 'START RUN', {
-        fontFamily: 'monospace',
+      .text(DESIGN_WIDTH / 2, LIST_TOP + this.startRowIndex * ROW_H + 12, t('hub.start'), {
+        fontFamily: UI_FONT,
         fontSize: '24px',
         color: '#58d68d',
         fontStyle: 'bold',
@@ -172,6 +184,15 @@ export class HubScene extends Phaser.Scene {
   // Game with the chosen seed (Decision 58/71; meta-progression §6.9, Decision 9).
   _confirm() {
     this.sfx.uiSelect() // audio §6.4 (AC6) — confirm/buy/START blip (fired before any scene-start below).
+    if (this.cursor === this.languageRowIndex) {
+      // LANGUAGE (i18n) — cycle en ↔ zh-CN, persist the choice, flip the live locale, then restart the
+      // scene so every row re-renders through t/tName/tDesc in the new language (KISS — no per-row refresh).
+      const next: Locale = getLocale() === 'en' ? 'zh-CN' : 'en'
+      setLocale(next)
+      this.meta.setLanguage(next)
+      this.scene.restart()
+      return
+    }
     if (this.cursor === this.startRowIndex) {
       // START RUN (Decision 58/71): use the pinned seed if set, else mint a fresh entropy seed HERE so the
       // run varies even from a Hub-launched start. Pass it to GameScene via scene-start data.
@@ -217,7 +238,7 @@ export class HubScene extends Phaser.Scene {
     try {
       // prompt is unavailable in some embeds — guard so the Hub never throws (mirrors save.js's discipline).
       if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-        raw = window.prompt('Enter a run seed to replay (decimal or 0x-hex). Blank = random:', '')
+        raw = window.prompt(t('hub.seedPrompt'), '')
       }
     } catch {
       raw = null
@@ -229,7 +250,13 @@ export class HubScene extends Phaser.Scene {
   // ── Render the whole list from the current MetaState (cheap — a handful of rows; only on change). ──
   _render() {
     const cells = this.meta.getCells()
-    this.cellsHeader.setText(`CELLS ${cells}   ·   BEST DEPTH ${this.meta.getBestDepth()}`)
+    this.cellsHeader.setText(t('hub.cellsHeader', { cells, depth: this.meta.getBestDepth() }))
+
+    // ── LANGUAGE row (i18n) ── the active locale is marked with [brackets]; Buy cycles it (see _confirm).
+    const loc = getLocale()
+    const enLabel = loc === 'en' ? `[${t('locale.en')}]` : t('locale.en')
+    const zhLabel = loc === 'zh-CN' ? `[${t('locale.zh-CN')}]` : t('locale.zh-CN')
+    this.languageRowText.setText(`${t('hub.language').padEnd(18)} ${enLabel}  ${zhLabel}`)
 
     // ── TIER selector row (meta-progression §6.9, Decision 9, AC10) ── TIER selected/unlocked · name · desc.
     // SPACE cycles within 0..unlockedTier (orange when more tiers are unlockable, grey when locked at 0/0).
@@ -237,8 +264,12 @@ export class HubScene extends Phaser.Scene {
     const unlockedTier = this.meta.getUnlockedTier()
     const selectedTier = this.meta.getSelectedTier()
     const tierColor = unlockedTier > 0 ? '#e67e22' : '#8b949e' // orange when there's a choice, grey at 0/0.
+    const cycleHint = unlockedTier > 0 ? '   ' + t('hub.cycleHint') : ''
     this.tierRowText
-      .setText(`${'BOSS CELLS'.padEnd(18)} ${selectedTier}/${unlockedTier} (max ${MAX_TIER})   ${tier.name} — ${tier.desc}${unlockedTier > 0 ? '   (SPACE to cycle)' : ''}`)
+      .setText(
+        `${t('hub.bossCells').padEnd(18)} ${selectedTier}/${unlockedTier} ${t('hub.tierMax', { max: MAX_TIER })}   ` +
+          `${tName('tier', String(tier.index), tier.name)} — ${tDesc('tier', String(tier.index), tier.desc)}${cycleHint}`,
+      )
       .setColor(tierColor)
 
     for (let i = 0; i < UPGRADES.length; i++) {
@@ -248,10 +279,10 @@ export class HubScene extends Phaser.Scene {
       const cost = maxed ? null : upg.costs[owned]
       const affordable = !maxed && cells >= (cost as number)
       // Row: name · owned/max · next cost (or MAX) · the one-line effect. Color hints affordability.
-      const costText = maxed ? 'MAX' : `${cost} cells`
+      const costText = maxed ? t('hub.max') : t('hub.cellsCost', { cost: cost as number })
       const color = maxed ? '#8b949e' : affordable ? '#e6edf3' : '#e5484d' // grey maxed, white ok, red can't afford.
       this.rowTexts[i]
-        .setText(`${upg.name.padEnd(18)} Lv ${owned}/${upg.maxLevel}   ${costText.padEnd(11)} ${upg.desc}`)
+        .setText(`${tName('upgrade', upg.id, upg.name).padEnd(18)} ${t('hub.lv')} ${owned}/${upg.maxLevel}   ${costText.padEnd(11)} ${tDesc('upgrade', upg.id, upg.desc)}`)
         .setColor(color)
     }
 
@@ -261,15 +292,18 @@ export class HubScene extends Phaser.Scene {
     for (let i = 0; i < BLUEPRINTS.length; i++) {
       const bp = BLUEPRINTS[i]
       const unlocked = this.meta.isBlueprintUnlocked(bp.id)
+      const bpName = `${t('hub.bpPrefix')} ${tName('blueprint', bp.id, bp.name)}`
+      const status = unlocked ? t('hub.unlocked') : t('hub.locked')
       this.blueprintTexts[i]
-        .setText(`${('BP ' + bp.name).padEnd(18)} ${bp.kind.padEnd(8)} ${unlocked ? 'UNLOCKED' : 'LOCKED'}   ${bp.desc}`)
+        .setText(`${bpName.padEnd(18)} ${t('kind.' + bp.kind).padEnd(8)} ${status}   ${tDesc('blueprint', bp.id, bp.desc)}`)
         .setColor(unlocked ? '#58d68d' : '#8b949e') // green unlocked, grey locked.
     }
 
     // ── SEEDED RUN row (Decision 71) ── RANDOM (a fresh entropy seed each run) or the pinned hex run id.
     const seedText =
-      this.pinnedSeed != null ? `0x${(this.pinnedSeed >>> 0).toString(16)}` : 'RANDOM (each run varies)'
-    this.seedRowText.setText(`${'SEEDED RUN'.padEnd(18)}        ${seedText}   (SPACE to ${this.pinnedSeed != null ? 'clear' : 'set'})`)
+      this.pinnedSeed != null ? `0x${(this.pinnedSeed >>> 0).toString(16)}` : t('hub.seedRandom')
+    const seedHint = this.pinnedSeed != null ? t('hub.seedClear') : t('hub.seedSet')
+    this.seedRowText.setText(`${t('hub.seededRun').padEnd(18)}        ${seedText}   ${seedHint}`)
 
     // Move the highlight bar behind the selected row. START RUN is the synthetic last (centered) row; the
     // SEEDED RUN row + the upgrade rows are left-aligned at their list y.
