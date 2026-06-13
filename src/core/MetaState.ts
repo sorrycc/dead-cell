@@ -15,6 +15,8 @@ import type { MetaState } from '../util/save.js'
 import { UPGRADES_BY_ID } from '../config/upgrades.js'
 import type { PlayerStats } from '../config/upgrades.js'
 import { PLAYER_MAX_HP } from '../config/constants.js'
+import { tierAt, MAX_TIER } from '../config/tiers.js'
+import type { BossCellTier } from '../config/tiers.js'
 
 // ── BASE_PLAYER_STATS (Decision 57/60) ── the starting-stats object the meta fold STARTS from and the
 // Player reads. A fresh meta (no upgrades) folds to THIS unchanged → the Phase-4 player exactly (the
@@ -75,7 +77,16 @@ export interface MetaStateInstance {
   getUpgradeLevel(id: string): number
   getBestDepth(): number
   buy(id: string): boolean
-  bankRun(arg?: { cells?: number; depth?: number }): number
+  // ── Boss-Cell TIER + BLUEPRINT API (meta-progression §6.4, Decision 3, AC5) ── the Hub reads/selects the
+  // tier + lists blueprints; GameScene reads startTier() + getBlueprints() at run start. bankRun is extended
+  // to ALSO raise unlockedTier (on a COMPLETED run) + merge banked blueprint ids (set-union, dedup).
+  getUnlockedTier(): number
+  getSelectedTier(): number
+  setSelectedTier(i: number): void // clamp 0..unlockedTier, then save.
+  startTier(): BossCellTier // the selected tier's row (clamped to unlocked) — the run launches at this.
+  getBlueprints(): string[]
+  isBlueprintUnlocked(id: string): boolean
+  bankRun(arg?: { cells?: number; depth?: number; blueprints?: string[]; completedAtTier?: number | null }): number
   startStats(): PlayerStats
 }
 
@@ -102,6 +113,36 @@ export function createMetaState(): MetaStateInstance {
       return meta.bestDepth || 0
     },
 
+    // ── Boss-Cell TIER reads/select (meta-progression §6.4, Decision 5, AC5) ── getUnlockedTier is the
+    // highest tier ever unlocked; getSelectedTier is ALWAYS re-clamped to 0..unlockedTier (a corrupt save with
+    // selectedTier > unlockedTier degrades to a valid run, never crashes). setSelectedTier clamps then saves.
+    // startTier returns the row the run launches at (clamped to unlocked — tierAt clamps to [0, MAX_TIER] too).
+    getUnlockedTier() {
+      return Math.max(0, Math.min(meta.unlockedTier || 0, MAX_TIER))
+    },
+    getSelectedTier() {
+      return Math.max(0, Math.min(meta.selectedTier || 0, meta.unlockedTier || 0))
+    },
+    setSelectedTier(i: number) {
+      const unlocked = Math.max(0, Math.min(meta.unlockedTier || 0, MAX_TIER))
+      meta.selectedTier = Math.max(0, Math.min(i | 0, unlocked))
+      saveMeta(meta)
+    },
+    startTier() {
+      // The selected tier (re-clamped to unlocked) → its row. tierAt clamps the index into [0, MAX_TIER] so a
+      // corrupt save can never index out of the table (Decision 5). Tier 0 ⇒ the identity row (round-1 curve).
+      return tierAt(Math.max(0, Math.min(meta.selectedTier || 0, meta.unlockedTier || 0)))
+    },
+
+    // ── Blueprint reads (meta-progression §6.4, Decision 6, AC5) ── getBlueprints is the unlocked-id list (the
+    // run draws starters ∪ these); isBlueprintUnlocked is the Hub's per-row UNLOCKED/LOCKED test.
+    getBlueprints() {
+      return meta.blueprints
+    },
+    isBlueprintUnlocked(id: string) {
+      return meta.blueprints.includes(id)
+    },
+
     // ── buy(id) (Decision 56/57) ── buy the NEXT level of an upgrade if owned < maxLevel AND the
     // banked Cells cover costs[owned]. On success: deduct Cells, increment the owned level, SAVE.
     // Returns true on a successful purchase, false otherwise (can't afford / maxed / unknown id).
@@ -118,12 +159,24 @@ export function createMetaState(): MetaStateInstance {
       return true
     },
 
-    // ── bankRun({ cells, depth }) (Decision 59, AC51) ── called ONCE per run by GameScene (under the
-    // gameOver guard) on death OR run-complete: add the run's collected Cells to the bank, bump
-    // bestDepth, and SAVE. Gold/scrolls are NOT passed in (run-only — permadeath loses them).
-    bankRun({ cells = 0, depth = 0 }: { cells?: number; depth?: number } = {}) {
+    // ── bankRun({ cells, depth, blueprints, completedAtTier }) (Decision 59 + meta-progression Decision 3,
+    // AC51/AC5/AC9) ── called ONCE per run by GameScene (under the gameOver guard) on death OR run-complete:
+    // add the run's collected Cells to the bank, bump bestDepth, MERGE banked blueprint ids (set-union, dedup
+    // — like Cells, only PERMANENT once banked), and (on a COMPLETED run only) RAISE unlockedTier to the next
+    // tier. Gold/scrolls are NOT passed in (run-only — permadeath loses them). Takes the new data as ARGS
+    // (mirroring how it already takes cells/depth) so it stays decoupled + node-constructible. Both the death
+    // and boss-clear paths bank blueprints (Decision 7); only the boss-clear path passes completedAtTier (a
+    // death does NOT unlock a tier — the explicit spec).
+    bankRun({ cells = 0, depth = 0, blueprints = [], completedAtTier = null }: { cells?: number; depth?: number; blueprints?: string[]; completedAtTier?: number | null } = {}) {
       meta.cells += cells
       meta.bestDepth = Math.max(meta.bestDepth || 0, depth)
+      // Merge banked blueprints (set-union, dedup) — a banked id permanently joins the run pools.
+      for (const id of blueprints) if (!meta.blueprints.includes(id)) meta.blueprints.push(id)
+      // Unlock the NEXT tier ONLY on a completed run at the run's tier (clamped to MAX_TIER — never past the
+      // table). A death passes completedAtTier null (no unlock). max() so an already-higher unlock holds.
+      if (completedAtTier != null) {
+        meta.unlockedTier = Math.max(meta.unlockedTier || 0, Math.min(completedAtTier + 1, MAX_TIER))
+      }
       saveMeta(meta)
       return meta.cells
     },

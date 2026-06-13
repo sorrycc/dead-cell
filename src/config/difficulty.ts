@@ -46,15 +46,27 @@ const COUNT_EVERY = 2 // +1 enemy every 2 depths cleared.
 // detect/attack RANGES and the TELEGRAPH window are deliberately NOT scaled (Decision 45 / review
 // MINOR): a faster enemy with the SAME telegraph stays dodgeable — readability is preserved at depth.
 
-// ── scaleAtDepth(depth) → a fresh scalar set, each a monotone-non-decreasing ramp (AC42). ──
-// Returns a NEW object each call (no shared mutable state) so a caller can't alias-corrupt the curve.
-export function scaleAtDepth(depth: number): DepthScale {
+// ── scaleAtDepth(depth, bossCellMult = 1) → a fresh scalar set, each a monotone-non-decreasing ramp (AC42;
+// meta-progression §6.2, Decision 2, AC2) ── Returns a NEW object each call (no shared mutable state) so a
+// caller can't alias-corrupt the curve.
+//
+// THE BOSS-CELL TIER (meta-progression Decision 2): an OPTIONAL `bossCellMult` (default 1 — the IDENTITY)
+// multiplies EVERY ramp, so a higher tier is a GLOBAL LIFT on the existing curve, not a parallel system. With
+// `bossCellMult === 1` this returns BYTE-IDENTICAL scalars to the pre-slice curve (the "tier 0 = round 1"
+// identity pin the verifier asserts — §4a). Monotone IN DEPTH is preserved (m >= 1 × a non-decreasing ramp is
+// non-decreasing); monotone IN TIER is preserved (a bigger m only raises each scalar). The speed multiply
+// happens BEFORE the clamp then re-clamps (min(SPEED_CAP, ramp·m)) so a high tier can't produce an unreadable
+// enemy speed — readability is preserved (the same philosophy as the base curve's cap). enemyCountBonus uses
+// floor((d/COUNT_EVERY)·m) so a tiered run is DENSER (capped at spawn time to the biome's standable surplus —
+// GameScene._buildLevel — so the multiply pushes harder against the same cap, no generator change).
+export function scaleAtDepth(depth: number, bossCellMult = 1): DepthScale {
   const d = Math.max(0, depth | 0)
+  const m = bossCellMult >= 1 ? bossCellMult : 1 // defensive: a tier never WEAKENS the curve (Decision 2).
   return {
-    enemyHpMult: 1 + HP_PER_DEPTH * d, // strictly increasing in d.
-    enemyDamageMult: 1 + DMG_PER_DEPTH * d, // strictly increasing in d.
-    enemySpeedMult: Math.min(SPEED_CAP, 1 + SPEED_PER_DEPTH * d), // non-decreasing (clamped).
-    enemyCountBonus: Math.floor(d / COUNT_EVERY), // non-decreasing step function.
+    enemyHpMult: (1 + HP_PER_DEPTH * d) * m, // non-decreasing in d AND in m (m >= 1 × a rising ramp).
+    enemyDamageMult: (1 + DMG_PER_DEPTH * d) * m, // non-decreasing in d AND in m.
+    enemySpeedMult: Math.min(SPEED_CAP, (1 + SPEED_PER_DEPTH * d) * m), // multiply BEFORE the clamp; non-decreasing.
+    enemyCountBonus: Math.floor((d / COUNT_EVERY) * m), // floor keeps it an int; m >= 1 only ever ADDS.
   }
 }
 
@@ -74,6 +86,19 @@ export function scaleSpec(baseSpec: EnemySpec, scale: DepthScale): EnemySpec {
       ...baseSpec.swing,
       damage: Math.round(baseSpec.swing.damage * scale.enemyDamageMult),
     },
+    // ── Per-attack damage fold (enemy-ai-telegraphs §6.7, AC6) ── with variety living in attacks[] (the
+    // canonical strike data — Decision 1), a deeper grunt's OVERHEAD / a deeper spitter's SNIPE must hit
+    // harder too, exactly as scaleBossSpec folds every boss attack (DRY/consistency). Deep-clone each entry
+    // (and its swing/projectile sub-object) so the scaled spec OWNS its data — NEVER mutating the shared
+    // archetype table (the same aliasing discipline as the swing fold above). Telegraph/active/recovery/
+    // counts/speeds are deliberately UNSCALED so a deeper attack stays EQUALLY readable (the dodge contract).
+    attacks: baseSpec.attacks.map((a) => ({
+      ...a,
+      swing: a.swing ? { ...a.swing, damage: Math.round(a.swing.damage * scale.enemyDamageMult) } : a.swing,
+      projectile: a.projectile
+        ? { ...a.projectile, damage: Math.round(a.projectile.damage * scale.enemyDamageMult) }
+        : a.projectile,
+    })),
   }
 }
 
@@ -130,8 +155,12 @@ export function scaleBossSpec(bossSpec: BossSpec, scale: DepthScale): BossSpec {
 // term at a generous MAX depth and require a +1 tier step to cover it. This keeps the constant
 // principled (not "feels big enough") and a module-load assertion fails LOUDLY if a re-tune breaks it.
 const TIER_BOUND_MAX_DEPTH = 100 // a generous run length the bound must cover (far past real runs).
-const _curveTerm = (depth: number): number => {
-  const s = scaleAtDepth(depth)
+// _curveTerm(depth, bossCellMult = 1): the two unbounded ramps (HP + damage) at this depth + tier. The
+// `bossCellMult` default 1 keeps the TIER_WEIGHT derivation below byte-unchanged (it derives the bound at
+// tier 0 — the identity), and lets effectiveDifficulty fold the tier into the SAME curve term the whole-run
+// walk reads (meta-progression §6.2, Decision 2). m >= 1 only ever RAISES this term (monotone in tier).
+const _curveTerm = (depth: number, bossCellMult = 1): number => {
+  const s = scaleAtDepth(depth, bossCellMult)
   return s.enemyHpMult + s.enemyDamageMult
 }
 // Lower bound: one tier step (the smallest, +1) must be ≥ the max the curve term could fall at a
@@ -149,11 +178,18 @@ if (TIER_WEIGHT < TIER_WEIGHT_MIN) {
   )
 }
 
-// ── effectiveDifficulty(depth, biome) → ONE scalar stacking the biome tier + the depth curve. ──
-// The quantity the verifier proves non-decreasing across the whole run (Decision 49). Because depth
-// is run-global (never resets) AND difficultyTier is non-decreasing along BIOME_ORDER, this is
-// non-decreasing BY CONSTRUCTION; TIER_WEIGHT (≥ the derived bound) keeps it so even if a later
-// re-tune resets the curve per biome.
-export function effectiveDifficulty(depth: number, biome: BiomeConfig): number {
-  return biome.difficultyTier * TIER_WEIGHT + _curveTerm(depth)
+// ── effectiveDifficulty(depth, biome, bossCellMult = 1) → ONE scalar stacking the biome tier + the depth
+// curve (meta-progression §6.2, Decision 2, AC2/AC3) ── The quantity the verifier proves non-decreasing
+// across the whole run (Decision 49). Because depth is run-global (never resets) AND difficultyTier is
+// non-decreasing along BIOME_ORDER, this is non-decreasing BY CONSTRUCTION; TIER_WEIGHT (≥ the derived bound)
+// keeps it so even if a later re-tune resets the curve per biome.
+//
+// THE BOSS-CELL TIER (AC3): `bossCellMult` (default 1 — the identity, so EXISTING callers are byte-unchanged)
+// folds into the CURVE TERM. Within a run `bossCellMult` is CONSTANT (run-global) and >= 1, so the existing
+// whole-run monotonicity proof GENERALIZES: at a fixed tier the curve term is still non-decreasing across a
+// biome boundary, and the biome-tier term doesn't depend on bossCellMult — so effectiveDifficulty is monotone
+// at EVERY tier (the verifier's per-tier walk, §4c). A higher tier is a global LIFT (>= the tier-0 value at
+// every depth — the verifier asserts it), never an easing.
+export function effectiveDifficulty(depth: number, biome: BiomeConfig, bossCellMult = 1): number {
+  return biome.difficultyTier * TIER_WEIGHT + _curveTerm(depth, bossCellMult)
 }

@@ -1,5 +1,7 @@
 import type Phaser from 'phaser'
 import { ParticlePool } from './ParticlePool.js'
+import { STATUS_TINT } from '../combat/statusColors.js'
+import type { StatusKind } from '../combat/status.js'
 
 // ── Juice façade (design §6.3, Decision 23/24, AC25) ──
 // ONE call site per impact: GameScene's overlap callbacks call `effects.hit(x, y, opts)` and get
@@ -23,6 +25,8 @@ const SHAKE_BASE_INTENSITY = 0.004 // base shake intensity (fraction of viewport
 const HITSTOP_BASE = 0.035 // s — base freeze on a normal hit (a few frames).
 const HITSTOP_CRIT = 0.07 // s — longer freeze on a backstab (the "crunch", Decision 24).
 const DAMAGE_REF = 16 // hp — reference damage (the finisher) that the scalars are tuned around.
+const PARRY_COLOR = 0x5ad6ff // bright cyan — the parry spark color (distinct from hit/crit/status tints, AC8).
+const PARRY_COLOR_STR = '#5ad6ff' // the parry "PARRY!" label color (the CSS-hex twin of PARRY_COLOR).
 
 export class Effects {
   private scene: Phaser.Scene
@@ -66,20 +70,47 @@ export class Effects {
     this._onHitstop(isBackstab ? HITSTOP_CRIT : HITSTOP_BASE)
   }
 
-  // ── statusTick(x, y, damage, kind) (design §6.13, Decision 79, AC66) ── a SMALL over-time-damage pop for
-  // a bleed/poison tick: a few kind-tinted sparks + a small floating number, NO shake / NO hit-stop (DoT is
-  // ambient chip damage, not an impact — it must not jitter the camera or freeze the world every tick). The
-  // tint reads the status: bleed = dark red, poison = sickly green. Reuses the SAME pooled sparks/number
-  // path (DRY, no new allocation). Called throttled by Enemy._tickStatus (~5/s) so it reads without churn.
-  statusTick(x: number, y: number, damage = 0, kind: 'bleed' | 'poison' = 'bleed') {
-    const color = kind === 'poison' ? 0x2ecc71 : 0xc0392b
-    const numColor = kind === 'poison' ? '#2ecc71' : '#e74c3c'
+  // ── statusTick(x, y, damage, kind) (design §6.13, Decision 79, AC66; affliction-synergy adds 'burn') ── a
+  // SMALL over-time-damage pop for a bleed/poison/burn tick: a few kind-tinted sparks + a small floating
+  // number, NO shake / NO hit-stop (DoT is ambient chip damage, not an impact — it must not jitter the camera
+  // or freeze the world every tick). The tint reads the status (the SHARED STATUS_TINT table — DRY): bleed
+  // dark-red, poison green, burn orange. Reuses the SAME pooled sparks/number path (no new allocation).
+  // Called throttled by Enemy/Boss._tickStatus (~5/s) so it reads without churn.
+  statusTick(x: number, y: number, damage = 0, kind: StatusKind = 'bleed') {
+    const color = STATUS_TINT[kind]
     this.pool.spawnSparks(x, y, { count: 4, color, speed: 150 })
-    this.pool.spawnNumber(x, y - 18, damage, { color: numColor, scale: 0.8 })
+    this.pool.spawnNumber(x, y - 18, damage, { color: hexStr(color), scale: 0.8 })
+  }
+
+  // ── statusApply(x, y, kind) (affliction-synergy §6.8, AC8) ── a ONE-SHOT floating kind LABEL ("BLEED"/
+  // "POISON"/"STUN"/"BURN") popped once when a status is FIRST applied to an enemy/boss (the ONSET cue) — NOT
+  // on every DoT tick (that's statusTick). NO shake / NO hit-stop (it marks an onset, not an impact). Reuses
+  // ParticlePool.spawnNumber as-is — its `value` accepts a string, so it renders the kind label with no new
+  // pool method (DRY, KISS). GameScene computes "is this a NEW application?" at the hit site (Decision 4) and
+  // only calls this on a NEW entry, so a refresh (re-hit on an already-afflicted enemy) does NOT re-pop.
+  statusApply(x: number, y: number, kind: StatusKind) {
+    this.pool.spawnNumber(x, y - 28, kind.toUpperCase(), { color: hexStr(STATUS_TINT[kind]), scale: 0.85 })
+  }
+
+  // ── parry(x, y) (per-weapon-movesets §6.6, Decision 5, AC8) ── the SUCCESSFUL-PARRY cue: a one-shot bright
+  // cyan "PARRY!" label (reuses ParticlePool.spawnNumber with a string value, exactly like statusApply) plus a
+  // few cyan sparks. NO shake / NO hit-stop — a parry is a defensive READ, not an impact (it must not jitter
+  // the camera or freeze the world). A small camera flash is the scene's job (it owns the camera). Reuses the
+  // SAME pooled sparks/number path (no new allocation, no new FX primitive — DRY).
+  parry(x: number, y: number) {
+    this.pool.spawnSparks(x, y, { count: 10, color: PARRY_COLOR, speed: 240 })
+    this.pool.spawnNumber(x, y - 28, 'PARRY!', { color: PARRY_COLOR_STR, scale: 1.1 })
   }
 
   // Forward the per-frame tick to the pool. REAL dt (the freeze must not pause the pop).
   tick(dt: number) {
     this.pool.tick(dt)
   }
+}
+
+// ── hexStr(int) → '#rrggbb' ── the floating-number pool takes a CSS hex STRING, but the shared STATUS_TINT
+// table stores Phaser RGB INTS (the form the sparks/body cascade need). One tiny converter keeps STATUS_TINT
+// the single source for the four colours (DRY) instead of a parallel string table. PURE.
+function hexStr(int: number): string {
+  return '#' + (int & 0xffffff).toString(16).padStart(6, '0')
 }

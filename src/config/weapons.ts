@@ -40,6 +40,47 @@ export interface WeaponStatus {
   tickDmg?: number
 }
 
+// ── PER-WEAPON MOVESET (per-weapon-movesets design §6.1, Decision 1, AC1) ── the playstyle layer that
+// makes each weapon a DISTINCT ATTACK PATTERN (not just stat deltas). 100% PURE plain data (no Phaser) so
+// scripts/verify-gen.mjs node-imports the table and the §5d well-formedness sweep (AC2) validates it
+// headlessly. Every field is OPTIONAL: a weapon with NO `moveset` (the default) plays EXACTLY as before
+// this slice (the additive identity, AC10) — the Player/verifier read `equippedWeapon.moveset?.x` and the
+// charge/flurry/finisher/pierce code is gated behind the new HOLD/DOWN/parry inputs. A weapon picks at most
+// one of charge/flurry (KISS, Decision 2). foldWeaponAffix carries the moveset via the `...weapon` spread
+// (it's immutable PATTERN data — never scaled by an affix, which describes a stat — Decision 3, AC3).
+
+// A hold-to-charge mode (Hammer melee smash / Bow charged shot). All plain data.
+export interface ChargeMode {
+  chargeTime: number // s — HOLD the attack key at least this long for the charged variant (> 0).
+  damageMult: number // ×finisher/projectile damage on a charged release (>= 1; the verifier asserts it).
+  aoeRadius?: number // px — MELEE only: a radial smash hit around the impact (0/absent = none).
+  chargeStunDuration?: number // s — MELEE only: OVERRIDE stun duration on a charged hit (the armor-break stagger).
+}
+
+// A hold-to-repeat flurry (Spear drill). Repeats a fast poke while the attack key is held.
+export interface FlurryMode {
+  hits: number // total pokes in one flurry (>= 2; the verifier asserts it).
+  interval: number // s — gap between pokes (> 0).
+}
+
+// A directional finisher variant (Sword ground-slam). The `down` row OVERRIDES the finisher when DOWN is held.
+export interface FinisherMode {
+  down?: Partial<SwingRow> // deltas applied OVER the base finisher row when DOWN is held (a heavier-knockback slam).
+}
+
+// Bow charged pierce — the shot SURVIVES N hits instead of dying on the first (passes through a line).
+export interface PierceMode {
+  maxTargets: number // a charged shot pierces up to this many enemies (>= 2; the verifier asserts it).
+}
+
+// The per-weapon moveset sub-object (all blocks optional — a weapon picks exactly the modes it wants).
+export interface WeaponMoveset {
+  charge?: ChargeMode // Hammer / Bow — HOLD to charge a heavier release.
+  flurry?: FlurryMode // Spear — HOLD to chain a multi-hit drill.
+  finisher?: FinisherMode // Sword — a directional (DOWN-held) finisher variant.
+  pierce?: PierceMode // Bow — the charged shot's line-pierce (paired with `charge` on a ranged weapon).
+}
+
 // The ranged projectile spec (Decision 62) — read by ProjectilePool.acquire. Present iff type==='ranged'.
 export interface ProjectileSpec {
   speed: number
@@ -51,6 +92,7 @@ export interface ProjectileSpec {
 }
 
 // A weapon config (id → swing TABLE + a type flag, Decision 61). Consumers read swings/type/projectile/status.
+// `moveset` (per-weapon-movesets §6.1, AC1) is OPTIONAL plain data — absent = the default tap behavior (identity).
 export interface WeaponSpec {
   id: string
   name: string
@@ -58,6 +100,12 @@ export interface WeaponSpec {
   swings: SwingRow[]
   status?: WeaponStatus
   projectile?: ProjectileSpec
+  moveset?: WeaponMoveset
+  // ── BLUEPRINT tag (meta-progression §6.5, Decision 6, AC6) ── absent/undefined ⇒ a STARTER row (always in
+  // the run pool — the identity, byte-unchanged for a default save). A non-empty id ⇒ a GATED row that joins
+  // the run pool ONLY when that blueprint is unlocked (runWeaponPool filters on it). EVERY current weapon is a
+  // starter (no tag); only NEW rows added this slice carry a tag — so a default save's pool === the pre-slice tables.
+  blueprint?: string
 }
 
 // A FOLDED (affixed) weapon — the same WeaponSpec schema plus the affix metadata baked in by foldWeaponAffix.
@@ -100,6 +148,11 @@ export const SWORD: WeaponSpec = {
     // Swing 3 — FINISHER. Bigger box, harder hit + knockback, heavier commit, longer pre-lunge.
     { reach: 64, halfHeight: 32, forward: 22, damage: 16, knockback: 460, active: 0.11, recovery: 0.22, comboWindow: 0.0, lunge: 230 },
   ],
+  // ── MOVESET (per-weapon-movesets §6.1, Decision 4, AC6) ── the Sword stays the IDENTITY baseline: its
+  // forward 1→2→3 combo is byte-unchanged. We ADD only a DIRECTIONAL finisher — holding DOWN at swing 3
+  // overrides the finisher row with a heavier-knockback "ground slam" (a bigger shove + slightly more
+  // forward reach). Not-held = the EXACT current finisher row byte-for-byte (identity-leaning).
+  moveset: { finisher: { down: { knockback: 620, forward: 18 } } },
 }
 
 // ── HAMMER — a heavy melee weapon (Decision 61). ──
@@ -120,6 +173,13 @@ export const HAMMER: WeaponSpec = {
     // Swing 2 — FINISHER smash. Bigger box, crushing damage + knockback, long committed recovery.
     { reach: 58, halfHeight: 38, forward: 18, damage: 34, knockback: 760, active: 0.18, recovery: 0.42, comboWindow: 0.0, lunge: 90 },
   ],
+  // ── MOVESET (per-weapon-movesets §6.1, Decision 1/3/6, AC4) ── HOLD-to-charge HEAVY SMASH. Holding the
+  // attack key past chargeTime and RELEASING fires a charged finisher: ×damageMult damage, a radial AoE
+  // shockwave (aoeRadius px around the impact — reuses GameScene._radialDamage, NO new combat math) and an
+  // ARMOR-BREAK (a LONGER stun that OVERRIDES the base 0.6s stun — the genre's stagger, Decision 6; a
+  // vs-afflicted build also takes the existing damage-vulnerability fold for free). A TAP (no charge) does
+  // the current 2-row combo unchanged (the identity tap path).
+  moveset: { charge: { chargeTime: 0.45, damageMult: 1.8, aoeRadius: 120, chargeStunDuration: 1.2 } },
 }
 
 // ── BOW — a ranged weapon (Decision 61/62). ──
@@ -151,6 +211,12 @@ export const BOW: WeaponSpec = {
     w: 18, // px — projectile body width.
     h: 6, // px — projectile body height (a thin bolt).
   },
+  // ── MOVESET (per-weapon-movesets §6.1, Decision 1/7, AC7) ── HOLD-to-charge for more damage + PIERCE.
+  // A TAP fires the current single shot (pierceLeft=1 → dies on first hit, the identity). HOLDING past
+  // chargeTime and RELEASING fires a charged projectile: ×damageMult damage AND pierce.maxTargets — the
+  // shot SURVIVES up to N distinct-enemy hits (a `pierceLeft` counter on the ProjectilePool context,
+  // Decision 7) instead of dying on the first, so it passes through a line of enemies.
+  moveset: { charge: { chargeTime: 0.5, damageMult: 1.9 }, pierce: { maxTargets: 3 } },
 }
 
 // ── SPEAR — a long-reach poke/spacing weapon (design §6.6.5, Decision 69, AC60 — the 4th weapon). ──
@@ -178,15 +244,62 @@ export const SPEAR: WeaponSpec = {
     // Thrust 3 — FINISHER lunge: the longest reach, a harder hit + shove, a big committed lunge.
     { reach: 104, halfHeight: 20, forward: 30, damage: 13, knockback: 380, active: 0.1, recovery: 0.2, comboWindow: 0.0, lunge: 280 },
   ],
+  // ── MOVESET (per-weapon-movesets §6.1, Decision 1/2, AC5) ── HOLD-to-flurry MULTI-HIT DRILL. A TAP does
+  // the current long-reach thrust / 3-combo (the identity). HOLDING the attack key chains a rapid `hits`
+  // pokes spaced `interval` apart (each a normal thrust hitbox via _startSwing — keeps the long reach), a
+  // bounded "drill" that ends on release or when the hits are spent (Decision 2). KISS — fast low-commit
+  // pokes, not a charge.
+  moveset: { flurry: { hits: 4, interval: 0.11 } },
+}
+
+// ── GLAIVE — a BLUEPRINT-GATED reach weapon (meta-progression §6.5, Decision 6, AC6) ── the NEW run-pool
+// weapon this slice ships behind a blueprint unlock (`blueprint: 'bp_weapon_glaive'`). It is DEAD config (never
+// in the run pool) until the Glaive blueprint is banked — so a default save's pool === the pre-slice 4 starters
+// (the identity, AC11). DISTINCT FEEL: a long, sweeping 3-hit combo — more reach + knockback than the sword,
+// heavier than the spear's poke, a wide arc that spaces a crowd. Satisfies the pure swing-table contract
+// VERBATIM (the Player/Pickup/Hub generic code reads it by type/swings — unchanged). A found weapon (not a meta
+// stat tier): once the blueprint is unlocked it just JOINS the world-drop pool like any other (runWeaponPool).
+export const GLAIVE: WeaponSpec = {
+  id: 'glaive',
+  name: 'Glaive',
+  type: 'melee',
+  blueprint: 'bp_weapon_glaive', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  status: { kind: 'bleed', duration: 2.0, tickInterval: 0.4, tickDmg: 3 }, // a light bleed on the sweep.
+  swings: [
+    // Sweep 1 — a wide opening arc. Long reach, moderate damage + shove, snappy with a chain window.
+    { reach: 72, halfHeight: 30, forward: 22, damage: 11, knockback: 320, active: 0.1, recovery: 0.16, comboWindow: 0.36, lunge: 120 },
+    // Sweep 2 — a second arc, more reach + damage.
+    { reach: 78, halfHeight: 32, forward: 24, damage: 14, knockback: 380, active: 0.11, recovery: 0.18, comboWindow: 0.36, lunge: 150 },
+    // Sweep 3 — FINISHER spin: the longest reach, a crushing hit + big shove, a committed recovery.
+    { reach: 90, halfHeight: 36, forward: 26, damage: 20, knockback: 560, active: 0.13, recovery: 0.26, comboWindow: 0.0, lunge: 220 },
+  ],
 }
 
 // ── WEAPONS (id → config) ── the lookup the Player/Pickup/GameScene use to equip by id. The
 // STARTING weapon id comes from the meta fold (config/upgrades.js START_WEAPON → startStats.
 // startWeaponId, Decision 60/63); the default is 'sword' so a fresh run plays exactly like Phase 4.
-export const WEAPONS: Record<string, WeaponSpec> = { sword: SWORD, hammer: HAMMER, bow: BOW, spear: SPEAR }
+// The GLAIVE is in the lookup (so a banked blueprint can equip it) but only the run-pool RESOLVER gates it.
+export const WEAPONS: Record<string, WeaponSpec> = { sword: SWORD, hammer: HAMMER, bow: BOW, spear: SPEAR, glaive: GLAIVE }
 
-// The ordered list (for the verifier sweep + any list rendering). FOUR weapons ship now (§6.6.5, AC60).
-export const WEAPON_ORDER: WeaponSpec[] = [SWORD, HAMMER, BOW, SPEAR]
+// The ordered list (for the verifier sweep + any list rendering). FOUR starters + ONE blueprint-gated row.
+// ── IDENTITY-CRITICAL ORDER (meta-progression review, AC7/AC11) ── the STARTER rows are ordered
+// [HAMMER, BOW, SWORD, SPEAR] to match the PRE-SLICE const `WEAPON_PICKUP_POOL = ['hammer','bow','sword','spear']`
+// (GameScene before this slice). The weapon-pickup / branch-reward draws pick `pool[floor(rng()*len)]` AFTER
+// filtering out the equipped weapon, so the draw is ORDER-SENSITIVE: with a non-sword start (the START_WEAPON
+// upgrade seeds hammer/bow, upgrades.ts) the filtered pool order — and thus the weapon a given seed draws —
+// must match the historical const, or a shared/replayed seed silently draws a DIFFERENT weapon (an AC7/AC11
+// break + seed-replay determinism break). runWeaponPool(new Set()) === ['hammer','bow','sword','spear'] is
+// PINNED by the verifier (§13d). GLAIVE (blueprint-gated) is appended last (it's never in a default pool).
+export const WEAPON_ORDER: WeaponSpec[] = [HAMMER, BOW, SWORD, SPEAR, GLAIVE]
+
+// ── runWeaponPool(unlocked) → the weapon IDS available given the unlocked-blueprint set (meta-progression
+// §6.5, Decision 6, AC6) ── PURE (node-importable, verifier-swept). ALWAYS the STARTERS (untagged rows), PLUS
+// any gated row whose blueprint id is unlocked. With an EMPTY set this returns exactly the starter ids === the
+// pre-slice WEAPON_ORDER (the identity pin the verifier asserts — a default save draws from the same rows as
+// today). GameScene computes this ONCE in create() from meta.getBlueprints() and the placement sites draw from it.
+export function runWeaponPool(unlocked: ReadonlySet<string>): string[] {
+  return WEAPON_ORDER.filter((w) => !w.blueprint || unlocked.has(w.blueprint)).map((w) => w.id)
+}
 
 // ── WEAPON AFFIXES (Enrichment round-2 — the build engine; mirrors config/enemies.js ELITE_AFFIXES) ──
 // A weapon found in a run can now ROLL a modifier at pickup, so a sword found at depth 1 is NOT identical
@@ -236,15 +349,29 @@ export const WEAPON_VENOMOUS: WeaponAffix = {
   addStatus: { kind: 'bleed', duration: 2.6, tickInterval: 0.4, tickDmg: 4 },
 }
 
+// SEARING — ADD a BURN DoT to the weapon (affliction-synergy §6.5, AC6) — even a sword that had no status.
+// Folded onto weapon.status (one slot — KISS, OVERRIDES an existing status with the burn) so the EXISTING
+// status-on-hit path applies it with ZERO new wiring (DRY, mirrors WEAPON_VENOMOUS). burn is the new 4th
+// status kind (status.js) — a distinct orange DoT identity. A small damageMult bump so the affix does
+// something beyond the DoT (mirrors VENOMOUS). This makes burn LIVE config (the verifier asserts an
+// addStatus kind is a KNOWN status kind — burn now is).
+export const WEAPON_SEARING: WeaponAffix = {
+  id: 'searing',
+  name: 'Searing',
+  damageMult: 1.05,
+  addStatus: { kind: 'burn', duration: 2.4, tickInterval: 0.4, tickDmg: 4 },
+}
+
 // ── WEAPON_AFFIXES (the weighted roll set) ── GameScene picks one off the LEVEL seed via the weights (the
 // SAME weighted-pick idiom as ELITE_AFFIXES / enemyPool — DRY). Keen is the most common (the readable
-// baseline); the build-defining affixes (vampiric/venomous/swift) are rarer spice.
+// baseline); the build-defining affixes (vampiric/venomous/swift/searing) are rarer spice.
 export const WEAPON_AFFIXES: WeaponAffixWeight[] = [
   { affix: WEAPON_KEEN, w: 4 },
   { affix: WEAPON_HEAVY, w: 3 },
   { affix: WEAPON_SWIFT, w: 2 },
   { affix: WEAPON_VAMPIRIC, w: 2 },
   { affix: WEAPON_VENOMOUS, w: 2 },
+  { affix: WEAPON_SEARING, w: 2 },
 ]
 
 // The ordered affix list (for the verifier sweep + any list rendering).
@@ -282,6 +409,12 @@ export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | 
     recovery: Math.max(0, s.recovery * sMult),
   }))
   const folded: FoldedWeaponSpec = {
+    // The `...weapon` spread ALSO copies `moveset` onto the folded weapon (per-weapon-movesets §6.1,
+    // Decision 3, AC3) — a shallow ref-copy of immutable PATTERN data (charge/flurry/finisher/pierce are
+    // never mutated, so sharing the ref is safe, mirroring how `status` rode the spread before the
+    // addStatus override). The moveset's `damageMult` is NOT scaled by the affix (it describes a pattern,
+    // not a stat); the affix-scaled `swings`/`projectile` below carry the damage mult, and the moveset's
+    // mult composes ON TOP at the hit site. The verifier asserts the fold keeps the moveset (§10).
     ...weapon,
     swings,
     affixId: affix.id,

@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { applyStatus, tickStatuses, hasStatus } from '../combat/status.js'
-import type { Status } from '../combat/status.js'
+import { STATUS_TINT } from '../combat/statusColors.js'
+import type { Status, StatusKind } from '../combat/status.js'
 import type { BossSpec, BossAttackSpec } from '../config/bosses.js'
 import type { HitboxPool } from '../combat/HitboxPool.js'
 import type { ProjectilePool } from '../combat/ProjectilePool.js'
@@ -69,6 +70,7 @@ export class Boss {
   body!: Phaser.Physics.Arcade.Body
   rect!: Phaser.GameObjects.Rectangle
   telegraphFx!: Phaser.GameObjects.Rectangle
+  statusMarker!: Phaser.GameObjects.Rectangle
   hp: number
   maxHp: number
   facing: number
@@ -120,6 +122,10 @@ export class Boss {
     // A telegraph overlay (a growing warning where the strike lands) — primitives only; shown during
     // the telegraph window, hidden otherwise. Drawn above the boss so the wind-up is unmissable (AC56).
     this.telegraphFx = scene.add.rectangle(x, y, 10, 10, spec.colorTelegraph).setAlpha(0).setDepth(6)
+    // ── Affliction indicator (affliction-synergy §6.7, AC7; boss parity) ── the SAME pooled bar Enemy uses,
+    // ABOVE the boss head, tinted to the dominant live affliction. A SEPARATE object from `rect` so it shows
+    // over a telegraph/phase/hurt flash without stealing precedence. Hidden when no status is live + on death.
+    this.statusMarker = scene.add.rectangle(x, y, 14, 8, 0xffffff).setAlpha(0).setDepth(7)
 
     // ── HP + phase state ──
     this.hp = spec.maxHp
@@ -381,12 +387,24 @@ export class Boss {
     return stunned
   }
 
-  // The kind of the active damaging status for the FX tint (bleed vs poison). Bleed first (KISS — a single
-  // dominant cue). Identical to Enemy._dominantDotKind.
-  _dominantDotKind() {
+  // The kind of the active DAMAGING status for the DoT-tick FX tint (bleed / poison / burn). Precedence
+  // burn → bleed → poison (KISS — a single dominant cue). Identical to Enemy._dominantDotKind (DRY parity).
+  _dominantDotKind(): StatusKind {
+    if (hasStatus(this.statuses, 'burn')) return 'burn'
     if (hasStatus(this.statuses, 'bleed')) return 'bleed'
     if (hasStatus(this.statuses, 'poison')) return 'poison'
     return 'bleed'
+  }
+
+  // ── _dominantStatusKind() (affliction-synergy §6.7, Decision 3/8, AC7) ── the dominant LIVE status for the
+  // MARKER tint, precedence burn → bleed → poison → stun, or null when none. Identical to Enemy's (the
+  // boss-parity "port method-for-method" pattern — the boss gets the marker for free).
+  _dominantStatusKind(): StatusKind | null {
+    if (hasStatus(this.statuses, 'burn')) return 'burn'
+    if (hasStatus(this.statuses, 'bleed')) return 'bleed'
+    if (hasStatus(this.statuses, 'poison')) return 'poison'
+    if (hasStatus(this.statuses, 'stun')) return 'stun'
+    return null
   }
 
   // Fire the chosen attack at telegraph end (DISPATCH by kind, Decision 64; round-3 adds 'sweep').
@@ -566,6 +584,7 @@ export class Boss {
     this.collider.destroy()
     this.rect.destroy()
     this.telegraphFx.destroy()
+    this.statusMarker.destroy()
   }
 
   _updateVisual(dt: number) {
@@ -579,6 +598,7 @@ export class Boss {
       this.rect.setAlpha(k)
       this.rect.setScale((2 - k) * 1.2, (2 - k) * 1.2)
       this.rect.setPosition(this.body.center.x, this.body.center.y)
+      this.statusMarker.setAlpha(0) // hide the affliction indicator on death (AC7).
       return
     }
 
@@ -597,12 +617,24 @@ export class Boss {
       color = this.spec.colorHurt
     } else if (this.statuses.length > 0) {
       // Status tint (the resting cue — lowest precedence so the urgent telegraph/phase/hurt flashes win):
-      // stun grey-blue, bleed dark red, poison sickly green. Identical values to Enemy._updateVisual.
-      if (hasStatus(this.statuses, 'stun')) color = 0x95a5a6
-      else if (hasStatus(this.statuses, 'bleed')) color = 0xa93226
-      else if (hasStatus(this.statuses, 'poison')) color = 0x27ae60
+      // stun grey-blue, else the dominant DoT colour (bleed/poison/burn). Reads the SHARED STATUS_TINT table
+      // (DRY — one source for body cascade + marker + Effects; identical values to Enemy._updateVisual).
+      if (hasStatus(this.statuses, 'stun')) color = STATUS_TINT.stun
+      else color = STATUS_TINT[this._dominantDotKind()]
     }
     this.rect.setFillStyle(color)
+
+    // ── Affliction indicator (affliction-synergy §6.7, AC7; boss parity) ── drive the marker ABOVE the head,
+    // tinted to the dominant live affliction. VISIBLE over any telegraph/phase/hurt flash (a SEPARATE object).
+    // Hidden when no status is live. Method-for-method with Enemy._updateVisual (the boss-parity pattern).
+    const sk = this._dominantStatusKind()
+    if (sk) {
+      this.statusMarker.setAlpha(0.95)
+      this.statusMarker.setFillStyle(STATUS_TINT[sk])
+      this.statusMarker.setPosition(this.body.center.x, this.body.center.y - this.spec.bodyH * 0.5 - 10)
+    } else {
+      this.statusMarker.setAlpha(0)
+    }
   }
 
   _kickScale(sx: number, sy: number) {

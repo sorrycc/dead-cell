@@ -50,6 +50,16 @@ export interface RunState {
   biomeIndex: number
   levelInBiome: number
   depth: number
+  // ── Boss-Cell TIER (meta-progression §6.6, Decision 10, AC8) ── the run's Boss-Cell multiplier, seeded from
+  // the selected tier (1 = tier 0 = the identity). RUN-ONLY (a scalar the scene threads to every scaleAtDepth/
+  // scaleBossSpec/effectiveDifficulty fold). CONSTANT for the whole run (run-global), so the whole-run
+  // difficulty stays monotone at this tier (the verifier's per-tier walk). A fresh run with no tier gets 1.
+  bossCellMult: number
+  // ── BLUEPRINTS collected THIS run (meta-progression §6.6, Decision 7, AC9) ── the blueprint ids picked up in
+  // this run (run-only — banked to MetaState.blueprints at run end via bankRun, on BOTH the death + clear paths,
+  // like Cells). A fresh run starts empty (the identity). Dropping them on death before run-end loses unbanked
+  // ones — but bankRun on the death path banks what you carried (Decision 7).
+  blueprints: string[]
   // ── Carried player state ──
   hp: number
   maxHp: number
@@ -74,6 +84,13 @@ export interface RunState {
   onKillHealAmount: number
   lowHpDamageMult: number
   firstHitBonusMult: number
+  // ── Affliction-synergy perks (affliction-synergy design §6.3, AC9) ── three NEW run-only fields a
+  // synergy mutation/affix arms, each seeded to the neutral identity so a run with NO synergy plays
+  // byte-identically (the identity guarantee). vsAfflictedDamageMult/statusTickMult are mirrored onto the
+  // live Player by _syncPlayerScrollStats; spreadAffliction is read off RunState directly in the onDeath hook.
+  vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
+  statusTickMult: number // ×applied DoT tickDmg (Virulent — "ticks harder"). 1 = neutral.
+  spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
   // ── Equipped weapon (primary) ──
   weaponId: string
   weaponAffixId: string | null
@@ -113,7 +130,11 @@ const nextSeed = (s: number): number => (s * 2654435761 + 0x9e3779b9) >>> 0
 // create()-time sync site in GameScene then matches). When ABSENT (the verifier / a bare Phase-4 run),
 // it falls back to the bare PLAYER_MAX_HP + the sword — the pre-§6.5 identity (so the verifier's
 // determinism walk is unaffected: it never passes startStats, RunState stays node-constructible + pure).
-export function createRunState(startSeed: number, startedAt = 0, startStats: RunStartStats | null = null): RunState {
+// bossCellMult (meta-progression §6.6, Decision 10, AC8): an OPTIONAL run-global Boss-Cell multiplier (default
+// 1 — the identity tier 0). The verifier constructs createRunState(0xc0ffee) with NO tier, so its determinism +
+// monotonicity walks are unaffected (the default keeps the run byte-identical to the pre-slice run). The scene
+// passes meta.startTier().bossCellMult so the run's fold sites scale the curve at the selected tier.
+export function createRunState(startSeed: number, startedAt = 0, startStats: RunStartStats | null = null, bossCellMult = 1): RunState {
   const maxHp = startStats ? startStats.maxHp : PLAYER_MAX_HP
   const weaponId = startStats ? startStats.startWeaponId : 'sword'
   return {
@@ -123,6 +144,11 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     levelInBiome: 0, // 0-based level WITHIN the current biome (BLOCKER 1 fix — see header).
     depth: 0, // run-GLOBAL levels cleared so far (0 at the first level). Never resets → the
     //                // difficulty curve climbs across the whole run (AC42/AC45).
+    // ── Boss-Cell TIER + run-only BLUEPRINTS (meta-progression §6.6, Decision 7/10, AC8/AC9) ── bossCellMult
+    // is seeded from the tier arg (>= 1; 1 = the identity), threaded to the scene's fold sites; blueprints
+    // starts EMPTY (collected this run, banked at run end). A fresh run with no tier = 1 + [] = the identity.
+    bossCellMult: bossCellMult >= 1 ? bossCellMult : 1, // defensive clamp (a tier never weakens the curve).
+    blueprints: [],
 
     // ── Carried player state (Decision 46/60 — HP is CARRIED between levels, NOT refilled; seeded from
     // the META-folded maxHp so a +maxHP upgrade is reflected at run start — review MAJOR) ──
@@ -163,6 +189,13 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     onKillHealAmount: 0, // flat HP healed on each enemy kill (Predator); read in the enemy.onDeath hook.
     lowHpDamageMult: 1, // ×player damage while below the low-HP threshold (Berserker); folded at the hit site.
     firstHitBonusMult: 1, // ×player damage vs a FULL-HP enemy (Assassin); folded at the hit site (the opener).
+    // ── Affliction-synergy perks (affliction-synergy §6.3, AC9/AC10) ── seeded to the NEUTRAL identity so a
+    // run with NO synergy armed plays byte-identically: vsAfflictedDamageMult 1 (the !==1 guard skips the
+    // vs-afflicted fold), statusTickMult 1 (_scaleStatus returns the spec unchanged), spreadAffliction false
+    // (_spreadAffliction never runs). A Hemorrhage/Virulent pick raises these for the rest of the run.
+    vsAfflictedDamageMult: 1, // ×player damage vs an afflicted enemy (Hemorrhage); folded at both hit sites.
+    statusTickMult: 1, // ×applied DoT tickDmg when arming a damaging status (Virulent); applied in _scaleStatus.
+    spreadAffliction: false, // killing an afflicted enemy spreads its dominant DoT (Hemorrhage); read in onDeath.
 
     // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
     // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──

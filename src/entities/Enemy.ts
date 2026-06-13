@@ -2,8 +2,9 @@ import Phaser from 'phaser'
 import { swingRect } from '../combat/hitbox.js'
 import { GRUNT } from '../config/enemies.js'
 import { applyStatus, tickStatuses, hasStatus } from '../combat/status.js'
-import type { EnemySpec, EliteAffixSpec } from '../config/enemies.js'
-import type { Status, StatusSpec } from '../combat/status.js'
+import { STATUS_TINT } from '../combat/statusColors.js'
+import type { EnemySpec, EliteAffixSpec, EnemyAttackSpec } from '../config/enemies.js'
+import type { Status, StatusSpec, StatusKind } from '../combat/status.js'
 import type { HitResult } from '../combat/damage.js'
 import type { HitboxPool } from '../combat/HitboxPool.js'
 import type { ProjectilePool } from '../combat/ProjectilePool.js'
@@ -73,6 +74,8 @@ export class Enemy {
   body!: Phaser.Physics.Arcade.Body
   rect!: Phaser.GameObjects.Rectangle
   frontMarker!: Phaser.GameObjects.Rectangle
+  statusMarker!: Phaser.GameObjects.Rectangle
+  telegraphMarker!: Phaser.GameObjects.Rectangle
   hp: number
   maxHp: number
   facing: number
@@ -95,6 +98,10 @@ export class Enemy {
   dashActive: boolean
   swoopVX: number
   swoopVY: number
+  currentAttack: EnemyAttackSpec | null
+  lastAttackKind: string
+  strafeDir: number
+  strafeTimer: number
   deathTimer: number
   scaleX: number
   scaleY: number
@@ -154,6 +161,19 @@ export class Enemy {
 
     this.rect = scene.add.rectangle(x, y, spec.bodyW, spec.bodyH, spec.color)
     this.frontMarker = scene.add.rectangle(x, y, 6, spec.bodyH * 0.5, 0x000000).setAlpha(0.4)
+    // ── Affliction indicator (affliction-synergy §6.7, AC7) ── a tiny pooled bar ABOVE the head, tinted to
+    // the dominant live affliction. A SEPARATE object from `rect` (the body) so it shows even during a
+    // telegraph/hurt flash WITHOUT stealing the body-colour precedence (the telegraph stays the highest cue).
+    // Hidden (alpha 0) by default + when no status is live + on death (driven in _updateVisual). Drawn above
+    // the body so it reads at a glance. Mirrors the existing per-entity primitive-rect pattern (no new art).
+    this.statusMarker = scene.add.rectangle(x, y, 10, 6, 0xffffff).setAlpha(0).setDepth(7)
+    // ── Spatial telegraph marker (enemy-ai-telegraphs §6.5, Decision 2, AC2/AC5) ── a long-lived per-entity
+    // primitive rect (the frontMarker/statusMarker pattern — NOT a per-frame allocation) sized + placed for
+    // the CHOSEN attack during the wind-up, mirroring the boss's telegraphFx (Boss.ts:487) so the enemy +
+    // boss share ONE "where it lands" vocabulary (AC5). A SEPARATE object from the body `rect` so it never
+    // fights the per-phase body flash. Hidden (alpha 0) by default + on active/recovery/idle/patrol/chase/
+    // hurt/dead — it ONLY shows during the telegraph (driven in _updateVisual). Depth 6 = same as the boss's.
+    this.telegraphMarker = scene.add.rectangle(x, y, 10, 10, this.spec.colorTelegraph).setAlpha(0).setDepth(6)
 
     // ── HP + AI state ──
     this.hp = spec.maxHp
@@ -190,6 +210,11 @@ export class Enemy {
     this.dashActive = false // CHARGER/FLYER: true while the body-contact dash/swoop hitbox is live.
     this.swoopVX = 0 // FLYER: the latched 2-D swoop velocity (x), set at telegraph end.
     this.swoopVY = 0 // FLYER: the latched 2-D swoop velocity (y).
+    // ── Per-attack + spacing state (enemy-ai-telegraphs §6.2/§6.4, Decision 1/3/4 — RUNTIME, off the pin) ──
+    this.currentAttack = null // the chosen EnemyAttackSpec driving the live telegraph→strike→recovery.
+    this.lastAttackKind = '' // the previous attack kind (for the "don't repeat twice running" nudge, AC3).
+    this.strafeDir = 1 // 'ranged' — the live strafe direction (flips on a runtime timer + at the clamp).
+    this.strafeTimer = 0 // 'ranged' — counts down to the next strafe flip (RUNTIME random — Decision 4).
 
     this.deathTimer = 0 // > 0 while the death pop plays before despawn.
     this.scaleX = 1
@@ -237,6 +262,7 @@ export class Enemy {
     this._releaseStrike()
     this.telegraphTimer = 0
     this.strikeTimer = 0
+    this.currentAttack = null // drop the chosen attack — the interrupt cancels it (the marker hides next tick).
 
     if (this.hp <= 0) {
       this._die()
@@ -352,11 +378,48 @@ export class Enemy {
       this.body.setVelocity(ax * this.spec.chaseSpeed, ay * this.spec.patrolSpeed)
     } else {
       // GROUND chase (GRUNT/SHOOTER/CHARGER): accelerate vx toward chaseSpeed, clamped to the pit-safe
-      // patrol span. SHOOTER kites: if the player is CLOSER than preferredRange, it backs AWAY instead.
+      // patrol span.
       const targetX = Phaser.Math.Clamp(px, this.patrolMinX, this.patrolMaxX)
       let dir = Math.sign(targetX - cx) || this.facing
-      if (this.behavior === 'ranged' && Math.abs(px - cx) < (this.spec.preferredRange || 0)) {
-        dir = -Math.sign(px - cx) || -this.facing // retreat to keep its preferred spacing (kiting).
+      let strafing = false // true ONLY on the in-band strafe frame (gates the clamp-reversal below).
+      if (this.behavior === 'ranged') {
+        // ── SPACING PRESSURE (enemy-ai-telegraphs §6.4, Decision 3, AC4) ── maintain the preferredRange
+        // band so the shooter is NEVER a stationary turret: too CLOSE → retreat (the original kite); too FAR
+        // → ADVANCE (don't passively let the player walk out of range); IN-BAND → STRAFE (a runtime left/
+        // right jink that flips on a short timer — so it pressures the player to close or relocate). All of
+        // this stays CLAMPED to the pit-safe span by the clamp-edge guard below (Decision 29), so a kiting
+        // shooter reverses at the pit edge instead of grinding into it. The strafe direction uses RUNTIME
+        // randomness (Math.random — off the level pin, Decision 4). `facing` keeps pointing at the player
+        // each frame (set above), so it keeps AIMING while it strafes.
+        const gap = Math.abs(px - cx)
+        const band = this.spec.preferredRange || 0
+        if (gap < band * 0.85) {
+          dir = -Math.sign(px - cx) || -this.facing // too close → back away.
+        } else if (gap > band * 1.15) {
+          dir = Math.sign(px - cx) || this.facing // too far → close in (keep the player in range).
+        } else {
+          this.strafeTimer -= dt
+          if (this.strafeTimer <= 0) {
+            this.strafeDir = Math.random() < 0.5 ? -1 : 1
+            this.strafeTimer = 0.5 + Math.random() * 0.6 // a short jink window (runtime — Decision 4).
+          }
+          dir = this.strafeDir // in-band → strafe (a runtime jink, flipped at the clamp by the guard below).
+          strafing = true // mark this as the strafe frame (the ONLY case the clamp-reversal should fire).
+        }
+      }
+      // A strafing shooter that reaches the pit-safe clamp REVERSES its jink (so it bounces along the band
+      // instead of grinding into the edge — AC4 "flips at the patrol clamp"). Gated on the explicit `strafing`
+      // flag — NOT `dir === this.strafeDir`, which can't tell the strafe branch from the retreat/advance ones
+      // (all three set dir to ±1 and strafeDir is also ±1). With the old heuristic a too-close shooter
+      // retreating toward a clamp whose retreat dir HAPPENED to equal strafeDir would flip strafeDir and get
+      // overridden BACK toward the player at the edge (the opposite of AC4's spacing pressure). Now
+      // retreat/advance at the clamp falls through to the clamp-stop below (line ~423) untouched. Decision 3/29.
+      if (strafing) {
+        if ((cx <= this.patrolMinX && dir < 0) || (cx >= this.patrolMaxX && dir > 0)) {
+          this.strafeDir = -this.strafeDir
+          this.strafeTimer = 0.5 + Math.random() * 0.6
+          dir = this.strafeDir
+        }
       }
       let vx = this.body.velocity.x
       const target = dir * this.spec.chaseSpeed
@@ -374,9 +437,16 @@ export class Enemy {
       Math.abs(py - cy) <= this.spec.detectHeight
     if (inRange && this.attackCooldownTimer <= 0) {
       this.state = STATE.ATTACK
+      // CHOOSE THE ATTACK (enemy-ai-telegraphs §6.2, Decision 1/4, AC3): a RUNTIME weighted pick from
+      // spec.attacks (off the level pin). The chosen attack drives the telegraph duration, the strike
+      // dispatch (_fireStrike keys on its kind), and the active/recovery split (_tickAttack). lastAttackKind
+      // feeds the "don't repeat twice running" nudge. A 1-entry table is the identity (AC8).
+      this.currentAttack = this._chooseAttack()
+      this.lastAttackKind = this.currentAttack.kind
       // ELITE (Decision 77): a tighter telegraph (telegraphMult < 1) → a faster wind-up that punishes a
-      // lazy dodge. A normal enemy (this.elite null) uses the base telegraph (the identity — mult 1).
-      this.telegraphTimer = this.spec.telegraph * (this.elite ? this.elite.telegraphMult ?? 1 : 1)
+      // lazy dodge. The mult scales the CHOSEN attack's telegraph (so elites get tighter wind-ups on ANY
+      // attack). A normal enemy (this.elite null) uses the base telegraph (the identity — mult 1).
+      this.telegraphTimer = this.currentAttack.telegraph * (this.elite ? this.elite.telegraphMult ?? 1 : 1)
       this.strikeTimer = 0
       if (this.behavior !== 'fly') this.body.setVelocityX(0) // ground enemies plant; flyer keeps hovering.
       return
@@ -392,43 +462,55 @@ export class Enemy {
   }
 
   // ── attack: telegraph (wind-up, dodgeable) → strike → recovery → chase ──
-  // The strike DISPATCHES by behaviour (Decision 68): 'melee' → a pooled hitbox in front; 'ranged' →
-  // a fired pooled 'enemy' projectile; 'charge'/'fly' → a latched body-contact DASH/SWOOP (the body IS
-  // the hitbox — the existing contact overlap deals the high contact damage during the active window).
+  // The strike DISPATCHES by the CHOSEN ATTACK's kind (enemy-ai-telegraphs §6.3, Decision 6 — NOT the
+  // archetype's behaviour, so a 'charge' archetype can carry a 'swing' ground-pound): 'swing' → a pooled
+  // hitbox in front; 'shoot' → fired pooled 'enemy' projectile(s); 'dash'/'swoop' → a latched body-contact
+  // DASH/SWOOP (the body IS the hitbox). The timings (telegraph/active/recovery) come from currentAttack so
+  // a heavy overhead reads slower than a quick jab. Defensive: a null currentAttack (e.g. an interrupt mid-
+  // frame) falls back to the spec's legacy top-level timings (the identity).
   _tickAttack(dt: number, ctx: EnemyUpdateCtx) {
+    const atk = this.currentAttack
+    const isBodyDash = atk ? atk.kind === 'dash' || atk.kind === 'swoop' : this.behavior === 'charge' || this.behavior === 'fly'
     if (this.telegraphTimer > 0) {
       // Wind-up: plant (ground) / hold (flyer), tick down. The visual flashes the telegraph colour.
       if (this.behavior === 'fly') this.body.setVelocity(0, 0)
       else this.body.setVelocityX(0)
       this.telegraphTimer -= dt
       if (this.telegraphTimer <= 0) {
-        this._fireStrike(ctx) // commit the strike ONCE (dispatched by behaviour).
-        this.strikeTimer = this.spec.attackActive + this.spec.attackRecovery
-        this.dashActive = this.behavior === 'charge' || this.behavior === 'fly' // body-contact window.
+        this._fireStrike(ctx) // commit the strike ONCE (dispatched by the chosen attack's kind).
+        this.strikeTimer = (atk ? atk.active + atk.recovery : this.spec.attackActive + this.spec.attackRecovery)
+        this.dashActive = isBodyDash // the body-contact window (dash/swoop move the body during 'active').
       }
       return
     }
 
     // Strike active+recovery window. For a dash/swoop the body MOVES (the latched velocity) while the
-    // active window is live, then plants for the recovery; the body-contact hitbox is its strike.
+    // active window is live, then plants for the recovery; the body-contact hitbox is its strike. The
+    // boundary uses the CHOSEN attack's recovery (per-attack, AC3) instead of the spec's single value.
     this.strikeTimer -= dt
-    const recoveryStart = this.spec.attackRecovery
+    const recoveryStart = atk ? atk.recovery : this.spec.attackRecovery
     const inActive = this.strikeTimer > recoveryStart // active phase precedes recovery (timer counts down).
-    if (this.behavior === 'charge') {
-      if (inActive && this.dashActive) this.body.setVelocityX(this.dashDir * (this.spec.chargeSpeed || 600))
+    if (atk?.kind === 'dash') {
+      // DASH (a charger's lunge): drive vx at the chosen attack's chargeSpeed during the active window.
+      if (inActive && this.dashActive) this.body.setVelocityX(this.dashDir * (atk.chargeSpeed || this.spec.chargeSpeed || 600))
       else { this.body.setVelocityX(0); this.dashActive = false } // recovery: plant.
-    } else if (this.behavior === 'fly') {
+    } else if (atk?.kind === 'swoop') {
+      // SWOOP (a flyer's 2-D lunge): drive the latched velocity during the active window, then hover.
       if (inActive && this.dashActive) this.body.setVelocity(this.swoopVX, this.swoopVY)
       else { this.body.setVelocity(0, 0); this.dashActive = false } // recovery: hover in place.
+    } else if (this.behavior === 'fly') {
+      // A flyer doing a STATIONARY attack (the hover-spit 'shoot'): hold altitude in place (gravity off).
+      this.body.setVelocity(0, 0)
     } else {
-      // MELEE/RANGED: planted while attacking (the original behaviour — the strike is a stationary swing
-      // or shot). Keeps the grunt's Phase-4 feel byte-for-byte.
+      // MELEE/RANGED stationary strike ('swing'/'shoot', incl. a charger's ground-pound): planted while
+      // attacking (the original behaviour — a stationary swing or shot). Keeps the grunt's feel byte-for-byte.
       this.body.setVelocityX(0)
     }
 
     if (this.strikeTimer <= 0) {
-      this.attackCooldownTimer = this.spec.attackCooldown
+      this.attackCooldownTimer = this.spec.attackCooldown // cooldown stays a spec-level cadence (KISS).
       this.dashActive = false
+      this.currentAttack = null // strike fully resolved — drop the chosen attack (the marker stays hidden).
       this.state = STATE.CHASE
       this.strikeRect = null // strike fully resolved — drop our handle (defensive; the ownerId guard
       //                        in _releaseStrike already prevents releasing a re-acquired rect).
@@ -457,12 +539,28 @@ export class Enemy {
     return stunned
   }
 
-  // The kind of the active damaging status for the FX tint (bleed vs poison). Bleed first (KISS — a single
-  // dominant cue; if both are present bleed wins the tint, which is fine for a primitive pop).
-  _dominantDotKind() {
+  // The kind of the active DAMAGING status for the DoT-tick FX tint (bleed / poison / burn — affliction-
+  // synergy slice adds burn). Precedence burn → bleed → poison (KISS — a single dominant cue for the
+  // primitive number pop). Damaging-only (stun excluded — it pops no DoT number); the marker uses the wider
+  // _dominantStatusKind below. Default bleed keeps the old behaviour when somehow called with no DoT live.
+  _dominantDotKind(): StatusKind {
+    if (hasStatus(this.statuses, 'burn')) return 'burn'
     if (hasStatus(this.statuses, 'bleed')) return 'bleed'
     if (hasStatus(this.statuses, 'poison')) return 'poison'
     return 'bleed'
+  }
+
+  // ── _dominantStatusKind() (affliction-synergy §6.7, Decision 3, AC7) ── the dominant LIVE status for the
+  // MARKER tint, precedence burn → bleed → poison → stun (the damaging DoTs first so the over-time threat
+  // reads; stun last — it's already cued by the body grey + the FSM freeze). Returns null when NONE is live
+  // ⇒ the marker is hidden (the identity — an un-afflicted enemy shows no marker). Distinct from
+  // _dominantDotKind (which is DoT-only for the tick number) because the marker also surfaces a pure stun.
+  _dominantStatusKind(): StatusKind | null {
+    if (hasStatus(this.statuses, 'burn')) return 'burn'
+    if (hasStatus(this.statuses, 'bleed')) return 'bleed'
+    if (hasStatus(this.statuses, 'poison')) return 'poison'
+    if (hasStatus(this.statuses, 'stun')) return 'stun'
+    return null
   }
 
   // ── hurt: frozen by hitstun (knockback carries since we don't write vx here), then → chase ──
@@ -477,6 +575,26 @@ export class Enemy {
     if (this.deathTimer <= 0) this._despawn()
   }
 
+  // ── _chooseAttack() → the next EnemyAttackSpec (enemy-ai-telegraphs §6.2, Decision 1/4, AC3/AC8) ──────
+  // Pick from spec.attacks by WEIGHT, with a small nudge AGAINST repeating the last kind back-to-back so a
+  // long fight visibly MIXES an archetype's attacks rather than spamming one (variety, AC3). Uses RUNTIME
+  // randomness (Math.random) — NOT the level seed: the per-frame choice is explicitly OUTSIDE the level pin
+  // (the verifier never imports Enemy.js — Decision 4), exactly like the idleTimer jitter. A SINGLE-entry
+  // table returns that one entry → byte-identical legacy behaviour (the chooser over a 1-element table is the
+  // identity, AC8). KISS: a weighted pick over a tiny array (no per-frame allocation beyond the two loops).
+  _chooseAttack(): EnemyAttackSpec {
+    const list = this.spec.attacks
+    if (list.length === 1) return list[0]
+    let total = 0
+    for (const a of list) total += a.weight * (a.kind === this.lastAttackKind ? 0.5 : 1)
+    let r = Math.random() * total
+    for (const a of list) {
+      r -= a.weight * (a.kind === this.lastAttackKind ? 0.5 : 1)
+      if (r <= 0) return a
+    }
+    return list[list.length - 1] // float-rounding safety net (the weights summed to `total`).
+  }
+
   // Commit the strike at telegraph end — DISPATCHED by behaviour (Decision 68). 'melee' acquires a
   // pooled hitbox in front; 'ranged' fires a pooled 'enemy' projectile (Decision 65); 'charge'/'fly'
   // LATCH a dash/swoop velocity (the body becomes the hitbox — contact damage during the active window).
@@ -485,52 +603,71 @@ export class Enemy {
   // DIFFERENT enemy's live strike). acquire() returns the rect, so _releaseStrike() targets exactly ours.
   _fireStrike(ctx: EnemyUpdateCtx) {
     const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
-    if (this.behavior === 'ranged') {
-      // SHOOTER / SPITTER: fire pooled 'enemy' projectile(s) (the hit is resolved by GameScene's
-      // enemy-projectile overlap against the player — Decision 65). Null pool ⇒ cosmetic no-op (safe).
-      if (this.projectilePool && this.spec.projectile) {
-        const count = Math.max(1, this.spec.projectileCount || 1)
+    // Dispatch on the CHOSEN attack's kind (Decision 6 — the unlock for cross-behaviour variety, e.g. a
+    // 'charge' archetype's 'swing' ground-pound). Defensive: a null currentAttack falls back to the spec's
+    // legacy single-strike path keyed on behaviour (the identity if attacks[] ever went missing).
+    const kind = this.currentAttack?.kind ?? this._legacyKindForBehavior()
+    if (kind === 'shoot') {
+      // SHOOTER / SPITTER / FLYER-spit: fire pooled 'enemy' projectile(s) (the hit is resolved by
+      // GameScene's enemy-projectile overlap against the player — Decision 65). Reads the CHOSEN attack's
+      // projectile/count/spread (so a shooter's single bolt, its 2-shot burst, a spitter's fan + snipe, and
+      // a flyer's spit are ALL this one branch). Null pool / no projectile ⇒ cosmetic no-op (safe).
+      const projectile = this.currentAttack?.projectile ?? this.spec.projectile
+      if (this.projectilePool && projectile) {
+        const count = Math.max(1, this.currentAttack?.projectileCount ?? this.spec.projectileCount ?? 1)
+        const spreadDeg = this.currentAttack?.projectileSpread ?? this.spec.projectileSpread ?? 0
         if (count === 1) {
-          // SHOOTER (the original path — a single bolt along facing). Byte-identical to before round 3.
-          this.projectilePool.acquire(attacker, this.spec.projectile, this.id)
+          // A single bolt along facing (the SHOOTER's original path — byte-identical to before round 3).
+          this.projectilePool.acquire(attacker, projectile, this.id)
         } else {
-          // SPITTER (round-3 5th archetype): a FAN of `count` shots across `projectileSpread` degrees, aimed
-          // at the player's CURRENT position. Uses the round-3 2-D projectile aim so the cone actually arcs
-          // (a single guarded branch — the FSM stays one switch; Decision 68). KISS — the spread is a tight cone.
+          // A FAN of `count` shots across `spreadDeg` degrees, aimed at the player's CURRENT position. Uses
+          // the round-3 2-D projectile aim so the cone actually arcs (the SPITTER fan + the SHOOTER burst).
           const p = ctx?.player?.body?.center
           const dx = (p?.x ?? (this.body.center.x + this.facing)) - this.body.center.x
           const dy = (p?.y ?? this.body.center.y) - this.body.center.y
           const baseAngle = Math.atan2(dy, dx)
-          const spreadRad = ((this.spec.projectileSpread || 0) * Math.PI) / 180
+          const spreadRad = (spreadDeg * Math.PI) / 180
           for (let i = 0; i < count; i++) {
-            const t = count === 1 ? 0 : i / (count - 1) - 0.5 // −0.5 … +0.5 across the fan.
+            const t = i / (count - 1) - 0.5 // −0.5 … +0.5 across the fan.
             const angle = baseAngle + t * spreadRad
-            this.projectilePool.acquire(attacker, this.spec.projectile, this.id, null, { angle })
+            this.projectilePool.acquire(attacker, projectile, this.id, null, { angle })
           }
         }
       }
       return
     }
-    if (this.behavior === 'charge') {
+    if (kind === 'dash') {
       // CHARGER: latch the dash direction toward the player (committed — you dodge the telegraph).
       const px = ctx?.player?.body?.center?.x ?? this.body.center.x
       this.dashDir = px >= this.body.center.x ? 1 : -1
       this.facing = this.dashDir
       return
     }
-    if (this.behavior === 'fly') {
+    if (kind === 'swoop') {
       // FLYER: latch a 2-D swoop velocity straight toward the player's CURRENT position (a lunge).
       const p = ctx?.player?.body?.center
       const dx = (p?.x ?? this.body.center.x) - this.body.center.x
       const dy = (p?.y ?? this.body.center.y) - this.body.center.y
       const len = Math.hypot(dx, dy) || 1
-      const s = this.spec.swoopSpeed || 440
+      const s = this.currentAttack?.swoopSpeed || this.spec.swoopSpeed || 440
       this.swoopVX = (dx / len) * s
       this.swoopVY = (dy / len) * s
       return
     }
-    // MELEE (GRUNT): the pooled hitbox in front (the original path).
-    this.strikeRect = this.hitboxPool.acquire(attacker, this.spec.swing as any, this.id)
+    // SWING (a grunt's jab/overhead, a charger's ground-pound): the pooled hitbox in front. Reads the
+    // CHOSEN attack's swing geometry (so the overhead's wider reach + the ground-pound's tall halfHeight
+    // both land), falling back to the spec's swing (the identity).
+    const swing = this.currentAttack?.swing ?? this.spec.swing
+    this.strikeRect = this.hitboxPool.acquire(attacker, swing as any, this.id)
+  }
+
+  // The legacy strike kind for a behaviour (the additive identity if currentAttack is ever null — Decision
+  // 5): the mapping each archetype's attacks[0] reproduces. KISS — a tiny lookup, never hit in normal play.
+  _legacyKindForBehavior(): string {
+    if (this.behavior === 'ranged') return 'shoot'
+    if (this.behavior === 'charge') return 'dash'
+    if (this.behavior === 'fly') return 'swoop'
+    return 'swing'
   }
 
   // Release ONLY this enemy's live strike hitbox (review MAJOR — never the whole shared pool). Guard
@@ -593,6 +730,8 @@ export class Enemy {
     this.collider.destroy()
     this.rect.destroy()
     this.frontMarker.destroy()
+    this.statusMarker.destroy()
+    this.telegraphMarker.destroy() // the spatial telegraph cue (enemy-ai-telegraphs §6.5, AC2).
   }
 
   // ── Force immediate teardown (design §6.2, Decision 40) ── used by the level→level rebuild to
@@ -622,33 +761,122 @@ export class Enemy {
       this.rect.setScale((2 - k), (2 - k))
       this.rect.setPosition(this.body.center.x, this.body.center.y)
       this.frontMarker.setAlpha(0)
+      this.statusMarker.setAlpha(0) // hide the affliction indicator on death (AC7).
+      this.telegraphMarker.setAlpha(0) // hide the spatial telegraph cue on death (AC2).
       return
     }
 
     this.rect.setScale(this.scaleX, this.scaleY)
     this.rect.setPosition(this.body.center.x, this.body.center.y)
 
-    // State color: telegraph flash (yellow wind-up), hurt flash (white), else resting color. A live STATUS
-    // tints the resting fill so bleed/poison/stun read at a glance (§6.13, Decision 79) — the telegraph/hurt
-    // flashes take PRECEDENCE (they're the urgent, timing-critical cues) so a status never hides a wind-up.
+    // ── Per-phase attack flash (enemy-ai-telegraphs §6.5, AC1) ── the body reads ALL THREE attack phases so
+    // the player knows exactly WHEN to dodge AND when to punish: a blinking colorTelegraph WIND-UP (existing),
+    // a bright colorActive flash on the strike's LIVE window, then a dim colorRecovery tint during the punish
+    // window. The attack phases sit ABOVE the hurt + status tint (the urgent timing cue wins — matching the
+    // existing ordering where the telegraph beat status). A non-attacking enemy is visually unchanged.
     let color = this.spec.color
     if (this.state === STATE.ATTACK && this.telegraphTimer > 0) {
-      // Blink the telegraph so the wind-up is unmissable (AC24).
+      // Wind-up: blink the telegraph so it's unmissable (AC1/AC24).
       const blink = Math.floor(this.telegraphTimer * 16) % 2 === 0
       color = blink ? this.spec.colorTelegraph : this.spec.color
+    } else if (this.state === STATE.ATTACK && this.strikeTimer > (this.currentAttack?.recovery ?? this.spec.attackRecovery)) {
+      // Active: a bright flash on the strike's live window (the "dodge NOW" moment, AC1).
+      color = this.spec.colorActive ?? this.spec.colorTelegraph
+    } else if (this.state === STATE.ATTACK) {
+      // Recovery: a dim tint during the punish window (the "punish NOW" moment, AC1).
+      color = this.spec.colorRecovery ?? this.spec.color
     } else if (this.hurtIframeTimer > 0) {
       color = this.spec.colorHurt
     } else if (this.statuses.length > 0) {
-      // Status tint (the resting cue): stun grey-blue, bleed dark red, poison sickly green.
-      if (hasStatus(this.statuses, 'stun')) color = 0x95a5a6
-      else if (hasStatus(this.statuses, 'bleed')) color = 0xa93226
-      else if (hasStatus(this.statuses, 'poison')) color = 0x27ae60
+      // Status tint (the resting cue): stun grey-blue, bleed dark red, poison sickly green, burn orange.
+      // Stun first (it has no DoT number, so the body grey is its main cue); else the dominant DoT colour.
+      // Reads the SHARED STATUS_TINT table (DRY — one source for body cascade + marker + Effects).
+      if (hasStatus(this.statuses, 'stun')) color = STATUS_TINT.stun
+      else color = STATUS_TINT[this._dominantDotKind()]
     }
     this.rect.setFillStyle(color)
 
     // Facing marker on the leading edge.
     this.frontMarker.setAlpha(0.4)
     this.frontMarker.setPosition(this.body.center.x + this.facing * (this.spec.bodyW * 0.5 - 3), this.body.center.y)
+
+    // ── Affliction indicator (affliction-synergy §6.7, AC7) ── drive the always-visible marker ABOVE the
+    // head, tinted to the dominant live affliction (burn→bleed→poison→stun). VISIBLE even during a telegraph/
+    // hurt flash (it's a SEPARATE object from `rect`, so it never fights the body-colour precedence). Hidden
+    // when no status is live (the identity — an un-afflicted enemy shows nothing).
+    const sk = this._dominantStatusKind()
+    if (sk) {
+      this.statusMarker.setAlpha(0.95)
+      this.statusMarker.setFillStyle(STATUS_TINT[sk])
+      this.statusMarker.setPosition(this.body.center.x, this.body.center.y - this.spec.bodyH * 0.5 - 8)
+    } else {
+      this.statusMarker.setAlpha(0)
+    }
+
+    // ── Spatial telegraph marker (enemy-ai-telegraphs §6.5, Decision 2/7, AC2/AC5) ── drive the "where it
+    // lands" cue ONLY during the wind-up, sized + placed for the CHOSEN attack's kind (the boss's
+    // telegraphFx idea, mirrored inline — Boss.ts:487). Hidden on active/recovery/idle/patrol/chase/hurt
+    // (the death case returns above). Blinks the alpha at the SAME 16 Hz cadence as the body flash + the
+    // boss overlay so the player reads enemy + boss wind-ups with ONE vocabulary (AC5).
+    if (this.state === STATE.ATTACK && this.telegraphTimer > 0 && this.currentAttack) {
+      this._updateTelegraphMarker(this.currentAttack)
+    } else {
+      this.telegraphMarker.setAlpha(0)
+    }
+  }
+
+  // ── _updateTelegraphMarker(atk) (enemy-ai-telegraphs §6.5, Decision 2/7, AC2/AC5) ── size + place the
+  // spatial cue for the chosen attack's footprint, mirroring the boss's _updateTelegraphFx per-kind sizing
+  // (Decision 7 — bias to the inline mirror over a shared module so the two entity files don't entangle,
+  // KISS over premature DRY). A forward box for a 'swing', a thin long aim line for a 'shoot', a long
+  // horizontal bar along the lunge for a 'dash', a box at the swoop target for a 'swoop'. Blinks at 16 Hz.
+  _updateTelegraphMarker(atk: EnemyAttackSpec) {
+    const cx = this.body.center.x
+    const cy = this.body.center.y
+    const bodyW = this.spec.bodyW
+    let w = 12
+    let h = 12
+    let x = cx + this.facing * (bodyW * 0.5 + 8)
+    let y = cy
+    if (atk.kind === 'swing') {
+      // A forward box = the strike footprint (the grunt's jab/overhead, the charger's ground-pound).
+      const sw = atk.swing ?? this.spec.swing
+      w = sw.reach
+      h = sw.halfHeight * 2
+      x = cx + this.facing * (bodyW * 0.5 + sw.reach * 0.5)
+      y = cy
+    } else if (atk.kind === 'shoot') {
+      // A thin long aim line along facing = the bolt's path (the shooter/spitter/flyer-spit).
+      w = 220
+      h = 6
+      x = cx + this.facing * (bodyW * 0.5 + 110)
+      y = cy
+    } else if (atk.kind === 'dash') {
+      // A long horizontal bar along `facing` = the lunge path (mirrors the boss's dash cue, which derives the
+      // bar direction from the player each telegraph frame — Boss.ts:501). We use `facing` (NOT `dashDir`)
+      // because `dashDir` is only latched at telegraph END in _fireStrike (line ~636), so DURING the wind-up
+      // — the exact window this marker is shown — it still holds the PREVIOUS dash's dir (or the ctor default
+      // 1), pointing the cue the wrong way (a charger's FIRST dash would always cue RIGHT). `facing` is set to
+      // point at the player on the chase frame that committed the attack (line ~369) and is frozen through the
+      // telegraph, and _fireStrike latches dashDir from the SAME player-relative test — so facing agrees with
+      // where the dash will go and gives an accurate lunge-path cue throughout the wind-up (AC2/AC5).
+      w = 300
+      h = this.spec.bodyH * 0.8
+      x = cx + this.facing * (bodyW * 0.5 + 150)
+      y = cy
+    } else if (atk.kind === 'swoop') {
+      // A box at the latched swoop target = the impact point (the flyer's 2-D lunge destination). swoopVX/VY
+      // are only set at telegraph END, so DURING the wind-up we aim the cue along facing toward the player.
+      w = this.spec.bodyW + 16
+      h = this.spec.bodyH + 16
+      x = cx + this.facing * (bodyW * 0.5 + 60)
+      y = cy
+    }
+    this.telegraphMarker.setSize(w, h)
+    this.telegraphMarker.setPosition(x, y)
+    // Blink at the SAME 16 Hz cadence as the body flash + the boss overlay (AC5).
+    const blink = Math.floor(this.telegraphTimer * 16) % 2 === 0
+    this.telegraphMarker.setAlpha(blink ? 0.45 : 0.2)
   }
 
   _kickScale(sx: number, sy: number) {

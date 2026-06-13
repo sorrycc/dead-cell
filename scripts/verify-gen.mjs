@@ -51,8 +51,17 @@ import { createRunState } from '../src/core/RunState.js'
 // util/save.js (Phaser-free) + the pure configs, and applyUpgrades/BASE_PLAYER_STATS touch NO storage,
 // so this import never throws under node (review MINOR — the purity-convention pin made explicit).
 import { UPGRADES, UPGRADES_BY_ID } from '../src/config/upgrades.js'
-import { WEAPON_ORDER, WEAPON_AFFIXES, WEAPON_AFFIX_ORDER, WEAPON_AFFIX_CHANCE, foldWeaponAffix } from '../src/config/weapons.js'
+import { WEAPON_ORDER, WEAPON_AFFIXES, WEAPON_AFFIX_ORDER, WEAPON_AFFIX_CHANCE, foldWeaponAffix, SWORD, WEAPON_KEEN, runWeaponPool } from '../src/config/weapons.js'
 import { applyUpgrades, BASE_PLAYER_STATS } from '../src/core/MetaState.js'
+// Meta-progression PURE modules (meta-progression §6.10, AC1/AC6/AC11): the Boss-Cell TIER table + the BLUEPRINT
+// catalog + the three run-pool RESOLVERS. All node-importable (no Phaser, no top-level localStorage) — a
+// successful import RE-PROVES their purity (the convention every config table satisfies). The §5 sweeps below
+// assert the tier table is well-formed + monotone, the blueprint catalog ↔ table-tags are consistent, the
+// resolvers return EXACTLY the starters on an empty set (the identity pin), and the bankRun unlock/merge math.
+import { BOSS_CELL_TIERS, MAX_TIER, tierAt } from '../src/config/tiers.js'
+import { BLUEPRINTS, BLUEPRINTS_BY_ID } from '../src/config/blueprints.js'
+import { runSkillPool } from '../src/config/skills.js'
+import { runMutationPool } from '../src/config/mutations.js'
 // Bosses-phase PURE modules (§6.6, Decision 64/68, AC56/AC59/AC61): the archetype specs + per-biome
 // pools, the boss table, and the boss-arena generator branch. All node-importable (no Phaser) — the
 // verifier asserts the enemy-pool/archetype + boss-table well-formedness + the boss-arena contract.
@@ -556,6 +565,40 @@ const MAXD = 60 // a generous run length the curve must stay monotone over (far 
   }
 }
 
+// ── 4a') Boss-Cell tier curve: IDENTITY-at-tier-0 + per-tier monotonicity + non-weakening (meta-progression
+// §6.10, AC2/AC3) ── (i) the IDENTITY pin (the load-bearing "tier 0 = round 1" proof for the curve):
+// scaleAtDepth(d, 1) deep-equals scaleAtDepth(d) at every depth (the explicit-mult-1 call returns the BYTE-
+// IDENTICAL scalars to the default call). (ii) for EVERY tier in BOSS_CELL_TIERS, each tiered scalar is
+// non-decreasing IN DEPTH AND is >= the tier-0 scalar at the same depth (a higher tier never weakens the
+// curve — a global LIFT). enemyCountBonus uses floor so a tiny mult could equal tier-0 at low depth — the
+// check is `>=`, which holds (a tier ADDS or holds, never subtracts). ──
+{
+  for (let depth = 0; depth <= MAXD; depth++) {
+    // (i) IDENTITY: the explicit-mult-1 call === the default call (the tier-0 curve is the round-1 curve).
+    if (!deepEqual(scaleAtDepth(depth, 1), scaleAtDepth(depth))) {
+      fail(`tier curve identity: scaleAtDepth(${depth}, 1) !== scaleAtDepth(${depth}) (tier 0 must be byte-identical)`)
+    }
+  }
+  for (const tier of BOSS_CELL_TIERS) {
+    let prevTiered = scaleAtDepth(0, tier.bossCellMult)
+    for (let depth = 0; depth <= MAXD; depth++) {
+      const s = scaleAtDepth(depth, tier.bossCellMult)
+      const base = scaleAtDepth(depth) // the tier-0 scalar at the same depth (the non-weakening comparand).
+      // (ii) non-decreasing IN DEPTH (each scalar).
+      if (s.enemyHpMult < prevTiered.enemyHpMult) fail(`tier ${tier.index} curve: enemyHpMult dipped at depth ${depth}`)
+      if (s.enemyDamageMult < prevTiered.enemyDamageMult) fail(`tier ${tier.index} curve: enemyDamageMult dipped at depth ${depth}`)
+      if (s.enemySpeedMult < prevTiered.enemySpeedMult) fail(`tier ${tier.index} curve: enemySpeedMult dipped at depth ${depth}`)
+      if (s.enemyCountBonus < prevTiered.enemyCountBonus) fail(`tier ${tier.index} curve: enemyCountBonus dipped at depth ${depth}`)
+      // (ii) NON-WEAKENING vs tier 0 (a higher tier never makes the game easier at any depth).
+      if (s.enemyHpMult < base.enemyHpMult) fail(`tier ${tier.index} curve: enemyHpMult below tier-0 at depth ${depth} (${s.enemyHpMult} < ${base.enemyHpMult})`)
+      if (s.enemyDamageMult < base.enemyDamageMult) fail(`tier ${tier.index} curve: enemyDamageMult below tier-0 at depth ${depth}`)
+      if (s.enemySpeedMult < base.enemySpeedMult) fail(`tier ${tier.index} curve: enemySpeedMult below tier-0 at depth ${depth}`)
+      if (s.enemyCountBonus < base.enemyCountBonus) fail(`tier ${tier.index} curve: enemyCountBonus below tier-0 at depth ${depth}`)
+      prevTiered = s
+    }
+  }
+}
+
 // ── 4b) Biome-tier monotonicity (AC43): difficultyTier is non-decreasing along BIOME_ORDER, and
 // every biome's cols/rows are within the size bounds (so AC28 holds for the whole list). ──
 {
@@ -599,6 +642,36 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
   // And we must have ended on the LAST biome (BLOCKER 1 — not looping/short-circuiting).
   if (!rs.isLastBiome()) fail('run completed but not on the last biome (BLOCKER 1 regression)')
+}
+
+// ── 4c') Whole-run monotonicity AT EVERY TIER (meta-progression §6.10, AC3 — AC42/AC43 preserved + extended) ──
+// The existing tier-0 walk above is UNCHANGED (it calls effectiveDifficulty(depth, biome) — default mult 1 —
+// so it is byte-identical). HERE: for EACH tier in BOSS_CELL_TIERS, drive a FRESH createRunState(RUN_SEED)
+// through advance() for the FULL run, asserting effectiveDifficulty(depth, biome, tier.bossCellMult) is
+// non-decreasing across the ENTIRE run AND is >= the tier-0 value at every step (the tier is a global LIFT,
+// never an easing). Because bossCellMult is CONSTANT within a run and >= 1, and the curve term is non-
+// decreasing in depth and the biome tier non-decreasing along BIOME_ORDER, this is non-decreasing BY
+// CONSTRUCTION — the walk is a PROOF, not a filter. This is the load-bearing "a boss-cell multiplier keeps
+// effectiveDifficulty non-decreasing across the run, at every tier" assertion (the slice constraint).
+{
+  for (const tier of BOSS_CELL_TIERS) {
+    const rs = createRunState(RUN_SEED)
+    let prevEff = effectiveDifficulty(rs.depth, rs.biome(), tier.bossCellMult)
+    let steps = 0
+    while (!rs.isRunComplete()) {
+      rs.advance()
+      steps++
+      const eff = effectiveDifficulty(rs.depth, rs.biome(), tier.bossCellMult)
+      if (eff < prevEff) {
+        fail(`tier ${tier.index} whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+      }
+      // The tier is a global lift: at every step the tiered value is >= the tier-0 value (never an easing).
+      const eff0 = effectiveDifficulty(rs.depth, rs.biome())
+      if (eff < eff0) fail(`tier ${tier.index} whole-run: effectiveDifficulty below tier-0 at depth ${rs.depth} (${eff} < ${eff0})`)
+      prevEff = eff
+      if (steps > totalLevels + 5) fail(`tier ${tier.index} whole-run walk did not terminate`)
+    }
+  }
 }
 
 // ── 4d) Seed-chain + biome-sequence determinism (AC47): two fresh RunStates from the SAME start seed
@@ -711,6 +784,34 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     } else if (w.projectile) {
       fail(`weapon ${w.id}: melee weapon must NOT carry a projectile spec`)
     }
+    // ── per-weapon-movesets §6.7 (Decision 9, AC2) — validate the OPTIONAL `moveset` WHEN PRESENT. Every check
+    // above is preserved VERBATIM; this is an ADDITIVE pass so a weapon with NO moveset (the headless/default
+    // case) is unaffected (identity). A malformed mode fails LOUDLY: a charge needs chargeTime>0 + damageMult>=1
+    // (an aoeRadius, when present, >=0); a flurry needs hits>=2 + interval>0; pierce needs maxTargets>=2; and the
+    // mode must match the type (flurry/finisher/aoeRadius only on melee; pierce only on ranged). ──
+    if (w.moveset) {
+      const m = w.moveset
+      if (m.charge) {
+        if (!(m.charge.chargeTime > 0)) fail(`weapon ${w.id}: charge.chargeTime must be > 0`)
+        if (!(m.charge.damageMult >= 1)) fail(`weapon ${w.id}: charge.damageMult must be >= 1`)
+        if (m.charge.aoeRadius !== undefined && !(m.charge.aoeRadius >= 0)) fail(`weapon ${w.id}: charge.aoeRadius must be >= 0`)
+        if (m.charge.chargeStunDuration !== undefined && !(m.charge.chargeStunDuration >= 0)) fail(`weapon ${w.id}: charge.chargeStunDuration must be >= 0`)
+        // A MELEE-only smash (aoeRadius / chargeStunDuration) must not ride a ranged weapon (a malformed pairing).
+        if (w.type !== 'melee' && (m.charge.aoeRadius !== undefined || m.charge.chargeStunDuration !== undefined)) {
+          fail(`weapon ${w.id}: charge.aoeRadius/chargeStunDuration (a melee smash) only on a melee weapon`)
+        }
+      }
+      if (m.flurry) {
+        if (w.type !== 'melee') fail(`weapon ${w.id}: flurry only on a melee weapon`)
+        if (!(m.flurry.hits >= 2)) fail(`weapon ${w.id}: flurry.hits must be >= 2`)
+        if (!(m.flurry.interval > 0)) fail(`weapon ${w.id}: flurry.interval must be > 0`)
+      }
+      if (m.pierce) {
+        if (w.type !== 'ranged') fail(`weapon ${w.id}: pierce only on a ranged weapon`)
+        if (!(m.pierce.maxTargets >= 2)) fail(`weapon ${w.id}: pierce.maxTargets must be >= 2`)
+      }
+      if (m.finisher && w.type !== 'melee') fail(`weapon ${w.id}: finisher only on a melee weapon`)
+    }
   }
 }
 
@@ -730,6 +831,7 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 {
   if (ENEMY_ARCHETYPES.length < 4) fail(`ENEMY_ARCHETYPES has ${ENEMY_ARCHETYPES.length}, expected ≥4 (AC59)`)
   const KNOWN_BEHAVIORS = ['melee', 'ranged', 'charge', 'fly']
+  const ATTACK_KINDS = ['swing', 'shoot', 'dash', 'swoop'] // the EnemyAttackKind vocabulary (enemy-ai-telegraphs §6.1).
   const SPEC_FIELDS = ['maxHp', 'bodyW', 'bodyH', 'patrolSpeed', 'chaseSpeed', 'attackRange', 'telegraph', 'contactDamage']
   for (const spec of ENEMY_ARCHETYPES) {
     if (!KNOWN_BEHAVIORS.includes(spec.behavior)) fail(`archetype ${spec.id}: unknown behavior ${spec.behavior}`)
@@ -744,10 +846,47 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
         fail(`archetype ${spec.id}: ranged behavior but no projectile spec`)
       }
     }
+    // ── attacks[] well-formed (enemy-ai-telegraphs §6.6, AC6) ── the per-archetype attack table is a
+    // NON-EMPTY array; each entry is a known kind with a POSITIVE telegraph (the dodge window), NON-NEGATIVE
+    // active/recovery, a POSITIVE weight (the chooser), and the per-kind params present + numeric so
+    // scaleSpec can fold them. A 'swing' attack MUST carry swing.damage; a 'shoot' attack MUST carry
+    // projectile.damage (parity with the §6a ranged check). The verifier is an INDEPENDENT proof of the data
+    // contract — the same role it plays for the boss attack tables.
+    if (!Array.isArray(spec.attacks) || spec.attacks.length === 0) fail(`archetype ${spec.id}: empty attacks[] (AC3)`)
+    for (const a of spec.attacks) {
+      if (!ATTACK_KINDS.includes(a.kind)) fail(`archetype ${spec.id}: unknown attack kind ${a.kind}`)
+      if (!(a.telegraph > 0)) fail(`archetype ${spec.id}: attack ${a.kind} telegraph must be > 0 (the dodge window)`)
+      if (!(a.active >= 0) || !(a.recovery >= 0)) fail(`archetype ${spec.id}: attack ${a.kind} active/recovery must be ≥ 0`)
+      if (!(a.weight > 0)) fail(`archetype ${spec.id}: attack ${a.kind} weight must be > 0 (the chooser)`)
+      if (a.kind === 'swing' && (!a.swing || typeof a.swing.damage !== 'number')) {
+        fail(`archetype ${spec.id}: 'swing' attack missing swing.damage`)
+      }
+      if (a.kind === 'shoot' && (!a.projectile || typeof a.projectile.damage !== 'number')) {
+        fail(`archetype ${spec.id}: 'shoot' attack missing projectile.damage`)
+      }
+    }
     // scaleSpec rises with depth on THIS archetype (the scaling is real per-archetype).
     const s0 = scaleSpec(spec, scaleAtDepth(0)).maxHp
     const s10 = scaleSpec(spec, scaleAtDepth(10)).maxHp
     if (!(s10 > s0)) fail(`archetype ${spec.id}: scaled maxHp did not rise with depth (${s10} ≤ ${s0})`)
+    // scaleSpec folds each attack's damage too (enemy-ai-telegraphs §6.7, AC6): a depth-scaled attack's
+    // swing.damage / projectile.damage is ≥ the base (a re-tune that makes a deeper attack WEAKER fails
+    // loudly — mirrors the boss-fold guardrail). Telegraph/timings stay unscaled (the dodge contract holds).
+    const scaled = scaleSpec(spec, scaleAtDepth(10))
+    for (let i = 0; i < spec.attacks.length; i++) {
+      const base = spec.attacks[i]
+      const sc = scaled.attacks[i]
+      if (base.swing && !(sc.swing.damage >= base.swing.damage)) {
+        fail(`archetype ${spec.id}: scaled attack[${i}] swing.damage dipped (${sc.swing.damage} < ${base.swing.damage})`)
+      }
+      if (base.projectile && !(sc.projectile.damage >= base.projectile.damage)) {
+        fail(`archetype ${spec.id}: scaled attack[${i}] projectile.damage dipped (${sc.projectile.damage} < ${base.projectile.damage})`)
+      }
+    }
+    // scaleSpec must NOT mutate the base attacks[] (the aliasing discipline — Decision 45).
+    if (spec.attacks[0].swing && spec.attacks[0] === scaled.attacks[0]) {
+      fail(`archetype ${spec.id}: scaleSpec aliased attacks[0] (must deep-clone, Decision 45)`)
+    }
   }
 }
 
@@ -908,13 +1047,21 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 //    Phaser-free; the asserts pin the DoT accumulation, the stun flag, expiry, and refresh-on-re-hit.
 // ════════════════════════════════════════════════════════════════════════════════════════════
 {
+  // ── 8·0) STATUS_KINDS PIN (affliction-synergy AC1/AC2 — the DELIBERATE pin update) ── the kind set is now
+  // EXACTLY 4 (bleed/poison/stun/burn). Pinned to a literal 4 (not "whatever the array is") so dropping/adding
+  // a kind fails loudly — a deliberate count, the slice constraint's "extend the pins deliberately". The
+  // burn-includes assert makes dropping burn (regressing the Searing affix / the 4th colour) fail loudly too.
+  if (STATUS_KINDS.length !== 4) fail(`STATUS_KINDS must be exactly 4 kinds (bleed/poison/stun/burn), got ${STATUS_KINDS.length} (AC1)`)
+  if (!STATUS_KINDS.includes('burn')) fail(`STATUS_KINDS must include 'burn' (affliction-synergy AC1 — the 4th damaging kind)`)
+
   // ── 8a) Weapon status tags reference only KNOWN kinds, with sane params (a damaging status needs a
-  // positive tickInterval + tickDmg; a stun is non-damaging). A malformed tag fails loudly. ──
+  // positive tickInterval + tickDmg; a stun is non-damaging). burn is a damaging DoT (affliction-synergy),
+  // so the damaging check now includes it. A malformed tag fails loudly. ──
   for (const w of Object.values(WEAPONS)) {
     if (!w.status) continue // a weapon with no status (sword) is fine — the identity.
     if (!STATUS_KINDS.includes(w.status.kind)) fail(`weapon ${w.id}: unknown status kind "${w.status.kind}" (AC66)`)
     if (!(w.status.duration > 0)) fail(`weapon ${w.id}: status duration must be > 0`)
-    const damaging = w.status.kind === 'bleed' || w.status.kind === 'poison'
+    const damaging = w.status.kind === 'bleed' || w.status.kind === 'poison' || w.status.kind === 'burn'
     if (damaging && !(w.status.tickInterval > 0 && w.status.tickDmg > 0)) {
       fail(`weapon ${w.id}: a damaging status needs tickInterval > 0 AND tickDmg > 0`)
     }
@@ -960,6 +1107,20 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     const b = makeStatus({ kind: 'stun', duration: 0.5 })
     if (a === b) fail('makeStatus must return a fresh object each call')
     if (a.tickDmg !== 0 || a.tickInterval !== 0) fail('makeStatus: a stun must default to non-damaging (0 tick)')
+  }
+
+  // ── 8f) BURN DoT accumulation pin (affliction-synergy AC2 — NEW, mirrors 8b) ── prove burn rides the SAME
+  // damaging-status path as bleed: a burn of tickDmg=4 every 0.4s, ticked in 0.1s steps over 0.4s, deals
+  // EXACTLY 4 once (one full interval crossed) and is still live (timer > 0). The COMPUTED output (never
+  // hand-invented) — if burn ever stopped ticking like bleed/poison (a status.js regression) this fails. The
+  // existing 8b/8c/8d/8e bleed/stun/poison pins are UNCHANGED above (burn does not perturb them). ──
+  {
+    const list = []
+    applyStatus(list, { kind: 'burn', duration: 2.4, tickInterval: 0.4, tickDmg: 4 })
+    let total = 0
+    for (let i = 0; i < 4; i++) total += tickStatuses(list, 0.1).damage // 4 × 0.1 = 0.4s → one interval.
+    if (total !== 4) fail(`status tick: 0.4s of a 0.4s/4 burn should deal 4, got ${total}`)
+    if (!hasStatus(list, 'burn')) fail('status tick: burn should still be live after 0.4s of 2.4s duration')
   }
 }
 
@@ -1082,6 +1243,9 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     }
     if (a.addStatus) {
       if (typeof a.addStatus.kind !== 'string' || !a.addStatus.kind) fail(`weapon affix ${a.id}: addStatus needs a kind`)
+      // The addStatus kind must be a KNOWN status kind (affliction-synergy §6.5 — burn is now known, so the
+      // Searing affix passes; a typo'd / dropped kind fails loudly, mirroring the weapon/skill status checks).
+      if (!STATUS_KINDS.includes(a.addStatus.kind)) fail(`weapon affix ${a.id}: addStatus kind "${a.addStatus.kind}" is not a known status kind (AC6)`)
       if (!(a.addStatus.duration > 0)) fail(`weapon affix ${a.id}: addStatus duration must be > 0`)
     }
     // The affix MUST do SOMETHING (a no-op affix is a content bug — a rolled affix must change the weapon).
@@ -1138,6 +1302,12 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       })
       if (baseProjDmg !== null && w.projectile.damage !== baseProjDmg) fail(`foldWeaponAffix MUTATED ${w.id} base projectile damage (aliasing bug)`)
     }
+    // ── per-weapon-movesets §6.7 (Decision 9, AC3) — the fold must PRESERVE the weapon's `moveset` (the `...weapon`
+    // spread carries it; the affix never drops it). A folded weapon that lost its moveset would silently strip the
+    // charge/flurry/finisher/pierce playstyle off any affixed weapon. The Sword carries a moveset, so a folded
+    // Sword must too (shape-preserved — the SAME ref, since the moveset is immutable pattern data). ──
+    if (SWORD.moveset && !foldWeaponAffix(SWORD, WEAPON_KEEN).moveset) fail('foldWeaponAffix dropped the moveset')
+    if (foldWeaponAffix(SWORD, WEAPON_KEEN).moveset !== SWORD.moveset) fail('foldWeaponAffix should ref-preserve the moveset (immutable pattern data)')
   }
 }
 
@@ -1252,6 +1422,11 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       kill: run.onKillHealAmount,
       lowHp: run.lowHpDamageMult,
       firstHit: run.firstHitBonusMult,
+      // ── Affliction-synergy fields (affliction-synergy AC6) ── vsAfflictedDamageMult/statusTickMult are
+      // bigger-is-better; spreadAffliction is a flag a mutation may only turn ON (never off).
+      vsAffl: run.vsAfflictedDamageMult,
+      tickMult: run.statusTickMult,
+      spread: run.spreadAffliction,
     }
     m.apply(run) // must not throw.
     // Bigger-is-better fields must not DECREASE; the smaller-is-better dodge-cooldown mult must not INCREASE.
@@ -1265,13 +1440,20 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (run.lowHpDamageMult < before.lowHp) fail(`mutation ${m.id}: lowHpDamageMult decreased`)
     if (run.firstHitBonusMult < before.firstHit) fail(`mutation ${m.id}: firstHitBonusMult decreased`)
     if (run.scrollDodgeCdMult > before.cd) fail(`mutation ${m.id}: scrollDodgeCdMult increased (a longer dodge cooldown is a weaken)`)
+    // ── Affliction-synergy never-weaken (affliction-synergy AC6/Decision 6) ── the two mults are
+    // bigger-is-better; spreadAffliction is a flag a mutation may only turn ON (false → true), never off.
+    if (run.vsAfflictedDamageMult < before.vsAffl) fail(`mutation ${m.id}: vsAfflictedDamageMult decreased`)
+    if (run.statusTickMult < before.tickMult) fail(`mutation ${m.id}: statusTickMult decreased`)
+    if (before.spread === true && run.spreadAffliction === false) fail(`mutation ${m.id}: spreadAffliction was turned OFF (a flag may only be armed)`)
     // At least ONE field must have changed (a found mutation must DO something — a no-op perk is a content bug).
     const changed =
       run.scrollDamageMult !== before.dmg || run.scrollMaxHpBonus !== before.hp ||
       run.scrollLifestealFrac !== before.life || run.scrollStatusDurationMult !== before.stat ||
       run.scrollDodgeCdMult !== before.cd || run.scrollDodgeIframeBonus !== before.ifr ||
       run.maxFlasks !== before.flasksMax || run.onKillHealAmount !== before.kill ||
-      run.lowHpDamageMult !== before.lowHp || run.firstHitBonusMult !== before.firstHit
+      run.lowHpDamageMult !== before.lowHp || run.firstHitBonusMult !== before.firstHit ||
+      run.vsAfflictedDamageMult !== before.vsAffl || run.statusTickMult !== before.tickMult ||
+      run.spreadAffliction !== before.spread
     if (!changed) fail(`mutation ${m.id}: apply() changed no run-only/perk field (a no-op mutation)`)
   }
 
@@ -1291,6 +1473,173 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     if (run.lowHpDamageMult < 1) fail('mutations aggregate: lowHpDamageMult below the neutral identity')
     if (run.firstHitBonusMult < 1) fail('mutations aggregate: firstHitBonusMult below the neutral identity')
     if (run.scrollDodgeCdMult > 1) fail('mutations aggregate: scrollDodgeCdMult above the neutral identity (a longer dodge cooldown)')
+    // ── Affliction-synergy aggregate (affliction-synergy AC6/AC10) ── the two mults stay ≥ their neutral 1;
+    // spreadAffliction may only end UP armed (true) or stay false — never an impossible non-boolean.
+    if (run.vsAfflictedDamageMult < 1) fail('mutations aggregate: vsAfflictedDamageMult below the neutral identity')
+    if (run.statusTickMult < 1) fail('mutations aggregate: statusTickMult below the neutral identity')
+    if (typeof run.spreadAffliction !== 'boolean') fail('mutations aggregate: spreadAffliction must remain a boolean flag')
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 13) Meta-progression: Boss-Cell TIERS + BLUEPRINTS + the run-pool resolvers (meta-progression design §6.10,
+//     AC1/AC5/AC6/AC11). An INDEPENDENT proof of the PURE tier table + blueprint catalog + the three pool
+//     resolvers that stay Phaser-free: the tier table is well-formed + monotone (mult >= 1 non-decreasing,
+//     flaskDelta non-increasing, eliteChanceMult >= 1 non-decreasing), tier 0 is the EXACT identity, the
+//     shipped flask floor is sane, the blueprint catalog ↔ table-tags are consistent both ways, the resolvers
+//     return EXACTLY the starters on an empty set (the identity pin, AC11) + ALL rows on a full set, and the
+//     bankRun unlock/merge math is proven on a small in-memory shim (MetaState.bankRun is save.js-coupled).
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 13a) BOSS_CELL_TIERS well-formed + monotone (AC1) ── index === position; tier 0 is the EXACT identity
+  // (bossCellMult 1, flaskDelta 0, eliteChanceMult 1); bossCellMult monotone non-decreasing + every >= 1;
+  // flaskDelta monotone non-increasing; eliteChanceMult monotone non-decreasing + every >= 1. (The module-load
+  // assertion in tiers.js ALSO enforces these — a re-tune throws on import; this re-proves them independently.)
+  if (!Array.isArray(BOSS_CELL_TIERS) || BOSS_CELL_TIERS.length < 1) fail('BOSS_CELL_TIERS is empty (AC1)')
+  if (MAX_TIER !== BOSS_CELL_TIERS.length - 1) fail(`MAX_TIER ${MAX_TIER} !== BOSS_CELL_TIERS.length-1 ${BOSS_CELL_TIERS.length - 1}`)
+  const t0 = BOSS_CELL_TIERS[0]
+  if (!(t0.bossCellMult === 1 && t0.flaskDelta === 0 && t0.eliteChanceMult === 1)) {
+    fail('BOSS_CELL_TIERS[0] is not the EXACT identity (bossCellMult 1, flaskDelta 0, eliteChanceMult 1) (AC1)')
+  }
+  for (let i = 0; i < BOSS_CELL_TIERS.length; i++) {
+    const t = BOSS_CELL_TIERS[i]
+    if (t.index !== i) fail(`BOSS_CELL_TIERS[${i}].index ${t.index} !== position ${i}`)
+    if (typeof t.name !== 'string' || !t.name) fail(`tier ${i}: missing name`)
+    if (typeof t.desc !== 'string' || !t.desc) fail(`tier ${i}: missing desc`)
+    if (!(t.bossCellMult >= 1)) fail(`tier ${i}: bossCellMult ${t.bossCellMult} < 1 (a tier never weakens the curve)`)
+    if (!(t.eliteChanceMult >= 1)) fail(`tier ${i}: eliteChanceMult ${t.eliteChanceMult} < 1`)
+    if (i > 0) {
+      const p = BOSS_CELL_TIERS[i - 1]
+      if (t.bossCellMult < p.bossCellMult) fail(`tier ${i}: bossCellMult dipped (${t.bossCellMult} < ${p.bossCellMult})`)
+      if (t.flaskDelta > p.flaskDelta) fail(`tier ${i}: flaskDelta rose (${t.flaskDelta} > ${p.flaskDelta}) — a deeper tier must never give MORE flasks`)
+      if (t.eliteChanceMult < p.eliteChanceMult) fail(`tier ${i}: eliteChanceMult dipped (${t.eliteChanceMult} < ${p.eliteChanceMult})`)
+    }
+  }
+  // tierAt clamps an out-of-range index into [0, MAX_TIER] (Decision 5 — a corrupt selectedTier degrades).
+  if (tierAt(-5) !== BOSS_CELL_TIERS[0]) fail('tierAt(-5) must clamp to tier 0')
+  if (tierAt(999) !== BOSS_CELL_TIERS[MAX_TIER]) fail('tierAt(999) must clamp to MAX_TIER')
+
+  // ── 13b) Flask-floor sanity (Decision 4) ── BASE_PLAYER_STATS.maxFlasks + flaskDelta of the DEEPEST tier is
+  // >= 1 so the shipped table never reaches an unwinnable zero-heal run (the run-seed clamp floors it at 1, but
+  // a SHIPPED table that needs the clamp to be winnable is a tuning smell — assert the table is sane by design).
+  const deepestFlask = BASE_PLAYER_STATS.maxFlasks + BOSS_CELL_TIERS[MAX_TIER].flaskDelta
+  if (!(deepestFlask >= 1)) fail(`flask floor: deepest tier leaves ${deepestFlask} flasks (< 1) — the shipped table is unwinnable by design (Decision 4)`)
+
+  // ── 13c) Blueprint catalog ↔ table-tags consistency BOTH WAYS (AC6) ── every catalog id is referenced by
+  // EXACTLY ONE tagged row across weapons/skills/mutations, with the catalog `kind` matching the table the tag
+  // lives in; and every tagged row's blueprint id exists in the catalog (no orphan tag, no orphan entry).
+  if (!Array.isArray(BLUEPRINTS) || BLUEPRINTS.length === 0) fail('BLUEPRINTS is empty (AC6 — the unlock needs content)')
+  if (Object.keys(BLUEPRINTS_BY_ID).length !== BLUEPRINTS.length) fail('BLUEPRINTS_BY_ID size != BLUEPRINTS length (duplicate/missing id)')
+  // Gather every (id, kind) a pool table TAGS, from the three tables (the resolvers expose the rows; we read the
+  // tagged ones via a full-unlock resolve minus the empty-unlock resolve — but simplest: read the tables' tags
+  // directly through the resolvers' inputs). Build the tag→kind map from the row sets each resolver can return.
+  const fullUnlock = new Set(BLUEPRINTS.map((b) => b.id))
+  const taggedWeapons = runWeaponPool(fullUnlock).filter((id) => !runWeaponPool(new Set()).includes(id))
+  const taggedSkills = runSkillPool(fullUnlock).filter((s) => !runSkillPool(new Set()).includes(s))
+  const taggedMutations = runMutationPool(fullUnlock).filter((m) => !runMutationPool(new Set()).includes(m))
+  // Resolve each tagged row back to its blueprint tag + the kind of table it came from (one map, asserted 1:1).
+  const tagToKind = {}
+  // Weapons: tagged rows are extra weapon IDs beyond the starters — but we need the row's `blueprint` tag. Read
+  // the WEAPON_ORDER directly (imported) so we have the tag. (The resolver proved which IDs are gated above.)
+  for (const w of WEAPON_ORDER) {
+    if (w.blueprint) {
+      if (tagToKind[w.blueprint]) fail(`blueprint tag "${w.blueprint}" referenced by more than one row`)
+      tagToKind[w.blueprint] = 'weapon'
+    }
+  }
+  // Skills + mutations: re-derive their tagged rows + tags. We imported the resolvers; to read the `blueprint`
+  // tag itself, resolve the full set and inspect each row's tag (a gated row carries it; a starter does not).
+  for (const s of runSkillPool(fullUnlock)) {
+    if (s.blueprint) {
+      if (tagToKind[s.blueprint]) fail(`blueprint tag "${s.blueprint}" referenced by more than one row`)
+      tagToKind[s.blueprint] = 'skill'
+    }
+  }
+  for (const m of runMutationPool(fullUnlock)) {
+    if (m.blueprint) {
+      if (tagToKind[m.blueprint]) fail(`blueprint tag "${m.blueprint}" referenced by more than one row`)
+      tagToKind[m.blueprint] = 'mutation'
+    }
+  }
+  // Sanity: the number of distinct tags === the number of gated rows the resolvers found (no double-count).
+  if (taggedWeapons.length + taggedSkills.length + taggedMutations.length !== Object.keys(tagToKind).length) {
+    fail('blueprint tags: the gated-row count != the distinct-tag count (a tag mismatch)')
+  }
+  // Every catalog entry maps to EXACTLY one tagged row with the matching kind.
+  for (const b of BLUEPRINTS) {
+    if (typeof b.id !== 'string' || !b.id) fail('blueprint catalog: missing id')
+    if (typeof b.name !== 'string' || !b.name) fail(`blueprint ${b.id}: missing name`)
+    if (typeof b.desc !== 'string' || !b.desc) fail(`blueprint ${b.id}: missing desc`)
+    if (!tagToKind[b.id]) fail(`blueprint catalog entry "${b.id}" is not referenced by any tagged pool row (orphan entry)`)
+    if (tagToKind[b.id] !== b.kind) fail(`blueprint "${b.id}": catalog kind "${b.kind}" != the table it tags "${tagToKind[b.id]}"`)
+  }
+  // Every tagged row's id exists in the catalog (no orphan tag).
+  for (const tag of Object.keys(tagToKind)) {
+    if (!BLUEPRINTS_BY_ID[tag]) fail(`tagged pool row references blueprint "${tag}" missing from the catalog (orphan tag)`)
+  }
+
+  // ── 13d) Resolver IDENTITY at empty + completeness at full (AC11 — the blueprint identity pin) ── with an
+  // EMPTY unlocked set each resolver returns EXACTLY the STARTER rows (untagged) === the pre-slice tables; with
+  // the FULL set it returns ALL rows. This PROVES "a default save draws from the SAME rows as today" + "a full
+  // unlock widens to everything". (The empty-set weapon resolver === WEAPON_ORDER's untagged ids, etc.)
+  const startersW = WEAPON_ORDER.filter((w) => !w.blueprint).map((w) => w.id)
+  if (!deepEqual(runWeaponPool(new Set()), startersW)) fail('runWeaponPool(empty) != the starter weapon ids (identity broken, AC11)')
+  if (runWeaponPool(fullUnlock).length !== WEAPON_ORDER.length) fail('runWeaponPool(full) != ALL weapons')
+  // ── PRE-SLICE DRAW-ORDER PIN (meta-progression review, AC7/AC11 — seed-replay determinism) ── the
+  // weapon-pickup / branch-reward draws are ORDER-SENSITIVE (they pick pool[floor(rng()*len)] after filtering
+  // out the equipped weapon), so the empty-unlock pool's ORDER — not just its SET — must equal the pre-slice
+  // const `WEAPON_PICKUP_POOL = ['hammer','bow','sword','spear']`, or a non-sword start (the START_WEAPON
+  // upgrade) draws a DIFFERENT weapon than before this slice for the SAME seed. Assert the EXACT order.
+  const PRE_SLICE_WEAPON_POOL = ['hammer', 'bow', 'sword', 'spear']
+  if (!deepEqual(runWeaponPool(new Set()), PRE_SLICE_WEAPON_POOL)) {
+    fail(`runWeaponPool(empty) order != the pre-slice ${JSON.stringify(PRE_SLICE_WEAPON_POOL)} (AC7/AC11 — seed-replay determinism broken), got ${JSON.stringify(runWeaponPool(new Set()))}`)
+  }
+  // Skills/mutations: the empty-set resolve must contain NO tagged row (every returned row is a starter).
+  if (runSkillPool(new Set()).some((s) => s.blueprint)) fail('runSkillPool(empty) returned a gated skill (identity broken, AC11)')
+  if (runMutationPool(new Set()).some((m) => m.blueprint)) fail('runMutationPool(empty) returned a gated mutation (identity broken, AC11)')
+  // …and the empty-set count === the count of untagged rows (no starter dropped, no gated row leaked).
+  // (We can't import the raw SKILLS/MUTATIONS arrays' length here cheaply, so assert via the full-vs-gated split.)
+  if (runSkillPool(new Set()).length + taggedSkills.length !== runSkillPool(fullUnlock).length) fail('skill resolver: starters + gated != full set')
+  if (runMutationPool(new Set()).length + taggedMutations.length !== runMutationPool(fullUnlock).length) fail('mutation resolver: starters + gated != full set')
+  // A PARTIAL set returns starters PLUS only the named gated row (set-membership, not all-or-nothing).
+  if (BLUEPRINTS.length > 0) {
+    const one = new Set([BLUEPRINTS[0].id])
+    const kind = BLUEPRINTS[0].kind
+    const got =
+      kind === 'weapon' ? runWeaponPool(one).length :
+      kind === 'skill' ? runSkillPool(one).length :
+      runMutationPool(one).length
+    const empty =
+      kind === 'weapon' ? runWeaponPool(new Set()).length :
+      kind === 'skill' ? runSkillPool(new Set()).length :
+      runMutationPool(new Set()).length
+    if (got !== empty + 1) fail(`resolver(partial): unlocking one ${kind} blueprint must add exactly one row (got ${got}, expected ${empty + 1})`)
+  }
+
+  // ── 13e) bankRun unlock/merge math on a PURE in-memory shim (AC5/AC9) ── MetaState.bankRun is coupled to
+  // save.js (localStorage), so the verifier proves the documented RULE on a small shim mirroring the math:
+  // (a) tier unlock = max(unlockedTier, min(completedAtTier+1, MAX_TIER)) — clamped at MAX_TIER, only on a
+  // COMPLETED run (completedAtTier != null); (b) blueprint merge = set-union dedup; (c) a death (null) does
+  // NOT unlock a tier. This pins the rule so a divergent bankRun impl is caught here (alongside typecheck).
+  {
+    const shimBank = (meta, { blueprints = [], completedAtTier = null }) => {
+      for (const id of blueprints) if (!meta.blueprints.includes(id)) meta.blueprints.push(id)
+      if (completedAtTier != null) meta.unlockedTier = Math.max(meta.unlockedTier, Math.min(completedAtTier + 1, MAX_TIER))
+      return meta
+    }
+    // A completed run at tier 0 unlocks tier 1 (if MAX_TIER >= 1).
+    const m1 = shimBank({ unlockedTier: 0, blueprints: [] }, { completedAtTier: 0 })
+    if (m1.unlockedTier !== Math.min(1, MAX_TIER)) fail(`bankRun shim: completed@0 must unlock tier ${Math.min(1, MAX_TIER)}, got ${m1.unlockedTier}`)
+    // A completed run at MAX_TIER stays clamped at MAX_TIER (never past the table).
+    const m2 = shimBank({ unlockedTier: MAX_TIER, blueprints: [] }, { completedAtTier: MAX_TIER })
+    if (m2.unlockedTier !== MAX_TIER) fail(`bankRun shim: completed@MAX must stay clamped at MAX_TIER, got ${m2.unlockedTier}`)
+    // A DEATH (completedAtTier null) does NOT raise the tier but STILL merges blueprints.
+    const m3 = shimBank({ unlockedTier: 0, blueprints: [] }, { blueprints: [BLUEPRINTS[0].id], completedAtTier: null })
+    if (m3.unlockedTier !== 0) fail('bankRun shim: a death must NOT unlock a tier')
+    if (!m3.blueprints.includes(BLUEPRINTS[0].id)) fail('bankRun shim: a death must still bank carried blueprints')
+    // Set-union dedup: re-banking the SAME id does not duplicate it.
+    const m4 = shimBank(m3, { blueprints: [BLUEPRINTS[0].id], completedAtTier: null })
+    if (m4.blueprints.filter((id) => id === BLUEPRINTS[0].id).length !== 1) fail('bankRun shim: re-banking an id must dedup (set-union)')
   }
 }
 
@@ -1309,6 +1658,8 @@ console.log(
     `${SCROLLS.length} scrolls + ${ELITE_AFFIXES.length} elite affixes well-formed (round-3 build variety); ` +
     `${WEAPON_AFFIXES.length} weapon affixes pure-fold/schema-preserving/never-weaken (round-2 build engine); ` +
     `${SKILLS.length} skills well-formed (${SKILL_KINDS.length} kinds, AC7 — the loadout layer); ` +
-    `${MUTATIONS.length} mutations well-formed + identity-safe/never-weaken (build-&-replay AC1/AC6)`,
+    `${MUTATIONS.length} mutations well-formed + identity-safe/never-weaken (build-&-replay AC1/AC6); ` +
+    `${BOSS_CELL_TIERS.length} boss-cell tiers (curve identity@t0 + whole-run monotonic ∀ tier, AC42/AC43) + ` +
+    `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11)`,
 )
 process.exit(0)

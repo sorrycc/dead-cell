@@ -33,10 +33,21 @@ const SAVE_KEY = 'dead-cell:meta'
 
 // The persistent meta shape. `cells` is the permanent currency (survives death); `upgrades`
 // maps upgrade-id → owned level; `bestDepth` is the deepest depth ever reached.
+//
+// ── Boss-Cell TIERS + BLUEPRINTS (meta-progression design §6.3, Decision 5, AC4) ── three NEW persistent
+// fields that change the NEXT run's WORLD (not just the character). `unlockedTier` is the highest Boss-Cell
+// tier ever unlocked (0 = base; raised on a COMPLETED run). `selectedTier` is the tier the next run launches
+// at (always re-clamped to 0..unlockedTier on read, so a corrupt save degrades to a valid run). `blueprints`
+// are the permanently-unlocked run-pool blueprint ids (weapons/skills/mutations draw starters ∪ these). All
+// default to the IDENTITY (tier 0 / no blueprints = the round-1 game exactly — Decision 5), and loadMeta's
+// spread back-fills them for any pre-slice save (the same mechanism `bestDepth` relies on).
 export interface MetaState {
   cells: number
   upgrades: Record<string, number>
   bestDepth: number
+  unlockedTier: number // highest Boss-Cell tier ever unlocked (0 = base; raised on a completed run).
+  selectedTier: number // the tier the next run launches at (clamped 0..unlockedTier on read).
+  blueprints: string[] // permanently-unlocked blueprint ids (run pools draw from starters ∪ these).
 }
 
 // Spread defaults over
@@ -44,13 +55,28 @@ export interface MetaState {
 // values — CRUCIAL: loadMeta only back-fills keys PRESENT in DEFAULT_META, so `bestDepth` MUST live
 // here (not only as a MetaState default) or a pre-§6.5 save would load WITHOUT it (review MINOR /
 // AC50/AC55 — the relaunch round-trip must hold for pre-existing saves).
-export const DEFAULT_META: Readonly<MetaState> = Object.freeze({ cells: 0, upgrades: {}, bestDepth: 0 })
+// DEFAULT_META seeds the three NEW keys to the IDENTITY (meta-progression Decision 5): unlockedTier 0 +
+// selectedTier 0 + an empty blueprints list = a fresh save behaves byte-identically to the round-1 game. A
+// pre-slice save (missing these keys) back-fills them via loadMeta's spread below = the identity too.
+export const DEFAULT_META: Readonly<MetaState> = Object.freeze({
+  cells: 0,
+  upgrades: {},
+  bestDepth: 0,
+  unlockedTier: 0,
+  selectedTier: 0,
+  blueprints: [],
+})
 
 export function loadMeta(): MetaState {
   const stored = get<Partial<MetaState> | null>(SAVE_KEY, null)
-  return stored && typeof stored === 'object'
-    ? { ...DEFAULT_META, ...stored }
-    : { ...DEFAULT_META }
+  const merged = stored && typeof stored === 'object' ? { ...DEFAULT_META, ...stored } : { ...DEFAULT_META }
+  // CLONE the mutable containers so a back-filled field never ALIASES the frozen DEFAULT_META reference (a
+  // save missing `upgrades`/`blueprints` would otherwise share DEFAULT_META's {} / [], and a later buy()/
+  // bankRun() push would mutate the shared default — a subtle cross-instance leak). Each loaded meta owns
+  // its own containers. Defensive against a corrupt `blueprints` that isn't an array (degrade to empty).
+  merged.upgrades = { ...(merged.upgrades || {}) }
+  merged.blueprints = Array.isArray(merged.blueprints) ? merged.blueprints.slice() : []
+  return merged
 }
 
 export function saveMeta(meta: MetaState): boolean {

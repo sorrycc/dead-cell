@@ -90,6 +90,17 @@ const DODGE_DURATION = 0.22 // s — how long the DODGE state holds the dash (ov
 const DODGE_IFRAMES = 0.18 // s — invulnerability window (≤ duration); isInvulnerable() reads it.
 const DODGE_COOLDOWN = 0.45 // s — gate before dodge can fire again (after the roll ends).
 
+// ── Per-weapon movesets (per-weapon-movesets §6.3, Decisions 2/5/6, AC4–AC8) — the playstyle + parry layer ──
+// All gated behind the NEW inputs (attackHeld / downHeld / parryPressed) + the optional weapon `moveset`, so a
+// run that never holds the attack key, never holds DOWN at a finisher, and never presses V plays BYTE-IDENTICALLY
+// to before (the additive identity, AC10). The timers decay by the gameplay dt alongside every other timer
+// (Decision 8 — they freeze during hit-stop / the shop pause, no RNG read, no generator touch).
+const PARRY_WINDOW = 0.18 // s — the timing window an incoming hit must land in to be parried (Decision 5).
+const PARRY_COOLDOWN = 0.6 // s — gate before the parry can re-arm (so it can't be spammed, AC8).
+const RIPOSTE_DURATION = 1.2 // s — the post-parry damage-bump window (the reward — read at the hit site).
+const RIPOSTE_DAMAGE_MULT = 1.5 // ×next-hit damage after a successful parry (the riposte; spent on the next hit).
+const FLURRY_LOCK = 0.08 // s — the brief active+recovery lock each flurry poke arms (so pokes read as distinct).
+
 // ── Squash / stretch / tint (juice — primitives only) ──
 const BODY_W = 36 // px — FIXED Arcade body width (set once; never per-frame).
 const BODY_H = 52 // px — FIXED Arcade body height.
@@ -134,6 +145,8 @@ export class Player {
   onKillHealAmount: number
   lowHpDamageMult: number
   firstHitBonusMult: number
+  vsAfflictedDamageMult: number
+  statusTickMult: number
   weapons: (WeaponSpec | null)[]
   activeWeaponIndex: number
   secondSlotUnlocked: boolean
@@ -163,6 +176,16 @@ export class Player {
   hurtTimer: number
   hurtIframeTimer: number
   _pendingAttack: boolean
+  // ── Per-weapon moveset state (per-weapon-movesets §6.3, Decisions 2/5, AC4–AC8) ── seeded to the
+  // neutral/inactive identity in the ctor so a fresh Player that never holds/parries is byte-identical.
+  chargeTimer: number // s — accrued while holding the attack key on a charge weapon (0 = not charging).
+  flurryShotsLeft: number // pokes remaining in the current spear flurry (0 = none in progress).
+  flurryTimer: number // s — gap timer until the next flurry poke.
+  parryTimer: number // s — > 0 = the parry window is LIVE (a hit landing in it is negated).
+  parryCooldownTimer: number // s — > 0 = parry is gated (no spam).
+  riposteTimer: number // s — > 0 = a post-parry damage buff is live (read + spent at the hit site).
+  _downHeld: boolean // cached at the top of update() so _startSwing reads the held-DOWN finisher intent.
+  _pendingAoe: { radius: number; stun: number } | null // a charged-hammer smash the scene reads on the hit.
   scaleY: number
   wasOnFloor: boolean
   frontMarker: Phaser.GameObjects.Rectangle
@@ -211,6 +234,13 @@ export class Player {
     this.onKillHealAmount = 0 // flat HP healed on each enemy kill (Predator).
     this.lowHpDamageMult = 1 // ×damage while below the low-HP threshold (Berserker).
     this.firstHitBonusMult = 1 // ×damage vs a FULL-HP enemy (Assassin — the opener bonus).
+    // ── Affliction-synergy live-read mirrors (affliction-synergy design §6.6/§6.7, AC3/AC9) ── synced from
+    // RunState by _syncPlayerScrollStats. Both default to the neutral identity (1×) so a fresh Player with no
+    // synergy plays EXACTLY as before. vsAfflictedDamageMult is folded into _mutationDamageMult (vs an
+    // afflicted target); statusTickMult scales an armed DoT's tickDmg in _scaleStatus. (spreadAffliction is
+    // read off RunState directly in the onDeath hook — no player mirror needed.)
+    this.vsAfflictedDamageMult = 1 // ×damage vs an afflicted enemy (Hemorrhage).
+    this.statusTickMult = 1 // ×applied DoT tickDmg (Virulent — "ticks harder").
     // ── TWO weapon SLOTS (Enrichment round 3, item 3 — the build-identity lever) ── the run carries up to
     // TWO weapons (a primary + a secondary) and a SWAP key toggles which is active, so a run can hold
     // melee+ranged or two movesets — turning a loot pickup into a BUILD decision (carry the new weapon in
@@ -287,6 +317,17 @@ export class Player {
     this.hurtTimer = 0 // > 0 while knockback overrides control (so it survives the vx write).
     this.hurtIframeTimer = 0 // > 0 while invulnerable after a hit.
     this._pendingAttack = false // set by attack() (scene calls it on the edge); consumed in update.
+    // ── Per-weapon moveset + parry state (per-weapon-movesets §6.3, Decisions 2/5/8, AC4–AC8/AC10) ── all
+    // seeded to the neutral/inactive identity: no charge accruing, no flurry, no parry window/cooldown/riposte,
+    // no held-down, no pending smash. So a Player whose inputs never hold/parry plays byte-identically to before.
+    this.chargeTimer = 0 // accrues while attackHeld on a charge weapon; fires on the release edge.
+    this.flurryShotsLeft = 0 // pokes left in the current spear flurry (0 = none).
+    this.flurryTimer = 0 // gap until the next flurry poke.
+    this.parryTimer = 0 // > 0 → the parry window is live (onHit negates a hit landing in it).
+    this.parryCooldownTimer = 0 // > 0 → parry gated (no spam).
+    this.riposteTimer = 0 // > 0 → the next connecting hit deals ×RIPOSTE_DAMAGE_MULT (read at the hit site).
+    this._downHeld = false // cached per frame from input.downHeld; read at the Sword finisher.
+    this._pendingAoe = null // a charged-hammer smash {radius,stun} the scene reads on the first connecting hit.
 
     // Squash/stretch easing target. We track a current scaleY that eases toward 1 and is
     // KICKED by jump/land/dodge events; scaleX is derived to preserve apparent volume.
@@ -333,6 +374,19 @@ export class Player {
   // directly AND arm `hurtTimer` (the lockout that lets the knockback survive update()'s per-frame vx
   // write — Decision 32), arm the hurt i-frame, flash red, and fire the death edge ONCE at hp≤0.
   onHit(result: HitResult) {
+    // ── PARRY negation (per-weapon-movesets §6.3, Decision 5, AC8) ── the FIRST check, BEFORE the isHittable
+    // read: if the parry window is LIVE, NEGATE the hit (no HP, no knockback), consume the window, arm the
+    // riposte buff (the next connecting hit deals ×RIPOSTE_DAMAGE_MULT), play the success blip, and RETURN. The
+    // scene pops the "PARRY!" cue + a flash (it owns effects/camera; _hurtPlayer checks the live window before
+    // calling onHit — DRY, all four player-hit sites funnel through it). A parried ENEMY PROJECTILE is simply
+    // consumed by this negated return (no deflect-back — YAGNI). With V never pressed parryTimer stays 0 → this
+    // branch is skipped and everything below is byte-identical to before (the identity, AC10).
+    if (this.parryTimer > 0) {
+      this.parryTimer = 0
+      this.riposteTimer = RIPOSTE_DURATION
+      this.sound?.parrySuccess() // audio §6.6 — the deflect clang (null-safe).
+      return // NEGATE: no HP loss, no knockback, no hurt-iframe.
+    }
     if (!this.isHittable()) return
     // audio §6.2 (AC2) — the hurt blip. Played only on a NON-fatal hit; a fatal hit plays the death
     // knell instead (GameScene._onPlayerDeath), so the two don't stack on the killing blow.
@@ -398,6 +452,16 @@ export class Player {
     // GameScene reads these → the registry for the HUD cooldown indicator. An empty slot leaves its timer 0.
     this.skillCooldown[0] = Math.max(0, this.skillCooldown[0] - dt)
     this.skillCooldown[1] = Math.max(0, this.skillCooldown[1] - dt)
+    // ── Per-weapon moveset + parry timers (per-weapon-movesets §6.3, Decision 8) ── decay by the gameplay dt
+    // alongside every other timer (so they FREEZE during hit-stop / the shop pause). chargeTimer is NOT decayed
+    // here — it ACCRUES while held (the charge machine below); flurryTimer/parry/cooldown/riposte decay normally.
+    // All default to 0 → on a run that never holds/parries these stay 0 (the identity, AC10). Cache the held-DOWN
+    // flag for _startSwing (the Sword finisher reads it; no movement side effect).
+    this.flurryTimer = Math.max(0, this.flurryTimer - dt)
+    this.parryTimer = Math.max(0, this.parryTimer - dt)
+    this.parryCooldownTimer = Math.max(0, this.parryCooldownTimer - dt)
+    this.riposteTimer = Math.max(0, this.riposteTimer - dt)
+    this._downHeld = input.downHeld
 
     // ── Attack lock + SYMMETRIC ATTACK→RUN exit (Decision 25). Decrement the active+recovery lock;
     // when a swing ends, return to RUN and OPEN the combo window so a follow-up press chains
@@ -425,6 +489,18 @@ export class Player {
     if (this.state === STATE.RUN && this.attackTimer <= 0 && this.comboWindowTimer > 0) {
       this.comboWindowTimer = Math.max(0, this.comboWindowTimer - dt)
       if (this.comboWindowTimer <= 0) this.comboIndex = -1
+    }
+
+    // ── PARRY arm (per-weapon-movesets §6.3, Decision 5, AC8) ── an always-available timing-rewarding
+    // defensive reaction (orthogonal to the roll — you parry WHILE you could also dodge). On the V edge AND off
+    // cooldown: arm the brief parry window + the cooldown gate, play the arm blip + a brief tint pop. Parrying
+    // does NOT cancel an attack/dodge — it OVERLAYS (like the hurt lockout), so the actual negation happens in
+    // onHit when a hit lands inside the live window. With V never pressed this is skipped (identity, AC10).
+    if (input.parryPressed && this.parryCooldownTimer <= 0) {
+      this.parryTimer = PARRY_WINDOW
+      this.parryCooldownTimer = PARRY_COOLDOWN
+      this._kickScaleY(1.18) // a small "brace" stretch so arming the parry reads.
+      this.sound?.parry() // audio §6.6 — the rising parry "ting" (null-safe).
     }
 
     // ── Dodge START (edge) ── relaxed guard `state !== DODGE` (Decision 25) so a dodge is honored
@@ -455,11 +531,60 @@ export class Player {
       this.sound?.dodge() // audio §6.2 (AC3) — the roll whoosh (null-safe).
     }
 
-    // ── (1.5) Resolve the pending attack() edge (Decision 25). Fires only if NOT dodging (a
-    // dodge-start above pre-empts it this frame) and the active+recovery lock is clear. ──
-    if (this._pendingAttack) {
+    // ── (1.5) Resolve the attack intent (Decision 25 + per-weapon-movesets §6.3, Decision 2). The seam splits
+    // by the equipped weapon's `moveset` block: a CHARGE weapon (Hammer/Bow) accrues-and-fires-on-release; a
+    // FLURRY weapon (Spear) repeats-while-held; everything else (Sword / any plain weapon) keeps the EXACT
+    // edge-fired tap path (byte-identical — the additive identity, AC10). A weapon has at most ONE of
+    // charge/flurry (KISS). The edge `_pendingAttack` (set by attack()) is still the press signal; the HELD
+    // state (input.attackHeld) drives the charge accrual / flurry continuation. The dodge-start above pre-empts
+    // any attack this frame (state === DODGE), and the active+recovery lock (attackTimer) still gates a re-fire. ──
+    const moveset = this.equippedWeapon.moveset
+    const canAttackNow = this.state !== STATE.DODGE && this.attackTimer <= 0
+    if (moveset?.charge) {
+      // ── CHARGE machine (Hammer smash / Bow shot, Decision 2, AC4/AC7) ── while holding (and not dodging,
+      // lock clear): accrue chargeTimer (no swing fires — a wind-up). On the RELEASE edge (was charging, key
+      // now up): fire ONE swing — charged if held past chargeTime, else a normal tap (a brief hold that didn't
+      // reach the threshold is forgiving). The edge press itself does NOT fire here (the release does), so a
+      // tap-and-instant-release still produces exactly one swing. chargeReady blips once on crossing the bar.
+      this._pendingAttack = false // a charge weapon never fires off the raw edge (the release fires instead).
+      if (input.attackHeld && canAttackNow) {
+        const wasReady = this.chargeTimer >= moveset.charge.chargeTime
+        this.chargeTimer += dt
+        if (!wasReady && this.chargeTimer >= moveset.charge.chargeTime) this.sound?.chargeReady() // the "ready" blip.
+      } else if (!input.attackHeld && this.chargeTimer > 0) {
+        // RELEASE edge: fire the charged-or-tap swing, then clear the charge. Guard the lock (a release during
+        // recovery still ends the charge so it doesn't linger and double-fire when the lock clears).
+        const charged = this.chargeTimer >= moveset.charge.chargeTime
+        this.chargeTimer = 0
+        if (canAttackNow) this._startSwing({ charged })
+      }
+    } else if (moveset?.flurry) {
+      // ── FLURRY machine (Spear drill, Decision 2, AC5/AC10) ── on the first press fire poke #1 as a NORMAL
+      // thrust (a full active+recovery swing — so a single TAP is byte-identical to the current Spear thrust,
+      // the identity) and arm the bounded flurry. While HELD with pokes left: fire each follow-up poke when the
+      // gap lapses on a short FLURRY_LOCK (so the drill chains fast + the pokes read distinct). Releasing the
+      // key OR exhausting the count ends the flurry (a re-press starts a fresh one). Each poke keeps the long reach.
+      if (this._pendingAttack) {
+        this._pendingAttack = false
+        if (canAttackNow && this.flurryShotsLeft <= 0) {
+          this._startSwing() // poke #1: a NORMAL thrust (the identity tap path — full lock, not flurry-locked).
+          this.flurryShotsLeft = moveset.flurry.hits - 1 // poke #1 just fired; this many follow-ups remain.
+          this.flurryTimer = moveset.flurry.interval
+        }
+      }
+      if (this.flurryShotsLeft > 0 && input.attackHeld) {
+        if (this.flurryTimer <= 0 && this.attackTimer <= 0 && this.state !== STATE.DODGE) {
+          this._startSwing({ flurry: true }) // a fast follow-up poke (the brief FLURRY_LOCK).
+          this.flurryShotsLeft--
+          this.flurryTimer = moveset.flurry.interval
+        }
+      } else if (!input.attackHeld) {
+        this.flurryShotsLeft = 0 // released → end the flurry (a re-press starts a fresh one).
+      }
+    } else if (this._pendingAttack) {
+      // ── TAP path (Sword / any plain weapon — UNCHANGED, byte-identical to before this slice, AC10) ──
       this._pendingAttack = false
-      if (this.state !== STATE.DODGE && this.attackTimer <= 0) this._startSwing()
+      if (canAttackNow) this._startSwing()
     }
 
     // ── (2) Horizontal control ──
@@ -638,19 +763,63 @@ export class Player {
     this.frontMarker.y = this.body.center.y
   }
 
-  // ── Start a swing (Decision 18/25/31/61/62, AC20/AC54). Advances the combo on the EQUIPPED weapon's
-  // swing table, enters ATTACK, arms the active+recovery lock, applies the lunge nudge, then DISPATCHES
-  // by weapon TYPE: melee → a pooled hitbox in front; ranged → a fired pooled projectile. ──
-  _startSwing() {
+  // ── Start a swing (Decision 18/25/31/61/62, AC20/AC54 + per-weapon-movesets §6.3, Decisions 2/4/7). Advances
+  // the combo on the EQUIPPED weapon's swing table, enters ATTACK, arms the active+recovery lock, applies the
+  // lunge nudge, then DISPATCHES by weapon TYPE: melee → a pooled hitbox in front; ranged → a fired projectile.
+  // `opts` (default {} — a TAP, byte-identical to before this slice, AC10) gates the moveset variants:
+  //   charged — a HOLD-released charge: melee bakes ×charge.damageMult into a FRESH swing row + arms a pending
+  //             AoE smash (the scene reads it on the hit); ranged bakes the mult into a FRESH projectile + a
+  //             pierce count. flurry — a spear poke: arm only the brief FLURRY_LOCK so pokes read as distinct.
+  // The DIRECTIONAL finisher (Sword) reads the cached held-DOWN flag at the finisher swing and OVERRIDES the
+  // finisher row with the moveset.finisher.down deltas (a fresh row — never mutating the shared spec). ──
+  _startSwing(opts: { charged?: boolean; flurry?: boolean } = {}) {
     const weapon = this.equippedWeapon
     const swings = weapon.swings
-    // Advance the chain on THIS weapon's table (Decision 61): wrap against ITS length (not the module
-    // COMBO_LEN, which is sword-only). The comboWindow reset (Decision 31) sends comboIndex back to −1
-    // when it lapses (and equipWeapon resets it on a swap), so a fresh chain always starts at swing 0.
-    this.comboIndex = (this.comboIndex + 1) % swings.length
-    const swing = swings[this.comboIndex]
+    const moveset = weapon.moveset
+    // A CHARGED melee charge-weapon release IS the finisher (Decision 3 / AC4: "the charged DAMAGE is the
+    // finisher swing's damage × charge.damageMult"). Force the finisher row BEFORE advancing the chain so a
+    // charged smash from neutral (comboIndex −1 after a combo lapse / a weapon swap) never lands on the LIGHT
+    // row — it would otherwise advance to swing 0 and bake the mult into the wind-up, deviating from the
+    // headline feature (review MAJOR). A SUB-THRESHOLD release (opts.charged === false) is a forgiving tap, so
+    // it advances the chain normally below. Ranged charges have no combo to force (one draw row — left as-is).
+    if (opts.charged && weapon.type !== 'ranged' && moveset?.charge) {
+      this.comboIndex = swings.length - 1
+    } else {
+      // Advance the chain on THIS weapon's table (Decision 61): wrap against ITS length (not the module
+      // COMBO_LEN, which is sword-only). The comboWindow reset (Decision 31) sends comboIndex back to −1
+      // when it lapses (and equipWeapon resets it on a swap), so a fresh chain always starts at swing 0.
+      this.comboIndex = (this.comboIndex + 1) % swings.length
+    }
+    const baseSwing = swings[this.comboIndex]
+
+    // ── Resolve the EFFECTIVE swing row (per-weapon-movesets §6.3). Start from the base row; clone-and-modify
+    // ONLY for a moveset variant so the shared spec is never mutated (the aliasing safety every fold keeps).
+    // A plain tap on a plain weapon never enters either branch → `swing === baseSwing` (byte-identical, AC10).
+    let swing = baseSwing
+    const isFinisher = this.comboIndex === swings.length - 1
+    // DIRECTIONAL finisher (Decision 4, AC6): held-DOWN at the Sword finisher applies the `down` partial row's
+    // deltas over the finisher row (a heavier-knockback ground slam). Not-held = the EXACT finisher row.
+    if (isFinisher && this._downHeld && moveset?.finisher?.down) {
+      swing = { ...swing, ...moveset.finisher.down }
+    }
+    // CHARGED melee (Decision 2, AC4): bake ×charge.damageMult into the row's damage (resolveHit reads it like
+    // any swing.damage, so the meta/scroll/mutation mults still compose — DRY) + arm the pending AoE smash.
+    if (opts.charged && weapon.type !== 'ranged' && moveset?.charge) {
+      swing = { ...swing, damage: Math.round(swing.damage * moveset.charge.damageMult) }
+      this._pendingAoe =
+        (moveset.charge.aoeRadius ?? 0) > 0
+          ? { radius: moveset.charge.aoeRadius!, stun: moveset.charge.chargeStunDuration ?? 0.6 }
+          : null
+    } else if (!opts.charged) {
+      // A non-charged melee swing clears any stale pending AoE (a whiffed charge must not leave a smash armed
+      // for the NEXT swing — KISS; the scene also consumes it on a hit). Harmless on a non-charge weapon.
+      this._pendingAoe = null
+    }
+
     this.state = STATE.ATTACK
-    this.attackTimer = swing.active + swing.recovery // the lock; reset to RUN at 0 (step 1).
+    // The lock: a flurry poke arms only the brief FLURRY_LOCK (so the drill chains fast); else the row's
+    // active+recovery as before (Decision 31 — reset to RUN at 0 in step 1).
+    this.attackTimer = opts.flurry ? FLURRY_LOCK : swing.active + swing.recovery
     this.comboWindowTimer = 0 // window opens at swing END, not now (Decision 31).
     this.attackColorTimer = swing.active // cosmetic swing pop duration (the visual telegraph).
 
@@ -666,16 +835,43 @@ export class Player {
       // Its hit is resolved by GameScene's projectile-specific overlap (its own attacker shape = the
       // SHOT's position + dir — NOT the player's, review MAJOR). The pool may be null (cosmetic-only).
       if (this.projectilePool && weapon.projectile) {
+        // CHARGED bow (per-weapon-movesets §6.3, Decision 7, AC7): a FRESH projectile spec with ×damageMult
+        // damage + a pierce.maxTargets count so the shot threads a line (the hit handler decrements pierceLeft,
+        // releases at 0). A TAP passes the base spec + pierce 1 (dies on first hit — byte-identical, AC10).
+        let projectile = weapon.projectile
+        let pierce = 1
+        if (opts.charged && moveset?.charge) {
+          projectile = { ...weapon.projectile, damage: Math.round(weapon.projectile.damage * moveset.charge.damageMult) }
+          pierce = moveset.pierce?.maxTargets ?? 1
+        }
         // Stamp the weapon's status (§6.13, Decision 79 — the bow's poison) on the shot so the hit handler
         // applies it to the struck enemy. null for a no-status weapon → no effect (the identity).
-        this.projectilePool.acquire(attacker, weapon.projectile, this.id, weapon.status)
+        this.projectilePool.acquire(attacker, projectile, this.id, weapon.status, null, pierce)
       }
     } else {
       this.sound?.swing(weapon.id) // audio §6.2 (AC3) — the melee whoosh, timbre per weapon (null-safe).
       // MELEE (Decision 16/20): acquire the transient hitbox; it lives for swing.active then the pool
-      // releases it; its per-swing hitSet dedups multi-hit. Null pool = cosmetic-only (Phase-1).
+      // releases it; its per-swing hitSet dedups multi-hit. Null pool = cosmetic-only (Phase-1). The
+      // effective (possibly charged / down-finisher) row is what the scene reads for damage + geometry.
       if (this.hitboxPool) this.hitboxPool.acquire(attacker, swing, this.id)
     }
+  }
+
+  // ── consumePendingAoe() (per-weapon-movesets §6.3, Decision 3, AC4) ── the scene calls this on the FIRST
+  // connecting hit of a charged hammer smash: returns the pending AoE { radius, stun } (and clears it so it
+  // fires ONCE, radiating from where the smash landed), or null when no charged smash is armed (every plain/
+  // tap hit — the identity, AC10). KISS: the Player owns the bookkeeping; the scene owns the radial damage.
+  consumePendingAoe(): { radius: number; stun: number } | null {
+    const aoe = this._pendingAoe
+    this._pendingAoe = null
+    return aoe
+  }
+
+  // ── riposteDamageMult (getter) (per-weapon-movesets §6.3, Decision 5, AC8) ── ×next-hit damage while a
+  // post-parry riposte buff is live, else 1 (the identity). Read at the scene's hit site (folded into the
+  // damage mult); the caller zeroes riposteTimer after a connecting hit so the buff is SPENT once.
+  get riposteDamageMult(): number {
+    return this.riposteTimer > 0 ? RIPOSTE_DAMAGE_MULT : 1
   }
 
   // ── applyStartStats(startStats) (design §6.5, Decision 60, AC53) ── fold the run-start stats (the
@@ -744,6 +940,7 @@ export class Player {
       }
       this.comboIndex = -1
       this.comboWindowTimer = 0
+      this._resetMoveset() // the NEW moveset starts clean (no charge/flurry/AoE leaked from the old weapon).
     }
   }
 
@@ -765,7 +962,25 @@ export class Player {
     this.activeWeaponIndex = other
     this.comboIndex = -1
     this.comboWindowTimer = 0
+    this._resetMoveset() // the NEW moveset starts clean (no charge/flurry/AoE leaked from the old weapon).
     return true
+  }
+
+  // ── _resetMoveset() (per-weapon-movesets §6.3, Decisions 2/5 — review MINOR: the swap state-leak fix) ──
+  // Zero the per-weapon moveset MACHINE alongside the combo on any active-weapon change (equipToSlot's
+  // active branch + swapWeapon), mirroring the existing combo/live-swing cancel discipline. Without this a
+  // mid-charge or mid-flurry swap STRANDS state across weapons: a chargeTimer accrued on the Hammer is gated
+  // on the new weapon's moveset?.charge (undefined for the Sword) so it never decays — swapping back resumes
+  // accrual on the stale value; a Spear flurry with flurryShotsLeft > 0 resumes pokes WITHOUT a fresh press
+  // (violating "a re-press starts a fresh one"). Parry/riposte state is NOT touched here — it is a defensive
+  // reaction orthogonal to the equipped weapon (it persists across a swap by design). DRY: one place, both
+  // call sites. NOTE: NOT called for an INACTIVE-slot equip (filling the spare slot must not disturb the live
+  // moveset) nor in applyStartStats (a fresh run already seeds these to the neutral identity in the ctor).
+  _resetMoveset() {
+    this.chargeTimer = 0
+    this.flurryShotsLeft = 0
+    this.flurryTimer = 0
+    this._pendingAoe = null
   }
 
   // ── equipSkill(spec, slot) (skills design §6.2, AC2/AC5) ── put `spec` into a skill slot (0 = F, 1 = C)

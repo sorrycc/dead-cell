@@ -10,6 +10,7 @@ import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
+import { hasStatus } from '../combat/status.js'
 import { Effects } from '../effects/Effects.js'
 import { Sound } from '../audio/Sound.js'
 import { generateLevel, TILE_SIZE } from '../world/LevelGenerator.js'
@@ -20,13 +21,16 @@ import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
 import { DeployablePool } from '../entities/DeployablePool.js'
-import { WEAPONS, WEAPON_AFFIXES, WEAPON_AFFIX_CHANCE, WEAPON_AFFIXES_BY_ID, foldWeaponAffix } from '../config/weapons.js'
-import { SKILLS, SKILLS_BY_ID } from '../config/skills.js'
+import { WEAPONS, WEAPON_AFFIXES, WEAPON_AFFIX_CHANCE, WEAPON_AFFIXES_BY_ID, foldWeaponAffix, runWeaponPool } from '../config/weapons.js'
+import { SKILLS, SKILLS_BY_ID, runSkillPool } from '../config/skills.js'
+import type { SkillSpec as SkillSpecType } from '../config/skills.js'
 import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import type { BossAttackSpec } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
-import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD } from '../config/mutations.js'
+import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD, runMutationPool } from '../config/mutations.js'
+import type { MutationSpec } from '../config/mutations.js'
+import { BLUEPRINTS } from '../config/blueprints.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { mulberry32 } from '../util/rng.js'
@@ -40,6 +44,7 @@ import type { ShopItem } from '../config/shop.js'
 import type { SkillSpec } from '../config/skills.js'
 import type { LevelDescription } from '../world/LevelGenerator.js'
 import type { HitResult } from '../combat/damage.js'
+import type { StatusSpec } from '../combat/status.js'
 import type { RNG } from '../util/rng.js'
 
 // ── GameScene (design §6.1 + §6.2 + §6.3 + §6.4, AC11–AC18 + AC19/AC27–AC30 + AC20–AC26 + AC42–AC47) ──
@@ -124,9 +129,19 @@ const FALLBACK_SEED = 0xc0ffee
 // resolution). Low so swapping is a real mid-run choice (KISS). The weapon is the OTHER melee/ranged
 // option vs the one you start with (a meaningful pick), chosen off the level seed (deterministic).
 const WEAPON_PICKUP_CHANCE = 0.5 // ~half of levels carry a weapon to try.
-// The ids a level pickup can offer — now includes the SPEAR (§6.6.5, AC60) so the 4th weapon appears
-// in runs (it's a found weapon, not a meta unlock — Decision 69).
-const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword', 'spear']
+// ── The weapon-pickup pool (meta-progression §6.7, Decision 6, AC7) ── the ids a level pickup can offer is no
+// longer a fixed const: it's the per-run RESOLVED pool (runWeaponPool) computed ONCE in create() from the
+// unlocked blueprints and stored on `this.weaponPool`. With NO blueprints unlocked it === the 4 starters
+// (hammer/bow/sword/spear) — the identity (a default run offers the same weapons as today); a banked weapon
+// blueprint (the Glaive) ADDS its id. _maybePlaceWeaponPickup + _placeBranchReward draw from this.weaponPool.
+
+// ── Blueprint-drop placement (meta-progression §6.7, Decision 6/7, AC9) ── a RARE sparse per-level chance to
+// drop ONE locked-blueprint pickup, sourced SCENE-SIDE off the level seed (NOT the generator — the same
+// off-the-pin discipline as the weapon pickup / shop, so the level pin stays intact). A blueprint is a special
+// find, so it's rarer than a weapon swap. Only LOCKED (not-yet-unlocked, not-yet-carried) blueprints are worth
+// dropping (don't re-drop one you already have). Collecting it records the id on runState.blueprints (run-only);
+// bankRun merges it into the meta at run end (BOTH paths). A run with all blueprints unlocked drops none (no-op).
+const BLUEPRINT_PICKUP_CHANCE = 0.18 // rare — a blueprint is a special run-pool unlock find.
 
 // ── In-run shop placement (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── a per-level FIXED chance to
 // place ONE Shop vendor, rolled off a fresh seeded RNG (off the generator's pinned draw — the same level-
@@ -156,11 +171,38 @@ const CLEAR_BONUS_TIME = 45000 // ms — clear a normal level within 45s of buil
 const CLEAR_BONUS_GOLD = 15 // run-only gold granted on a fast clear (feeds the in-run shop / gold sink).
 const CLEAR_BONUS_CELLS = 2 // meta cells granted on a fast clear (banked at run end — the lasting reward).
 
+// ── Affliction SPREAD-on-kill (affliction-synergy design §6.6, Decision 5, AC5) ── the Hemorrhage payoff:
+// when an AFFLICTED enemy dies (and spreadAffliction is armed) its dominant DAMAGING affliction jumps to up
+// to SPREAD_MAX_TARGETS nearest live OTHER enemies within SPREAD_RADIUS, so the affliction cascades through a
+// pack. KILL-only (fired from the onDeath hook, no re-spread off a spread tick — no chain explosion).
+// Deterministic: the scan reads NO RNG (nearest-N by distance), so it never perturbs the seed chain / level pin.
+const SPREAD_RADIUS = 140 // px — only enemies within this of the corpse catch the affliction.
+const SPREAD_MAX_TARGETS = 2 // at most this many nearest enemies catch it (bounded, once-per-kill).
+// The fresh DoT spec the spread applies per dominant kind — a REDUCED-duration copy (a "spread tax") so the
+// cascade weakens, never a full-strength chain. Re-derived (not copied off the dying enemy's live Status) so
+// no internal _accum/timer leaks. Run through _scaleStatus so a Virulent/Toxic build's mults still apply.
+const SPREAD_SPEC: Record<'bleed' | 'poison' | 'burn', StatusSpec> = {
+  bleed: { kind: 'bleed', duration: 1.6, tickInterval: 0.4, tickDmg: 3 },
+  poison: { kind: 'poison', duration: 1.8, tickInterval: 0.5, tickDmg: 2 },
+  burn: { kind: 'burn', duration: 1.6, tickInterval: 0.4, tickDmg: 4 },
+}
+
 export class GameScene extends Phaser.Scene {
   // ── Field declarations (type-only; useDefineForClassFields:false → zero runtime effect) ──
   private runSeed!: number
   private meta!: MetaStateInstance
   private runState!: RunState
+  // ── Boss-Cell TIER + per-run resolved pools (meta-progression §6.7, Decision 6/10, AC7/AC8) ── the run's tier
+  // multiplier lives on RunState.bossCellMult (the SINGLE owner — run-scoped state, like every other run field),
+  // seeded from the selected tier (1 = tier 0 identity) and read directly at every scaleAtDepth/scaleBossSpec
+  // fold site (no duplicate scene-local copy — DRY). unlockedBlueprints is the meta's unlocked-blueprint set; the
+  // three pools are the per-run draw pools resolved ONCE in create() from it (starters ∪ unlocked) — the
+  // weapon/skill/mutation placement sites draw from these.
+  private unlockedBlueprints!: Set<string>
+  private weaponPool!: string[]
+  private skillPool!: SkillSpecType[]
+  private mutationPool!: MutationSpec[]
+  private eliteChanceMult!: number // ×elite-affix roll chance from the tier (Decision 8; 1 on MVP tiers = identity).
   private hitstopTimer!: number
   private gameOver!: boolean
   private transitioning!: boolean
@@ -233,14 +275,36 @@ export class GameScene extends Phaser.Scene {
     this.meta = createMetaState()
     const startStats = this.meta.startStats()
 
-    // ── RunState (design §6.4/§6.5, Decision 44/46/60) ── ONE RunState OWNS the active run: the seed
-    // chain, the biome index + per-biome level counter, the depth, the carried HP, the currencies, the
-    // run-only scroll mults, and the equipped weapon id. Seeded from startStats so the carried maxHp/hp
-    // + starting weapon reflect the META upgrades (review MAJOR — the HP-carry/upgrade reconciliation:
-    // RunState.maxHp/hp are minted from the UPGRADED maxHp, so the single create()-time player sync
-    // below is consistent). startedAt is captured HERE (purity stays in RunState — the clock is passed
-    // IN). scene.start('Game') fully re-creates the scene per run, so a fresh RunState is minted each run.
-    this.runState = createRunState(this.runSeed, this.time.now, startStats)
+    // ── Boss-Cell TIER (meta-progression §6.7, Decision 10, AC8) ── read the SELECTED tier's row. tier 0 ⇒
+    // bossCellMult 1 + flaskDelta 0 + eliteChanceMult 1 ⇒ byte-identical to today (the identity). The run
+    // stores bossCellMult (threaded to every scaleAtDepth/scaleBossSpec fold) + eliteChanceMult (multiplied
+    // into the elite roll). The flaskDelta is FOLDED into startStats.maxFlasks HERE, BEFORE the run/player seed
+    // from it (the existing flask seam — no new flask wiring), clamped to a >= 1 FLOOR (Decision 4) so a run is
+    // never unwinnable. startStats is a FRESH clone from applyUpgrades (MetaState), so mutating it is safe (it
+    // never touches the frozen BASE_PLAYER_STATS).
+    const tier = this.meta.startTier()
+    this.eliteChanceMult = tier.eliteChanceMult
+    startStats.maxFlasks = Math.max(1, startStats.maxFlasks + tier.flaskDelta) // the >= 1 flask floor (Decision 4).
+
+    // ── RunState (design §6.4/§6.5, Decision 44/46/60; meta-progression §6.6, Decision 10) ── ONE RunState
+    // OWNS the active run: the seed chain, the biome index + per-biome level counter, the depth, the carried HP,
+    // the currencies, the run-only scroll mults, and the equipped weapon id. Seeded from startStats so the
+    // carried maxHp/hp + starting weapon + flask count reflect the META upgrades + the tier (review MAJOR — the
+    // HP-carry/upgrade reconciliation: RunState.maxHp/hp are minted from the UPGRADED maxHp, so the single
+    // create()-time player sync below is consistent). tier.bossCellMult is passed so the run OWNS the tier
+    // multiplier (RunState.bossCellMult — the single source the fold sites read; no duplicate scene copy, DRY).
+    // startedAt is captured HERE (purity stays in RunState). scene.start('Game') fully re-creates the scene per
+    // run, so a fresh RunState is minted each run.
+    this.runState = createRunState(this.runSeed, this.time.now, startStats, tier.bossCellMult)
+
+    // ── Per-run RESOLVED pools (meta-progression §6.7, Decision 6, AC7) ── compute the unlocked-blueprint set +
+    // the three draw pools ONCE here (the off-the-pin discipline — these are pure resolvers, no RNG, no level
+    // perturbation). With NO blueprints unlocked each pool === the pre-slice tables (a default run draws from the
+    // identical rows as today — the identity, AC11). A banked blueprint widens the matching pool for THIS run.
+    this.unlockedBlueprints = new Set(this.meta.getBlueprints())
+    this.weaponPool = runWeaponPool(this.unlockedBlueprints)
+    this.skillPool = runSkillPool(this.unlockedBlueprints)
+    this.mutationPool = runMutationPool(this.unlockedBlueprints)
 
     // ── Clear/seed the cross-scene registry BEFORE the first _emitHud (review MINOR — stale leak) ──
     // The registry (depth/biomeName/HP) persists across scenes, so a replayed run could briefly show
@@ -543,7 +607,9 @@ export class GameScene extends Phaser.Scene {
     // §6.5/§6.6.4 discipline) and then scaleSpec()s THAT archetype by scaleAtDepth(depth) — a NEW spec
     // per spawn, never mutating the shared config spec (the aliasing bug Decision 45 avoids). Patrol
     // bounds come FROM the generator (Decision 41 — the OWNING run's world span).
-    const scale = scaleAtDepth(this.runState.depth)
+    // meta-progression §6.7 (Decision 10) — pass the run's Boss-Cell multiplier so a higher tier spawns
+    // tankier/denser enemies (the curve is GLOBALLY lifted; bossCellMult 1 = the identity scalars).
+    const scale = scaleAtDepth(this.runState.depth, this.runState.bossCellMult)
     const archetypeRng = mulberry32((desc.seed ^ 0xa11ce5 ^ this.runState.depth) >>> 0) // off-the-pin RNG.
     // ── ELITE roll RNG (§6.11, Decision 77, AC64; round-3 weighted set) ── a SEPARATE off-the-pin seeded
     // RNG (a distinct mix constant so the elite roll doesn't correlate with the archetype pick) — a run
@@ -604,6 +670,12 @@ export class GameScene extends Phaser.Scene {
     // ledge — the risk/reward payoff for taking the detour. Sourced SCENE-SIDE off the level seed (NOT a
     // generator pickup — the level pin stays intact, the weapon-pickup discipline). No-op if no branch.
     this._placeBranchReward(desc)
+
+    // ── Sparse BLUEPRINT drop (meta-progression §6.7, Decision 6/7, AC9) ── a RARE per-level chance to drop ONE
+    // locked-blueprint pickup, sourced SCENE-SIDE off the level seed (NOT the generator — the level pin stays
+    // intact, the weapon-pickup discipline). Collecting it records the id on runState.blueprints (run-only);
+    // bankRun merges it at run end. No-op when no blueprints remain locked (all unlocked / already carried).
+    this._maybePlaceBlueprintPickup(desc)
 
     // ── Door (the exit, Decision 40) ── overlap fires _onDoorOverlap → _nextLevel (guarded).
     this.door = new Door(this, desc.exit, biome.colors.exit, () => this._nextLevel())
@@ -698,7 +770,8 @@ export class GameScene extends Phaser.Scene {
     const biome = this.runState.biome()
     const spec = BOSSES[biome.miniboss as string]
     if (!spec) return // defensive — an unknown id degrades to no miniboss (KISS, never throws).
-    const bossSpec = scaleBossSpec(spec, scaleAtDepth(this.runState.depth))
+    // meta-progression §6.7 (Decision 10) — tier-scale the miniboss too (tankier + harder-hitting at a higher tier).
+    const bossSpec = scaleBossSpec(spec, scaleAtDepth(this.runState.depth, this.runState.bossCellMult))
     // Place it near the exit ledge (the guardian of the way out), feet on the exit platform. A miniboss is a
     // big body, so spawn its center where the exit door sits — the floor/platform collider settles it.
     const spawnX = desc.exit.x
@@ -783,7 +856,9 @@ export class GameScene extends Phaser.Scene {
     // scaleBossSpec (NOT the enemy scaleSpec) folds maxHp + every attack's damage by the curve so a
     // deeper boss is tankier AND hits harder (review MAJOR — the honest boss-scaling fold). The boss
     // draws its slam/dash from enemyHitboxes + its volley from enemyProjectilePool (Decision 64/65).
-    const bossSpec = scaleBossSpec(BOSSES[bossId], scaleAtDepth(this.runState.depth))
+    // meta-progression §6.7 (Decision 10) — tier-scale the finale boss (the DEEPEST fight; a higher tier makes
+    // it tankier + hits harder, exactly as the curve already makes a deep boss tankier — bossCellMult 1 = identity).
+    const bossSpec = scaleBossSpec(BOSSES[bossId], scaleAtDepth(this.runState.depth, this.runState.bossCellMult))
     this.boss = new Boss(this as any, desc.bossSpawn!.x, desc.bossSpawn!.y, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
       minX: TILE_SIZE * 1.5,
       maxX: desc.worldWidth - TILE_SIZE * 1.5,
@@ -862,7 +937,15 @@ export class GameScene extends Phaser.Scene {
     if (this.gameOver) return
     this.gameOver = true
     this.runState.hp = this.player.hp // final carried-HP snapshot (kept consistent; summary ignores it).
-    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth }) // the ONE bankRun writer.
+    // The ONE bankRun writer (cells + bestDepth + run blueprints + the tier unlock). meta-progression §6.7
+    // (Decision 3, AC5/AC9): a COMPLETED run (boss kill) UNLOCKS the next tier (completedAtTier = the run's
+    // selected tier) AND banks any blueprints collected this run. gold/scrolls are run-only (permadeath).
+    this.meta.bankRun({
+      cells: this.runState.cells,
+      depth: this.runState.depth,
+      blueprints: this.runState.blueprints,
+      completedAtTier: this.meta.getSelectedTier(),
+    })
     this._clearBossHud() // drop the boss HP bar so it never persists into the next run (review MINOR).
     // A short victory flourish (freeze/flash) then hand off to Victory with the run summary.
     this.hitstopTimer = 0.2
@@ -949,8 +1032,15 @@ export class GameScene extends Phaser.Scene {
     this.runState.hp = this.player.hp // final carried-HP snapshot (kept consistent; summary ignores it).
     // Bank the run's Cells + best depth to the PERSISTENT meta ONCE (§6.5, Decision 59, AC51) — gold/
     // scrolls are run-only and simply NOT passed (permadeath loses them). Under the gameOver guard so it
-    // fires exactly once per run. The summary carries cellsBanked for GameOver's readout.
-    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
+    // fires exactly once per run. The summary carries cellsBanked for GameOver's readout. meta-progression
+    // §6.7 (Decision 3): the Door-completion path is ALSO a COMPLETED run (a future non-boss final biome) — it
+    // unlocks the next tier + banks run blueprints, mirroring _onBossDefeated (DRY — both are completion edges).
+    this.meta.bankRun({
+      cells: this.runState.cells,
+      depth: this.runState.depth,
+      blueprints: this.runState.blueprints,
+      completedAtTier: this.meta.getSelectedTier(),
+    })
     this.sfx.bossDefeat() // audio §6.3 (AC5) — a win flourish on a completed run (the gold "RUN COMPLETE" path).
     this.scene.start('GameOver', this.runState.summary(this.time.now, true, this.runSeed))
   }
@@ -1090,7 +1180,13 @@ export class GameScene extends Phaser.Scene {
   // same elites AND the same affix per elite (determinism — AC47). Two draws (the gate, then the pick) keep
   // the affix deterministic given the seed; both come off the dedicated eliteRng thread (off the level pin).
   _rollElite(rng: RNG): EliteAffixSpec | null {
-    if (rng() >= ELITE_CHANCE) return null // not an elite this spawn (the common case — identity).
+    // meta-progression §6.7 (Decision 8) — the tier's eliteChanceMult RAISES the effective elite chance (more
+    // affixed enemies at a higher tier). Compared as ELITE_CHANCE × mult (clamped to 1 so it can't exceed
+    // certainty). On the MVP tiers eliteChanceMult is 1 → this is BYTE-IDENTICAL to the pre-slice gate (the
+    // gate consumes the SAME one rng() draw, the threshold is unchanged) — the identity. The pick below is
+    // unchanged so a run still replays the same affix per elite.
+    const eliteChance = Math.min(1, ELITE_CHANCE * (this.eliteChanceMult || 1))
+    if (rng() >= eliteChance) return null // not an elite this spawn (the common case — identity).
     const total = ELITE_AFFIXES.reduce((s, e) => s + (e.w || 1), 0)
     let r = rng() * total
     for (const entry of ELITE_AFFIXES) {
@@ -1260,7 +1356,10 @@ export class GameScene extends Phaser.Scene {
       // The blast origin is the attacker; the target's away-direction shove comes from resolveHit's geometry.
       const result = resolveHit({ cx: x, facing: dx >= 0 ? 1 : -1 }, target.attackerShape, swing, { allowBackstab: false })
       target.onHit(result)
-      target.applyStatus(this._scaleStatus(status)) // the skill's optional status (freeze/burn), scaled by Venom.
+      // The skill's optional status (freeze/burn), scaled by Venom/Virulent, applied through the SAME helper as
+      // the melee/projectile/spread paths so the onset cue (AC8) fires uniformly for EVERY status-application
+      // path (DRY — _applyHitStatus guards null spec + !target.dead, so a no-status skill stays a no-op/identity).
+      this._applyHitStatus(target, this._scaleStatus(status))
       this.effects.hit(tx, ty, { damage: result.damage })
       this.sfx.hit({ damage: result.damage }) // the impact cue (throttled in the façade for a multi-target blast).
     }
@@ -1284,7 +1383,9 @@ export class GameScene extends Phaser.Scene {
   _maybePlaceSkillPickup(desc: LevelDescription): void {
     const rng = mulberry32((desc.seed ^ 0x5217115) >>> 0) // distinct mix from the weapon/shop/branch RNGs.
     if (rng() >= SKILL_PICKUP_CHANCE) return
-    const skillId = SKILLS[Math.floor(rng() * SKILLS.length)].id
+    // Draws from the per-run RESOLVED skill pool (meta-progression §6.7, Decision 6) — === the 5 starters for a
+    // default run (the identity), widened by a banked skill blueprint (the Shockwave).
+    const skillId = this.skillPool[Math.floor(rng() * this.skillPool.length)].id
     const spot =
       desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
       desc.pickups[0] ||
@@ -1428,6 +1529,11 @@ export class GameScene extends Phaser.Scene {
       // ── Predator mutation (build-&-replay §6.3, AC3) ── heal a flat amount on each kill (0 = no mutation →
       // no-op, the identity; heal() no-ops at full HP / dead). The ONE site this new live-read field is read.
       if (this.player.onKillHealAmount > 0) this.player.heal(this.player.onKillHealAmount)
+      // ── Hemorrhage spread-on-kill (affliction-synergy §6.6, Decision 5, AC5) ── an afflicted-enemy death
+      // spreads its dominant DoT to the nearest pack members. Early-returns unless spreadAffliction is armed
+      // AND the dying enemy carries a live DoT (the identity — no-op for a normal run). KILL-only (this hook
+      // only fires on a real _die()), so there is no chain explosion. `enemy` is captured in this closure.
+      if (this.runState.spreadAffliction) this._spreadAffliction(enemy)
       this.sfx.enemyDie() // audio §6.3 (AC2) — the death crumple (throttled in the façade for a multi-kill frame).
     }
     // ── Cells/loot drop hook (§6.5, Decision 54, AC48) ── on death the Enemy fires this with the
@@ -1466,7 +1572,13 @@ export class GameScene extends Phaser.Scene {
     const want = Math.min(atk.count ?? 1, Math.max(0, maxAdds - liveAdds))
     if (want <= 0) return // already at the live-add cap — the summon fizzles (the snowball guard).
     const base = ENEMY_SPECS[atk.spec as string] || ENEMY_SPECS.grunt
-    const spec = scaleSpec(base, scaleAtDepth(this.runState.depth))
+    // ── BOSS-CELL TIER (meta-progression §6.7, Decision 10, AC8 — review fix) ── summoned boss adds are an
+    // enemy-spawn fold site, so they MUST carry the run's Boss-Cell tier exactly like the room-enemy spawn
+    // loop (611), the miniboss (773), and the finale boss (860). The boss arena has NO normal room enemies,
+    // so these adds are the ONLY non-boss enemies in the finale — at a high tier the boss is buffed but its
+    // reinforcements must scale too, or the adds spawn at tier-0 strength (strictly weaker than every other
+    // enemy that run). bossCellMult 1 = tier 0 = byte-identical to before this slice (the identity).
+    const spec = scaleSpec(base, scaleAtDepth(this.runState.depth, this.runState.bossCellMult))
     const desc = this.desc
     const minX = TILE_SIZE * 2
     const maxX = (desc ? desc.worldWidth : boss.maxX + TILE_SIZE * 2) - TILE_SIZE * 2
@@ -1486,9 +1598,11 @@ export class GameScene extends Phaser.Scene {
   _maybePlaceWeaponPickup(desc: LevelDescription): void {
     const rng = mulberry32((desc.seed ^ 0x5eed1234) >>> 0)
     if (rng() >= WEAPON_PICKUP_CHANCE) return
-    // Pick a weapon that ISN'T the currently equipped one (a meaningful swap), else any.
-    const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
-    const pool = choices.length ? choices : WEAPON_PICKUP_POOL
+    // Pick a weapon that ISN'T the currently equipped one (a meaningful swap), else any. Draws from the per-run
+    // RESOLVED pool (meta-progression §6.7, Decision 6) — starters ∪ unlocked blueprints; === the 4 starters
+    // for a default run (the identity), widened by a banked weapon blueprint (the Glaive).
+    const choices = this.weaponPool.filter((id) => id !== this.runState.weaponId)
+    const pool = choices.length ? choices : this.weaponPool
     const weaponId = pool[Math.floor(rng() * pool.length)]
     // Enrichment round-2 — roll a weapon AFFIX off the SAME level RNG (deterministic; a run replays the same
     // affixed loot). Stamped on the pickup so collection folds + equips the modified weapon (the build engine).
@@ -1496,6 +1610,23 @@ export class GameScene extends Phaser.Scene {
     // Place it at a spawn spot away from the entrance (the first pickup point, or the level midpoint).
     const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
     this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId, weaponAffixId })
+  }
+
+  // ── _maybePlaceBlueprintPickup(desc) (meta-progression §6.7, Decision 6/7, AC9) ── deterministically (off
+  // the level seed) maybe drop ONE locked-blueprint pickup. Off a fresh mulberry32 with a DISTINCT mix constant
+  // (so it doesn't correlate with the weapon/skill/shop/branch rolls) — NOT on the generator's pinned draw, so
+  // the level pin stays intact (the SAME off-the-pin discipline as the weapon pickup). Only LOCKED blueprints
+  // (not unlocked in the meta AND not already carried this run) are worth dropping — so a player never re-finds
+  // one they have. Placed at the level's first pickup spot (or the entrance) so it's reachable on the path.
+  _maybePlaceBlueprintPickup(desc: LevelDescription): void {
+    // The droppable set: blueprints neither already unlocked (meta) nor already collected this run (runState).
+    const locked = BLUEPRINTS.filter((b) => !this.unlockedBlueprints.has(b.id) && !this.runState.blueprints.includes(b.id))
+    if (locked.length === 0) return // nothing left to find → no drop (the all-unlocked no-op).
+    const rng = mulberry32((desc.seed ^ 0xb1ce9111) >>> 0) // distinct mix from the weapon/skill/shop/branch RNGs.
+    if (rng() >= BLUEPRINT_PICKUP_CHANCE) return
+    const bp = locked[Math.floor(rng() * locked.length)]
+    const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'blueprint', { blueprintId: bp.id })
   }
 
   // ── _maybePlaceShop(desc) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── deterministically (off the
@@ -1543,8 +1674,8 @@ export class GameScene extends Phaser.Scene {
     if (roll < 0.34) {
       // A weapon to try (the build-defining reward) — a weapon NOT currently equipped (a real swap), with a
       // ROLLED affix (round-2 — the treasure-branch weapon is the prime spot for an exciting modified weapon).
-      const choices = WEAPON_PICKUP_POOL.filter((id) => id !== this.runState.weaponId)
-      const pool = choices.length ? choices : WEAPON_PICKUP_POOL
+      const choices = this.weaponPool.filter((id) => id !== this.runState.weaponId) // the per-run resolved pool (§6.7).
+      const pool = choices.length ? choices : this.weaponPool
       const weaponId = pool[Math.floor(rng() * pool.length)]
       const weaponAffixId = this._rollWeaponAffix(rng)
       this.pickupPool.acquire(x, y, 'weapon', { weaponId, weaponAffixId })
@@ -1559,7 +1690,7 @@ export class GameScene extends Phaser.Scene {
       // HEAD) so the weapon (<0.34), scroll (<0.58) and heal (≥0.8) outcomes — and their rng() draw counts —
       // stay BYTE-IDENTICAL to pre-skills HEAD for the same seed. Only the gold band shrinks (0.58..0.8 →
       // 0.68..0.8) to make room additively; the others are untouched.
-      const skillId = SKILLS[Math.floor(rng() * SKILLS.length)].id
+      const skillId = this.skillPool[Math.floor(rng() * this.skillPool.length)].id // the per-run resolved pool (§6.7).
       this.pickupPool.acquire(x, y, 'skill', { skillId })
     } else if (roll < 0.8) {
       // A fat gold payout (5× a normal gold pickup) — feeds the in-run shop economy (the gold sink).
@@ -1583,6 +1714,16 @@ export class GameScene extends Phaser.Scene {
   _hurtPlayer(result: HitResult): void {
     const mult = this.roomDamageTakenMult ?? 1
     if (mult !== 1) result.damage = Math.round(result.damage * mult)
+    // ── Parry cue (per-weapon-movesets §6.6, Decision 5, AC8) ── the parry window is still LIVE at this instant
+    // (onHit consumes it). ALL four player-hit sites funnel through here (DRY — one place), so checking the live
+    // window here pops the "PARRY!" cue + a bright flash for ANY parried hit (enemy melee / contact / projectile
+    // / hazard). The Player's onHit does the actual NEGATION (no HP, no knockback) + arms the riposte. A parried
+    // ENEMY PROJECTILE is simply consumed by that negated onHit (no deflect-back — YAGNI). With V never pressed
+    // parryTimer is 0 → this branch is skipped and _hurtPlayer is byte-identical to before (the identity, AC10).
+    if (this.player.parryTimer > 0) {
+      this.effects.parry(this.player.body.center.x, this.player.body.center.y)
+      this.cameras.main.flash(90, 90, 200, 255) // a brief cyan flash marks the perfect parry (primitives only).
+    }
     this.player.onHit(result)
   }
 
@@ -1605,11 +1746,33 @@ export class GameScene extends Phaser.Scene {
       allowBackstab: true,
       damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
     })
+    // ── Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) ── _mutationDamageMult folded the riposte
+    // bump into `result` above; zero the buff now so it's SPENT on THIS connecting hit (one-shot). 0 by default
+    // → no-op (identity, AC10).
+    this.player.riposteTimer = 0
     enemy.onHit(result)
-    // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the EQUIPPED melee weapon's
-    // status (spear → bleed, hammer → stun) to the struck enemy, scaled by the run-only status-duration
-    // mult (Venom). Null for a weapon with no status tag (sword) → no-op (identity).
-    enemy.applyStatus(this._scaleStatus(this.player.equippedWeapon.status))
+    // ── Charged hammer AoE (per-weapon-movesets §6.6, Decision 3, AC4) ── on the FIRST connecting hit of a
+    // charged smash the Player has a pending AoE; reuse _radialDamage (NO new combat math — the SAME primitive
+    // the blast skill uses) to smash + LONG-stun (the armor-break stagger) every enemy/boss within the radius,
+    // radiating from where the smash landed. result.damage already includes the ×charge.damageMult (baked into
+    // the swing row), so the shockwave hits as hard as the primary. null on every plain/tap hit → no-op (AC10).
+    const aoe = this.player.consumePendingAoe()
+    if (aoe) {
+      this._radialDamage(
+        enemy.body.center.x,
+        enemy.body.center.y,
+        aoe.radius,
+        result.damage,
+        hb.swing.knockback,
+        { kind: 'stun', duration: aoe.stun },
+      )
+    }
+    // ── STATUS (§6.13, Decision 79, AC66; Venom round 3; Virulent affliction-synergy) ── apply the EQUIPPED
+    // melee weapon's status (spear → bleed, hammer → stun, a Searing affix → burn) to the struck enemy,
+    // scaled by the run-only duration/tick mults. Null for a weapon with no status tag (sword) → no-op
+    // (identity). Compute isNew BEFORE applying (Decision 4) so the application cue fires ONCE on onset (a NEW
+    // entry), never on a refresh — and pop it at THIS site (the scene already owns effects + the victim center).
+    this._applyHitStatus(enemy, this._scaleStatus(this.player.equippedWeapon.status))
     // ── LIFESTEAL (Vampirism scroll round 3 + Vampiric weapon affix round-2) ── heal a fraction of the MELEE
     // damage dealt. The scroll lifesteal (player.lifestealFrac) and the EQUIPPED weapon's affix lifesteal
     // (equippedWeapon.affixLifestealFrac — 0 on a plain/unaffixed weapon) ADD (a Vampiric weapon on a
@@ -1626,16 +1789,20 @@ export class GameScene extends Phaser.Scene {
     this.sfx.hit({ damage: result.damage, crit: result.isBackstab })
   }
 
-  // ── _scaleStatus(spec) (Enrichment round 3 — the Venom scroll) ── return a status spec whose `duration`
-  // is scaled by the run-only scrollStatusDurationMult (mirrored on the player). Returns the spec UNCHANGED
-  // when the mult is 1 (the identity — no scroll) or the spec is null (a no-status weapon), so a normal run
-  // is byte-identical. A NEW shallow-clone is returned when scaled (never mutating the shared weapon spec —
-  // the aliasing safety every fold keeps). applyStatus reads `duration`, so scaling it lengthens the DoT/stun.
+  // ── _scaleStatus(spec) (Enrichment round 3 — Venom; affliction-synergy §6.6 — Virulent) ── return a status
+  // spec scaled by the run-only mults (mirrored on the player): `duration` × statusDurationMult (Venom) AND a
+  // damaging status's `tickDmg` × statusTickMult (Virulent — "ticks harder"). Returns the spec UNCHANGED when
+  // BOTH mults are 1 (the identity — no scroll/mutation) or the spec is null (a no-status weapon), so a normal
+  // run is byte-identical (AC4/AC10). A NEW shallow-clone is returned when scaled (never mutating the shared
+  // weapon spec — the aliasing safety every fold keeps). applyStatus reads duration + tickDmg.
   _scaleStatus(spec: any): any {
     if (!spec) return spec
-    const mult = this.player.statusDurationMult ?? 1
-    if (mult === 1) return spec
-    return { ...spec, duration: (spec.duration ?? 0) * mult }
+    const dur = this.player.statusDurationMult ?? 1
+    const tick = this.player.statusTickMult ?? 1
+    if (dur === 1 && tick === 1) return spec
+    const scaled = { ...spec, duration: (spec.duration ?? 0) * dur }
+    if (spec.tickDmg) scaled.tickDmg = spec.tickDmg * tick
+    return scaled
   }
 
   // ── _mutationDamageMult(target) (build-&-replay design §6.3, Decision 4, AC3) ── the per-hit MUTATION damage
@@ -1655,7 +1822,82 @@ export class GameScene extends Phaser.Scene {
     if (this.player.firstHitBonusMult !== 1 && target && target.hp >= target.maxHp) {
       mult *= this.player.firstHitBonusMult
     }
+    // ── Hemorrhage vs-afflicted fold (affliction-synergy §6.6, Decision 2, AC3) ── ×damage when the struck
+    // target carries ANY live affliction (bleed/poison/burn/stun — a stunned enemy is afflicted too, so the
+    // bonus reads while you wail on a stun-locked target). Guarded by !==1 so it's a no-op when no Hemorrhage
+    // is armed → byte-identical (identity, AC10). Composes multiplicatively with the perks above.
+    if (
+      this.player.vsAfflictedDamageMult !== 1 &&
+      target && target.statuses &&
+      (hasStatus(target.statuses, 'bleed') ||
+        hasStatus(target.statuses, 'poison') ||
+        hasStatus(target.statuses, 'burn') ||
+        hasStatus(target.statuses, 'stun'))
+    ) {
+      mult *= this.player.vsAfflictedDamageMult
+    }
+    // ── Riposte fold (per-weapon-movesets §6.6, Decision 5, AC8) ── ×damage on the next connecting hit after a
+    // SUCCESSFUL parry (player.riposteDamageMult is RIPOSTE_DAMAGE_MULT while the riposte buff is live, else 1).
+    // The CALLER (_onPlayerHitEnemy / _onProjectileHitEnemy) zeroes player.riposteTimer after a connecting hit
+    // so the buff is SPENT once (a one-shot bump, not a decaying aura). 1× when no parry is live → identity (AC10).
+    mult *= this.player.riposteDamageMult
     return mult
+  }
+
+  // ── _applyHitStatus(target, spec) (affliction-synergy §6.6, Decision 4, AC8) ── apply an already-scaled
+  // status spec to a struck enemy/boss AND pop the one-shot application cue ONCE on onset. We compute isNew
+  // BEFORE the apply (a status absent now-but-present-after is a NEW application — a refresh is not), so the
+  // cue marks the ONSET only (a re-hit on an already-afflicted enemy does NOT re-pop — KISS). This confines
+  // the "is this new?" diff to the hit site (the scene already owns effects + the victim center), keeping
+  // Enemy/Boss applyStatus byte-identical (no effects coupling). null spec (a no-status weapon) → no-op
+  // (the identity — byte-identical to before this slice).
+  _applyHitStatus(target: Enemy | Boss, spec: any): void {
+    if (!spec) return
+    const isNew = !hasStatus(target.statuses, spec.kind)
+    target.applyStatus(spec)
+    if (isNew && !target.dead) {
+      this.effects.statusApply(target.body.center.x, target.body.center.y, spec.kind)
+    }
+  }
+
+  // ── _spreadAffliction(dying) (affliction-synergy §6.6, Decision 5, AC5) ── the Hemorrhage spread-on-kill:
+  // when an enemy with a live DAMAGING affliction dies, copy a FRESH (reduced-duration) spec of its dominant
+  // damaging kind to up to SPREAD_MAX_TARGETS nearest live OTHER enemies within SPREAD_RADIUS. KILL-only
+  // (called from the onDeath hook) — the spread application never triggers another death this frame, so there
+  // is no chain explosion (stun does NOT spread — KISS). The spread runs through _scaleStatus so a Virulent/
+  // Toxic build's mults still apply (consistent). Deterministic (no RNG — nearest-N by distance), so it never
+  // perturbs the seed chain / level pin. Bosses are the SEPARATE this.boss reference (not in this.enemies), so
+  // a boss-kill spread is a harmless no-op (a boss death has no "nearby pack" — KISS).
+  _spreadAffliction(dying: Enemy): void {
+    if (!this.runState.spreadAffliction) return
+    // Pick the dominant DAMAGING kind (stun never spreads). No live DoT → nothing to spread (identity).
+    const kind = hasStatus(dying.statuses, 'burn')
+      ? 'burn'
+      : hasStatus(dying.statuses, 'bleed')
+        ? 'bleed'
+        : hasStatus(dying.statuses, 'poison')
+          ? 'poison'
+          : null
+    if (!kind) return
+    const cx = dying.body.center.x
+    const cy = dying.body.center.y
+    const r2 = SPREAD_RADIUS * SPREAD_RADIUS
+    // Gather live OTHER enemies in range, nearest-first (deterministic — no RNG), then take the nearest N.
+    const targets: { e: Enemy; d2: number }[] = []
+    for (const e of this.enemies) {
+      if (e === dying || e.dead || e.removed || !e.isHittable()) continue
+      const dx = e.body.center.x - cx
+      const dy = e.body.center.y - cy
+      const d2 = dx * dx + dy * dy
+      if (d2 > r2) continue
+      targets.push({ e, d2 })
+    }
+    targets.sort((a, b) => a.d2 - b.d2)
+    for (let i = 0; i < targets.length && i < SPREAD_MAX_TARGETS; i++) {
+      // A FRESH reduced-duration spec (the spread tax), run through _scaleStatus so the build's mults apply.
+      // _applyHitStatus pops the onset cue per NEW application (Decision 5 — the cascade reads).
+      this._applyHitStatus(targets[i].e, this._scaleStatus(SPREAD_SPEC[kind]))
+    }
   }
 
   // ── Projectile → enemy hit (§6.5, Decision 62, review MAJOR) ── a SEPARATE handler from the melee
@@ -1676,19 +1918,28 @@ export class GameScene extends Phaser.Scene {
       allowBackstab: true,
       damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
     })
+    // Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) — _mutationDamageMult folded the bump into
+    // `result`; zero it so the buff is SPENT on this connecting shot (one-shot). 0 by default → no-op (AC10).
+    this.player.riposteTimer = 0
     enemy.onHit(result)
-    // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the firing weapon's status
-    // stamped on the shot (the bow's poison) to the struck enemy, scaled by the run-only status-duration
-    // mult (Venom). null for a no-status weapon → no-op (identity). It's read off the PROJECTILE (pj.status,
-    // stamped at fire) so a mid-flight weapon swap doesn't change what the shot does.
-    enemy.applyStatus(this._scaleStatus(pj.status))
+    // ── STATUS (§6.13, Decision 79, AC66; Venom round 3; Virulent affliction-synergy) ── apply the firing
+    // weapon's status stamped on the shot (the bow's poison, a Searing affix's burn) to the struck enemy,
+    // scaled by the run-only duration/tick mults. null for a no-status weapon → no-op (identity). Read off the
+    // PROJECTILE (pj.status, stamped at fire) so a mid-flight weapon swap doesn't change what the shot does.
+    // The application cue fires ONCE on a NEW entry (Decision 4 — isNew computed before applying).
+    this._applyHitStatus(enemy, this._scaleStatus(pj.status))
     this.effects.hit(enemy.body.center.x, enemy.body.center.y, {
       damage: result.damage,
       isBackstab: result.isBackstab,
     })
     // audio §6.3 (AC2) — the projectile impact, same timbre as melee (one "I connected" sound, DRY).
     this.sfx.hit({ damage: result.damage, crit: result.isBackstab })
-    this.projectilePool.release(projRect) // KISS: the shot dies on first hit (no pierce).
+    // ── Pierce-aware release (per-weapon-movesets §6.6, Decision 7, AC7) ── decrement the shot's pierceLeft;
+    // release ONLY when it reaches 0. A normal (tap) shot's pierceLeft is 1 → released on the first hit (the
+    // dies-on-first-hit identity, AC10). A CHARGED bow shot's pierceLeft is pierce.maxTargets → it survives +
+    // passes THROUGH a line of distinct enemies (the per-shot hitSet already dedups, so it never re-hits one).
+    pj.pierceLeft--
+    if (pj.pierceLeft <= 0) this.projectilePool.release(projRect)
   }
 
   // ── ENEMY projectile → player hit (§6.6.3, Decision 65, review BLOCKER/MAJOR) ── the INVERSE of
@@ -1751,6 +2002,15 @@ export class GameScene extends Phaser.Scene {
         if (pk.skillId) this._acquireSkill(pk.skillId)
         break
       }
+      case 'blueprint': {
+        // meta-progression §6.7 (Decision 7, AC9) — record the blueprint id on runState (RUN-ONLY — it's banked
+        // to the meta at run end via bankRun, on BOTH the death + clear paths, like a Cell). Dedup so a re-touch
+        // (shouldn't happen — the drop is gated to LOCKED ids) is a no-op.
+        if (pk.blueprintId && !this.runState.blueprints.includes(pk.blueprintId)) {
+          this.runState.blueprints.push(pk.blueprintId)
+        }
+        break
+      }
     }
     // A small collect pop (reuse the spark pool — no new allocation).
     this.effects.hit(pickupRect.body.center.x, pickupRect.body.center.y, { damage: 0 })
@@ -1778,6 +2038,12 @@ export class GameScene extends Phaser.Scene {
     this.player.onKillHealAmount = this.runState.onKillHealAmount
     this.player.lowHpDamageMult = this.runState.lowHpDamageMult
     this.player.firstHitBonusMult = this.runState.firstHitBonusMult
+    // ── Affliction-synergy live-read mirrors (affliction-synergy §6.6, AC9) ── mirror the two player-read
+    // scalars so the hit-site folds see the armed values. vsAfflictedDamageMult → _mutationDamageMult;
+    // statusTickMult → _scaleStatus. spreadAffliction is read off runState directly in onDeath (no mirror).
+    // Both default to the neutral identity on RunState, so a run with no synergy leaves the player as before.
+    this.player.vsAfflictedDamageMult = this.runState.vsAfflictedDamageMult
+    this.player.statusTickMult = this.runState.statusTickMult
     const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus
     const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
     this.player.maxHp = newMax
@@ -1954,7 +2220,10 @@ export class GameScene extends Phaser.Scene {
   // given the RNG, so a run replays the same 3 offers (AC2). The shuffle uses the SAME mulberry32 thread the
   // caller seeded off the run seed ⊕ biome salt — off the generator's pinned draw.
   _pickMutationOffers(rng: RNG, want: number): typeof MUTATION_ORDER {
-    const pool = MUTATION_ORDER.slice() // a COPY so the shuffle never mutates the shared config table.
+    // Shuffle a COPY of the per-run RESOLVED mutation pool (meta-progression §6.7, Decision 6) — === the
+    // pre-slice MUTATION_ORDER for a default run (the identity, so the same seed offers the same 3), widened by
+    // a banked mutation blueprint (the Glass Cannon). Never mutates the shared config table (DRY safety).
+    const pool = this.mutationPool.slice()
     for (let i = pool.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1))
       const tmp = pool[i]
@@ -2080,7 +2349,10 @@ export class GameScene extends Phaser.Scene {
     // Bank the run's Cells + best depth to the PERSISTENT meta ONCE (§6.5, Decision 59, AC51). The
     // run's gold/scrolls are DISCARDED (run-only — permadeath). Under the gameOver guard so it fires
     // exactly once. Banking here (not GameOver) keeps the single writer next to the live RunState.
-    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
+    // meta-progression §6.7 (Decision 3/7, AC9): a death STILL banks blueprints collected this run (like
+    // Cells — generous + consistent), but does NOT unlock a tier (completedAtTier omitted ⇒ null — the spec's
+    // "clearing a run unlocks a higher tier", not dying).
+    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth, blueprints: this.runState.blueprints })
     this.hitstopTimer = 0.25
     this.cameras.main.flash(180, 200, 40, 40)
     this.cameras.main.shake(220, 0.01)

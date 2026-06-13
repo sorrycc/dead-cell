@@ -57,6 +57,10 @@ export interface SkillSpec {
   // ── any kind ── an OPTIONAL status applied to a struck enemy (volley shot / blast target / turret shot),
   // the SAME WeaponStatus shape weapons use (status.js applies it). Absent ⇒ no status (the identity).
   status?: WeaponStatus
+  // ── BLUEPRINT tag (meta-progression §6.5, Decision 6, AC6) ── absent/undefined ⇒ a STARTER skill (always in
+  // the run pool — the identity). A non-empty id ⇒ a GATED skill that joins the pool ONLY when that blueprint is
+  // unlocked (runSkillPool filters on it). EVERY current skill is a starter; only NEW rows this slice carry a tag.
+  blueprint?: string
 }
 
 // ── SKILLS (the catalog) ── five distinct, genre-faithful skills across the three kinds (Decision 1). Each
@@ -128,6 +132,22 @@ export const SKILLS: SkillSpec[] = [
     fireInterval: 0.7,
     projectile: { speed: 700, damage: 7, knockback: 140, lifetime: 1.2, w: 12, h: 5 },
   },
+  // ── SHOCKWAVE (blast — BLUEPRINT-GATED) (meta-progression §6.5, Decision 6, AC6) ── the NEW run-pool skill
+  // this slice ships behind a blueprint unlock (`blueprint: 'bp_skill_shockwave'`). DEAD config (never offered)
+  // until banked — so a default save's skill pool === the 5 pre-slice starters (the identity, AC11). A heavy
+  // radial KNOCKBACK blast: big damage + a huge shove to clear breathing room (the panic-button bruiser tool).
+  // Reuses the EXISTING 'blast' dispatch verbatim (no new engine — KISS), so once unlocked it just joins the pool.
+  {
+    id: 'shockwave',
+    name: 'Shockwave',
+    desc: 'Heavy radial knockback blast',
+    kind: 'blast',
+    cooldown: 7.0,
+    radius: 170,
+    damage: 22,
+    knockback: 520,
+    blueprint: 'bp_skill_shockwave', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  },
 ]
 
 // id → row lookup (GameScene resolves a carried skillId back to the spec on a level rebuild; the HUD/pickup/
@@ -140,3 +160,12 @@ export const SKILL_ORDER: SkillSpec[] = SKILLS.map((s) => s)
 // The KNOWN skill kinds (the verifier asserts every skill.kind is one of these — a malformed table fails
 // loudly under node, mirroring the boss-attack-kinds + shop-item-kinds + weapon-type checks).
 export const SKILL_KINDS: SkillKind[] = ['volley', 'blast', 'turret']
+
+// ── runSkillPool(unlocked) → the SkillSpecs available given the unlocked-blueprint set (meta-progression §6.5,
+// Decision 6, AC6) ── PURE (node-importable, verifier-swept). ALWAYS the STARTERS (untagged), PLUS any gated row
+// whose blueprint id is unlocked. With an EMPTY set this returns exactly the starter rows === the pre-slice
+// SKILLS (the identity pin — a default save offers the same skills as today). GameScene computes it ONCE in
+// create() from meta.getBlueprints() and the skill-pickup placement draws from it.
+export function runSkillPool(unlocked: ReadonlySet<string>): SkillSpec[] {
+  return SKILLS.filter((s) => !s.blueprint || unlocked.has(s.blueprint))
+}

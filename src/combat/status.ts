@@ -10,7 +10,7 @@
 // = stun) and makes scrolls/shop boosts more interesting — all pure data + a per-frame tick, no new art.
 //
 // THE STATUS SHAPE (a plain object on an entity's `statuses[]` list — Enemy/Player own the list):
-//   kind         — 'bleed' | 'poison' | 'stun' (a known set; the verifier asserts).
+//   kind         — 'bleed' | 'poison' | 'stun' | 'burn' (a known set; the verifier asserts).
 //   timer        — seconds remaining (decays by dt; ≤ 0 ⇒ expired + dropped).
 //   tickInterval — seconds between damage ticks (0/undefined ⇒ a non-damaging status, e.g. 'stun').
 //   tickDmg      — HP per damage tick (0 ⇒ non-damaging).
@@ -20,11 +20,19 @@
 // could be stunned too — wired on Enemy this slice, the genre's "hammer staggers"). tickStatuses reports
 // `stunned` true iff any live status is a 'stun' so the caller can freeze for that window.
 //
+// BURN (affliction-synergy slice, Decision 1): a 4th kind — a damaging DoT that is MECHANICALLY IDENTICAL to
+// bleed/poison (it ticks via the SAME tickDmg/tickInterval path). It is the genre's "ignite": only its
+// tint/cue differ (orange), giving the Searing weapon affix a distinct identity + a 4th legible colour. The
+// tick/expiry/refresh math below is UNCHANGED — it branches on "a damaging status" (tickDmg>0 && tickInterval>0),
+// NOT on the kind name — so burn rides the existing DoT path with zero new math (the load-bearing reason it
+// was safe to widen the kind set).
+//
 // dt BOUNDARY (§6.3): the caller passes the GAMEPLAY dt (0 during hit-stop), so a bleed/poison tick + a
 // stun window both FREEZE with the combat world during the micro-freeze — consistent with every other timer.
 
 // The known status kind tags as a union (the verifier asserts every config status tag is one of these).
-export type StatusKind = 'bleed' | 'poison' | 'stun'
+// 'burn' is a 4th DAMAGING DoT kind (mechanically identical to bleed/poison — see BURN note above).
+export type StatusKind = 'bleed' | 'poison' | 'stun' | 'burn'
 
 // A config status SPEC (data authored in config tables) — duration/tick params optional so a non-damaging
 // status (stun) is valid with just { kind, duration }.
@@ -52,7 +60,7 @@ export interface TickResult {
 
 // The KNOWN status kinds (the verifier asserts every config status tag is one of these — a malformed tag
 // fails loudly under node, mirroring the boss-attack-kinds + shop-item-kinds checks).
-export const STATUS_KINDS: StatusKind[] = ['bleed', 'poison', 'stun']
+export const STATUS_KINDS: StatusKind[] = ['bleed', 'poison', 'stun', 'burn']
 
 // ── makeStatus(spec) → a fresh status instance (PURE) ── from a config status SPEC ({ kind, duration,
 // tickInterval, tickDmg }) build the live runtime object. Defaults keep a non-damaging status (stun) valid

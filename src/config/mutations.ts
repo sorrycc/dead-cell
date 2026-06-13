@@ -32,6 +32,13 @@ export interface MutationRunState extends ScrollRunState {
   onKillHealAmount: number // flat HP healed on each enemy kill (Predator). 0 = neutral.
   lowHpDamageMult: number // ×player damage while below the low-HP threshold (Berserker). 1 = neutral.
   firstHitBonusMult: number // ×player damage vs a FULL-HP enemy — the opener bonus (Assassin). 1 = neutral.
+  // ── Affliction-synergy fields (affliction-synergy design §6.4, AC6/AC9) ── the build-engine hooks a
+  // synergy mutation arms. Each defaults to the neutral identity in createRunState so an empty list = the
+  // identity. Bigger-is-better (vsAfflictedDamageMult/statusTickMult); spreadAffliction is a flag a mutation
+  // may only turn ON (never off) — the verifier's never-weaken sweep asserts exactly that.
+  vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
+  statusTickMult: number // ×applied DoT tickDmg (Virulent — "afflictions tick harder"). 1 = neutral.
+  spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
 }
 
 // The low-HP threshold (fraction of max HP) below which a Berserker mutation's lowHpDamageMult applies.
@@ -45,6 +52,11 @@ export interface MutationSpec {
   name: string
   desc: string
   apply: (run: MutationRunState) => void
+  // ── BLUEPRINT tag (meta-progression §6.5, Decision 6, AC6) ── absent/undefined ⇒ a STARTER mutation (always
+  // in the offer pool — the identity). A non-empty id ⇒ a GATED mutation that joins the pool ONLY when that
+  // blueprint is unlocked (runMutationPool filters on it). EVERY current mutation is a starter; only the NEW
+  // row this slice adds carries a tag — so a default save's 3-of-N offer draws from the same rows as today.
+  blueprint?: string
 }
 
 export const MUTATIONS: MutationSpec[] = [
@@ -132,6 +144,44 @@ export const MUTATIONS: MutationSpec[] = [
       run.flasks += 1
     },
   },
+  // ── Hemorrhage (affliction-synergy §6.4, AC6) ── the AFFLICTION-BUILD damage payoff: +25% damage vs an
+  // afflicted enemy (vsAfflictedDamageMult — hook 1, folded at both hit sites) AND kills SPREAD the dominant
+  // affliction to nearby enemies (spreadAffliction — hook 3, the onDeath spread). Math.max / = true so a
+  // re-pick is a no-op (never-weaken clean): a second Hemorrhage can only re-arm the same values.
+  {
+    id: 'hemorrhage',
+    name: 'Hemorrhage',
+    desc: '+25% damage vs afflicted enemies; kills spread the affliction',
+    apply: (run) => {
+      run.vsAfflictedDamageMult = Math.max(run.vsAfflictedDamageMult, 1.25)
+      run.spreadAffliction = true
+    },
+  },
+  // ── Virulent (affliction-synergy §6.4, AC6) ── afflictions tick 50% HARDER: scales an armed damaging
+  // status's tickDmg (statusTickMult — hook 2, applied in _scaleStatus alongside the duration mult). Stacks
+  // multiplicatively if re-picked (never weakens — *= 1.5 only grows it).
+  {
+    id: 'virulent',
+    name: 'Virulent',
+    desc: 'Afflictions tick 50% harder',
+    apply: (run) => {
+      run.statusTickMult *= 1.5
+    },
+  },
+  // ── Glass Cannon (BLUEPRINT-GATED) (meta-progression §6.5, Decision 6, AC6) ── the NEW run-pool mutation this
+  // slice ships behind a blueprint unlock (`blueprint: 'bp_mutation_glasscannon'`). DEAD config (never offered)
+  // until banked — so a default save's 3-of-N pool === the pre-slice starters (the identity, AC11). The high-risk
+  // payoff perk: +50% all damage (the genre's glass-cannon). Reuses the EXISTING run-only damage multiplier (read
+  // LIVE at both hit sites — DRY, zero new wiring; never-weaken safe — *= 1.5 only grows the bigger-is-better mult).
+  {
+    id: 'glasscannon',
+    name: 'Glass Cannon',
+    desc: '+50% all damage',
+    blueprint: 'bp_mutation_glasscannon', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+    apply: (run) => {
+      run.scrollDamageMult *= 1.5
+    },
+  },
 ]
 
 // id → row lookup (the overlay pick resolves an offered id to its spec to call apply()).
@@ -139,3 +189,12 @@ export const MUTATIONS_BY_ID: Record<string, MutationSpec> = Object.fromEntries(
 
 // The ordered mutation rows (the seeded 3-of-N picker draws distinct entries from this list).
 export const MUTATION_ORDER = MUTATIONS.map((m) => m)
+
+// ── runMutationPool(unlocked) → the MutationSpecs available given the unlocked-blueprint set (meta-progression
+// §6.5, Decision 6, AC6) ── PURE (node-importable, verifier-swept). ALWAYS the STARTERS (untagged), PLUS any
+// gated row whose blueprint id is unlocked. With an EMPTY set this returns exactly the starter rows === the
+// pre-slice MUTATION_ORDER (the identity pin — a default save's 3-of-N draws from the same rows as today).
+// GameScene computes it ONCE in create() from meta.getBlueprints() and _pickMutationOffers shuffles a COPY of it.
+export function runMutationPool(unlocked: ReadonlySet<string>): MutationSpec[] {
+  return MUTATION_ORDER.filter((m) => !m.blueprint || unlocked.has(m.blueprint))
+}

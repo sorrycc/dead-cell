@@ -35,6 +35,11 @@ interface ProjectileContext {
   vy: number
   hitSet: Set<unknown>
   releaseTimer: number
+  // per-weapon-movesets §6.5 (Decision 7, AC7) — how many more DISTINCT-enemy hits this shot survives before it
+  // releases. Mutated on acquire (default 1 → "dies on first hit", the byte-identical identity). A CHARGED bow
+  // shot acquires this = pierce.maxTargets → GameScene's projectile-hit handler decrements it and releases only
+  // when it reaches 0 (the dedup hitSet already prevents re-hitting the same enemy, so it passes through a line).
+  pierceLeft: number
   readonly attackerShape: ProjectileAttackerShape
 }
 
@@ -112,6 +117,7 @@ export class ProjectilePool {
         //        volley arc). Hand-integrated alongside vx so the shot's trajectory is a true 2-D line.
         hitSet: new Set(),
         releaseTimer: 0,
+        pierceLeft: 1, // per-weapon-movesets §6.5 — default 1 (dies on first hit); a charged shot sets > 1.
         // attackerShape: read by GameScene's projectile hit handler — the SHOT's position + dir
         // (review MAJOR — NOT the player's). cx is the live body center; facing is the travel dir. For an
         // aimed/spread shot the horizontal travel sign (vx) is the authoritative facing (so a fan shot
@@ -138,12 +144,17 @@ export class ProjectilePool {
   //   used as-is). When ABSENT the shot keeps the EXACT old behavior (vx = facing·speed, vy = 0) — a
   //   straight bow / shooter shot is byte-identical (the additive identity). The muzzle standoff is placed
   //   ALONG the firing direction so an arcing shot spawns ahead of the attacker on its real trajectory.
+  // `pierce` (per-weapon-movesets §6.5, Decision 7 — optional, trailing): how many DISTINCT-enemy hits the
+  // shot survives before releasing. Defaults to 1 so EVERY existing caller (the bow tap / shooter / boss
+  // volley / turret) is byte-identical — "dies on first hit". A CHARGED bow shot passes pierce.maxTargets so
+  // it threads a line of enemies (the hit handler decrements pierceLeft + releases at 0).
   acquire(
     attacker: ProjectileAttacker,
     spec: ProjectileSpec,
     ownerId: unknown,
     status: WeaponStatus | null = null,
     aim: ProjectileAim | null = null,
+    pierce = 1,
   ): ProjectileRect | null {
     const rect = this._items.find((r) => !r.pj.active)
     if (!rect) return null
@@ -193,6 +204,7 @@ export class ProjectilePool {
     pj.vy = vy
     pj.hitSet.clear() // reuse the SAME Set — clear, never re-allocate (the dedup convention).
     pj.releaseTimer = spec.lifetime
+    pj.pierceLeft = pierce // per-weapon-movesets §6.5 — 1 = dies on first hit (identity); > 1 = pierces a line.
     return rect
   }
 
@@ -242,6 +254,7 @@ export class ProjectilePool {
     rect.pj.status = null // §6.13 — drop the stamped status so a recycled shot never carries a stale one.
     rect.pj.vx = 0 // clear the 2-D velocity so a recycled shot never inherits a stale arc.
     rect.pj.vy = 0
+    rect.pj.pierceLeft = 1 // per-weapon-movesets §6.5 — reset so a recycled shot never inherits a stale pierce.
     const body = rect.body as Phaser.Physics.Arcade.Body
     body.setVelocity(0, 0)
     body.enable = false

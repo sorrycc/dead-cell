@@ -253,7 +253,7 @@ export class Sound {
   pickup(kind: string): void {
     if (!this._gateOk('pickup')) return
     // Per-kind base pitch — distinct enough to tell a cell from gold from a scroll by ear.
-    const base: Record<string, number> = { cell: 720, gold: 880, scroll: 560, weapon: 480, heal: 640 }
+    const base: Record<string, number> = { cell: 720, gold: 880, scroll: 560, weapon: 480, heal: 640, blueprint: 1000 }
     const f = base[kind] ?? 720
     this._tone({ freq: f, type: 'square', dur: 0.1, gain: 0.22, sweepTo: f * 1.6 }) // ascending = "gained".
   }
@@ -287,6 +287,27 @@ export class Sound {
       this._noise({ dur: 0.1, gain: 0.34, type: 'bandpass', freq: 2200 })
       this._tone({ freq: 480, type: 'triangle', dur: 0.1, gain: 0.18, sweepTo: 760 })
     }
+  }
+
+  // ── Per-weapon movesets (per-weapon-movesets §6.6, Decision 5/8) ── parry arm + parry success + charge-ready.
+  // All null-safe (no ctx / muted / throttled → silence) and procedural (no assets), mirroring every other blip.
+
+  // PARRY ARM (AC8) — a rising "ting" when the parry window opens (you committed to the timing read).
+  parry(): void {
+    if (!this._gateOk('parry')) return
+    this._tone({ freq: 700, type: 'triangle', dur: 0.08, gain: 0.2, sweepTo: 1200 })
+  }
+  // PARRY SUCCESS (AC8) — a brighter metallic "clang" + a high ring when a hit is negated in the window (the
+  // satisfying deflect — distinct from a normal hit/hurt so a perfect parry reads by ear).
+  parrySuccess(): void {
+    if (!this._gateOk('parrySuccess')) return
+    this._noise({ dur: 0.07, gain: 0.34, type: 'bandpass', freq: 2600 }) // the metallic clang.
+    this._tone({ freq: 1400, type: 'sine', dur: 0.18, gain: 0.22, sweepTo: 2400, delay: 0.01 }) // the high ring.
+  }
+  // CHARGE READY (AC4/AC7) — a soft blip when a held charge crosses its threshold (the smash/shot is ready).
+  chargeReady(): void {
+    if (!this._gateOk('chargeReady')) return
+    this._tone({ freq: 520, type: 'square', dur: 0.1, gain: 0.18, sweepTo: 880 })
   }
 
   // ── Set-pieces (AC5) ── boss/miniboss spawn + defeat, level transition, player death.

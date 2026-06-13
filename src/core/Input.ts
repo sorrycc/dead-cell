@@ -8,6 +8,17 @@ export interface InputSnapshot {
   jumpHeld: boolean
   dodgePressed: boolean
   attackPressed: boolean
+  // per-weapon-movesets §6.2 (Decision 2, AC9): the HELD state of the attack key (J / left-click), mirroring
+  // jumpHeld. Drives the charge accrual + the flurry repeat in Player.update; the attackPressed EDGE is
+  // unchanged (the tap path). Purely additive — a consumer that ignores it is byte-identical (identity).
+  attackHeld: boolean
+  // per-weapon-movesets §6.2 (Decision 5, AC8/AC9): the EDGE of the NEW parry key (V — outside the forbidden
+  // set). Arms the brief parry window on the Player. Sole-owned JustDown here like every other edge.
+  parryPressed: boolean
+  // per-weapon-movesets §6.2 (Decision 4, AC9): the HELD DOWN/S state, read ONLY at the Sword finisher for the
+  // directional ground-slam variant (DOWN/S were previously RESERVED-unused — Input.ts:65). No movement side
+  // effect (the horizontal axis is right−left; this is a separate flag).
+  downHeld: boolean
   healPressed: boolean
   interactPressed: boolean
   swapPressed: boolean
@@ -74,6 +85,8 @@ export class Input {
       m: KC.M, // audio §6.5 (Decision 7) — toggle global mute (GameScene flips this.sound.mute).
       f: KC.F, // skills §6.2 (Decision 3) — USE SKILL slot 1 (the left-hand cluster, free of taken keys).
       c: KC.C, // skills §6.2 (Decision 3) — USE SKILL slot 2.
+      v: KC.V, // per-weapon-movesets §6.2 (Decision 5) — PARRY (the ONLY new key; outside the forbidden set:
+      //          arrows/WASD/Space/J/Shift/K/Q/E/R/M/F/C are all taken, V collides with none of them).
     }) as Record<string, Phaser.Input.Keyboard.Key>
 
     // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
@@ -109,6 +122,17 @@ export class Input {
     const pointerEdge = pointer.isDown && !this._pointerWasDown
     this._pointerWasDown = pointer.isDown
     const attackPressed = Phaser.Input.Keyboard.JustDown(keys.j) || pointerEdge
+    // per-weapon-movesets §6.2 (Decision 2, AC9) — the HELD state of the attack key (J key OR a held
+    // left-click), mirroring jumpHeld = keys.space.isDown. NOT an edge — Player.update reads it to accrue a
+    // charge / repeat a flurry while held, then fires on the release edge. Reading isDown does NOT touch the
+    // JustDown flag, so the attackPressed edge above stays sole-owned + unchanged (identity).
+    const attackHeld = keys.j.isDown || pointer.isDown
+    // per-weapon-movesets §6.2 (Decision 5, AC8) — PARRY: a one-shot edge (JustDown, sole-owned here like every
+    // other key) the Player reads to arm its brief parry window. V is the only new key (outside the forbidden set).
+    const parryPressed = Phaser.Input.Keyboard.JustDown(keys.v)
+    // per-weapon-movesets §6.2 (Decision 4, AC9) — the HELD DOWN/S state (previously reserved-unused). Read ONLY
+    // at the Sword finisher (Player._startSwing) to pick the ground-slam variant; no movement side effect.
+    const downHeld = keys.down.isDown || keys.s.isDown
 
     // §6.9 — one-shot EDGES (JustDown, sole-owned here like the others): DRINK FLASK (Q) + INTERACT (E).
     const healPressed = Phaser.Input.Keyboard.JustDown(keys.q)
@@ -125,6 +149,6 @@ export class Input {
     const skill1Pressed = Phaser.Input.Keyboard.JustDown(keys.f)
     const skill2Pressed = Phaser.Input.Keyboard.JustDown(keys.c)
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed }
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, attackHeld, parryPressed, downHeld, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed }
   }
 }
