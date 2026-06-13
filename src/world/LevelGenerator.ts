@@ -194,7 +194,7 @@ const FALL_GRAVITY_EXTRA = 900 // px/s² — Player.js FALL_GRAVITY_EXTRA (desce
 const RUN_SPEED = 320 // px/s — Player.js RUN_SPEED.
 const G_UP = GRAVITY // ascent gravity.
 const G_DOWN = GRAVITY + FALL_GRAVITY_EXTRA // descent gravity (fast-fall).
-const APEX_H = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * G_UP) // ≈128.1 px — max climb.
+export const APEX_H = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * G_UP) // ≈128.1 px — max climb. Exported for the verifier's swept-airspace (body-aware-clearance §6.4).
 
 // Safety margin (Decision 35): the envelope is scaled to this fraction so it UNDER-estimates true
 // reach (a verifier PASS is then always sound). The whole point of the margin is to absorb the gap
@@ -224,6 +224,18 @@ const MAX_STEP_UP = 3 // tiles — max upward platform-to-platform climb (96px <
 const MAX_STEP_DOWN = 6 // tiles — max downward step (falling is cheap; bounded so platforms stay on-screen).
 const MIN_GAP = 1 // tiles — min horizontal clear gap (so platforms don't fuse into one run).
 const MAX_GAP = 4 // tiles — max horizontal clear gap (128px). MUST be ≤ canReach at MAX_STEP_UP.
+
+// ── Body-clearance budget (body-aware-clearance design §6.1) — MIRRORED from Player.js so the generator
+// + verifier can prove the REAL 36×52 collision body FITS the spaces it must traverse, not just that a
+// point-mass reaches the platform TOPS (the original "hero wedged in a 1-tile slot" bug). Body width 36 >
+// TILE_SIZE 32, so a 1-tile (32px) vertical channel is impassable; body height 52 needs ≥2 empty rows of
+// headroom. CLEAR_COLS/CLEAR_ROWS are the body footprint in TILES (ceil), asserted sound at module load.
+// These are an ADDITIVE clearance dimension — they touch none of the reach math above (AC7). Keep BODY_W/
+// BODY_H in sync with Player.js (same explicit-duplication caveat as the physics mirror).
+const BODY_W = 36 // px — MIRROR of Player.js BODY_W (the Arcade body width).
+const BODY_H = 52 // px — MIRROR of Player.js BODY_H (the Arcade body height).
+export const CLEAR_COLS = Math.ceil(BODY_W / TILE_SIZE) // = 2 — empty columns the body needs to occupy/pass.
+export const CLEAR_ROWS = Math.ceil(BODY_H / TILE_SIZE) // = 2 — empty rows of headroom above a footing.
 
 // ── Floor-recovery budgets (floor-recovery-ledges design) — guarantee a fallen player can climb back to
 // the exit LOCALLY instead of backtracking the whole level. The entrance→exit chain is traversable BY
@@ -316,6 +328,65 @@ export function canReachPlatform(a: Platform, b: Platform): boolean {
   return canReachStep(dx, dy)
 }
 
+// ── bodyFits(tiles, cols, rows, leftCol, row) → boolean (body-aware-clearance §6.2 — the OCCUPANCY primitive) ──
+// True iff the body's CLEAR_COLS×CLEAR_ROWS footprint anchored at columns [leftCol, leftCol+CLEAR_COLS-1] and
+// occupying rows [row-CLEAR_ROWS+1 .. row] is in-bounds and free of SOLID. ONEWAY/HAZARD do NOT block occupancy
+// (a ONEWAY collides only from ABOVE; HAZARD is damage-only) — only SOLID is a wall to the 36×52 body. This is
+// the footprint unit the verifier BFS uses as a window node and the generator uses via bodyStandClear (DRY,
+// the canReachStep pattern). PURE so both sides agree exactly.
+export function bodyFits(tiles: number[][], cols: number, rows: number, leftCol: number, row: number): boolean {
+  if (leftCol < 0 || leftCol + CLEAR_COLS - 1 >= cols) return false
+  if (row - CLEAR_ROWS + 1 < 0 || row >= rows) return false
+  for (let r = row - CLEAR_ROWS + 1; r <= row; r++) {
+    for (let c = leftCol; c < leftCol + CLEAR_COLS; c++) {
+      if (tiles[r][c] === TILE.SOLID) return false
+    }
+  }
+  return true
+}
+
+// ── bodyStandClear(tiles, cols, rows, col, row) → boolean (body-aware-clearance §6.2, Decision 1 — the SLIDING
+// CLEAR_COLS-window) ── True iff a 36×52 body can STAND at/around the standable cell (col,row): the cell is EMPTY,
+// and SOME CLEAR_COLS-window whose span CONTAINS `col` both bodyFits AND has support (SOLID|ONEWAY) directly below
+// one of its columns. The window slides so a centered/edge body is found wherever it actually fits (the body is
+// NOT forced to centre — it can shift within ≥CLEAR_COLS clear columns); a 1-tile channel (both neighbours SOLID)
+// yields no clear window → false (the wedge is correctly rejected). PURE + deterministic so the generator
+// (placement guard + spawn filter) and the verifier agree exactly.
+export function bodyStandClear(tiles: number[][], cols: number, rows: number, col: number, row: number): boolean {
+  if (row < 1 || row >= rows - 1) return false
+  if (tiles[row][col] !== TILE.EMPTY) return false
+  // The CLEAR_COLS-windows whose span contains `col` have anchors leftCol ∈ [col-CLEAR_COLS+1, col]. For
+  // CLEAR_COLS=2 that's {col-1, col}; the loop generalizes so a future CLEAR_COLS>2 re-tune needs no edit here.
+  for (let lc = col - CLEAR_COLS + 1; lc <= col; lc++) {
+    if (!bodyFits(tiles, cols, rows, lc, row)) continue
+    for (let c = lc; c < lc + CLEAR_COLS; c++) {
+      const below = tiles[row + 1][c]
+      if (below === TILE.SOLID || below === TILE.ONEWAY) return true
+    }
+  }
+  return false
+}
+
+// ── headroomClear(runs, run) → boolean (body-aware-clearance §6.3/§7b — the builder-side DEFENSIVE guard) ──
+// True iff no prior run sits within the body's headroom band — rows [run.row-CLEAR_ROWS .. run.row-1] — over
+// columns that overlap `run`'s span, so a 36×52 body can stand on `run`'s top and jump. The builders place
+// platform RECORDS and `tiles` is stamped only after they return, so this reasons about the same geometry on the
+// records that bodyStandClear later sees in the emitted grid. DEAD CODE at current budgets — every builder places
+// `next` horizontally gap-separated from `prev` and monotone/descending, so no prior run ever lands in the band
+// (§7b) — but it makes a future overlap-introducing template fail safe (truncate) rather than emit a wedge.
+function headroomClear(runs: Platform[], run: Platform): boolean {
+  const lo = run.row - CLEAR_ROWS
+  const hi = run.row - 1
+  const rLeft = run.col
+  const rRight = run.col + run.len - 1
+  for (const p of runs) {
+    if (p.row < lo || p.row > hi) continue // not in the headroom band above `run`.
+    if (p.col + p.len - 1 < rLeft || p.col > rRight) continue // no column overlap → no ceiling over `run`.
+    return false
+  }
+  return true
+}
+
 // ── Module-load soundness assertions (Decision 35) ── prove the named budgets sit INSIDE the
 // physical envelope, so a future one-line re-tune that breaks reach fails LOUDLY here (not by
 // silently emitting unreachable "verified" levels). Runs once at import (cheap; node + browser).
@@ -334,6 +405,23 @@ export function canReachPlatform(a: Platform, b: Platform): boolean {
     throw new Error(
       `LevelGenerator: MAX_STEP_UP (${MAX_STEP_UP} tiles) exceeds the apex climb (${APEX_H.toFixed(1)}px).`,
     )
+  }
+  // ── Body-clearance budget (body-aware-clearance §6.1, AC4) ── prove the 36×52 body fits the tile-
+  // discretized clearance footprint, so a future body/tile re-tune fails LOUD instead of silently emitting
+  // wedges the point-mass reach proof can't see. CLEAR_COLS/CLEAR_ROWS are ceil-derived, so these guard a
+  // hand-edit that breaks the derivation (e.g. hardcoding CLEAR_COLS=1 or bumping BODY_W past 2 tiles).
+  if (CLEAR_COLS * TILE_SIZE < BODY_W) {
+    throw new Error(`LevelGenerator: CLEAR_COLS (${CLEAR_COLS}) too small — body width ${BODY_W}px > ${CLEAR_COLS * TILE_SIZE}px clearance.`)
+  }
+  if (CLEAR_ROWS * TILE_SIZE < BODY_H) {
+    throw new Error(`LevelGenerator: CLEAR_ROWS (${CLEAR_ROWS}) too small — body height ${BODY_H}px > ${CLEAR_ROWS * TILE_SIZE}px clearance.`)
+  }
+  // The recovery stone row (floorRow − RECOVERY_REMOUNT_UP) is LOAD-BEARING for CLEAR_ROWS headroom UNDER a
+  // stone: a body on the floor occupies CLEAR_ROWS rows, so the stone must sit strictly above them ⇒
+  // RECOVERY_REMOUNT_UP ≥ CLEAR_ROWS + 1. This keeps the point-mass floor-recovery proof and the body-aware
+  // clearance proof from silently diverging — a re-tune of RECOVERY_REMOUNT_UP/BODY_H trips HERE first.
+  if (RECOVERY_REMOUNT_UP < CLEAR_ROWS + 1) {
+    throw new Error(`LevelGenerator: RECOVERY_REMOUNT_UP (${RECOVERY_REMOUNT_UP}) < CLEAR_ROWS+1 (${CLEAR_ROWS + 1}) — a body on the floor under a recovery stone would lack headroom.`)
   }
 })()
 
@@ -444,10 +532,12 @@ function buildStaircase(rng: RNG, { platformRows, interiorMax, lenMin, lenMax }:
     if (!canReachPlatform(prev, next)) {
       const pulled = makeRun(prevRight + MIN_GAP, nextRow, next.len, interiorMax)
       if (!canReachPlatform(prev, pulled)) break // truly stuck (cannot happen with sane budgets).
+      if (!headroomClear(critical, pulled)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
       critical.push(pulled)
       continue
     }
     if (next.col <= prevRight) break // clamp fused it flush against prev (at the wall) → stop.
+    if (!headroomClear(critical, next)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
     critical.push(next)
   }
   return critical
@@ -491,11 +581,13 @@ function buildShaft(rng: RNG, { rows, platformRows, interiorMax, lenMin, lenMax 
       const pulledCol = dir > 0 ? prevRight + MIN_GAP : prevLeft - MIN_GAP - len + 1
       const pulled = makeRun(pulledCol, nextRow, len, interiorMax)
       if (!canReachPlatform(prev, pulled)) break // truly stuck (cannot happen with sane budgets).
+      if (!headroomClear(critical, pulled)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
       critical.push(pulled)
       continue
     }
     // Reject a no-advance clamp (the run fused onto prev's span at the same row) so the shaft progresses.
     if (next.row === prev.row && next.col + next.len - 1 >= prevLeft && next.col <= prevRight) break
+    if (!headroomClear(critical, next)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
     critical.push(next)
   }
   return critical
@@ -527,7 +619,7 @@ function buildIslands(rng: RNG, { platformRows, interiorMax, lenMin, lenMax }: T
     if (!canReachPlatform(prev, next)) {
       // First try pulling the gap in; if the height swing itself is too steep, flatten the step toward prev.
       const pulled = makeRun(prevRight + MIN_GAP, nextRow, len, interiorMax)
-      if (canReachPlatform(prev, pulled) && pulled.col > prevRight) {
+      if (canReachPlatform(prev, pulled) && pulled.col > prevRight && headroomClear(critical, pulled)) {
         critical.push(pulled)
         continue
       }
@@ -535,10 +627,12 @@ function buildIslands(rng: RNG, { platformRows, interiorMax, lenMin, lenMax }: T
       const flattened = makeRun(prevRight + MIN_GAP, flatRow, len, interiorMax)
       if (!canReachPlatform(prev, flattened)) break
       if (flattened.col <= prevRight) break
+      if (!headroomClear(critical, flattened)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
       critical.push(flattened)
       continue
     }
     if (next.col <= prevRight) break
+    if (!headroomClear(critical, next)) break // body-aware-clearance §6.3 (defensive — dead code at current budgets).
     critical.push(next)
   }
   return critical
@@ -653,7 +747,7 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   // gated on grid width so the cols:40 pin emits no stones. Stamped BEFORE the occupied mask + decoration so
   // the stones join the mask (decoration never overwrites them) and feed collectStandable.
   const recoveryRng = mulberry32((seed ^ 0x5eca1add) >>> 0) // off-the-main-thread (pin-safe) recovery RNG.
-  const recovery = placeRecoveryBridges(tiles, cols, rows, recoveryRng, lenMin, lenMax)
+  const recovery = placeRecoveryBridges(tiles, cols, rows, recoveryRng, lenMin, lenMax, entrance, exit)
 
   // ── 5) Off-critical-path decoration (Decision: step 5) ── scatter ONEWAY ledges + HAZARD tiles at
   // seeded positions that are NOT on the critical path, so they never block the guaranteed route. We
@@ -686,7 +780,13 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   // enemy has room to patrol (Decision 41 / review MAJOR) — see standableForEnemies().
   // collectStandable excludes the entrance band + the exit cell + the branch TREASURE cell (so a normal
   // enemy/pickup never spawns ON the treasure spot — GameScene reserves it for the branch reward, §6.14).
-  const standableAll = collectStandable(tiles, cols, rows, entrance, exit, branchTreasure)
+  // body-aware-clearance §6.3 (AC2): filter the standable pool to BODY-clear cells so every enemy/pickup spawn
+  // has the 36×52 footprint (≥CLEAR_ROWS headroom in a ≥CLEAR_COLS window) by construction — no spawn is buried
+  // under a low ledge. Pure post-filter before pickSpawns; on the cols:40 staircase pin nothing sits above a
+  // platform so it removes ZERO cells (pickSpawns gets an identical list → pin enemies/pickups unchanged).
+  const standableAll = collectStandable(tiles, cols, rows, entrance, exit, branchTreasure).filter((s) =>
+    bodyStandClear(tiles, cols, rows, s.col, s.row),
+  )
   const standableEnemy = standableAll.filter((s) => s.runLen >= MIN_ENEMY_PLATFORM_TILES)
 
   const enemyCount = clampInt(randInt(rng, biomeConfig.minEnemies, biomeConfig.maxEnemies), 0, standableEnemy.length)
@@ -896,6 +996,12 @@ function placeBranch(
     // there would bury the exit's standable cell (a verifier "exit cell is not EMPTY" failure). Reject such
     // a run (stop the branch). Checked against BOTH the run's own row and its top-clear row, across its span.
     if (runOverlapsCell(run, entrance) || runOverlapsCell(run, exit)) break
+    // body-aware-clearance §6.3: the branch must not land in the CLEAR_ROWS HEADROOM BAND directly above the
+    // entrance/exit OR any critical platform's standable top — a SOLID there leaves < CLEAR_ROWS clear rows so the
+    // 36×52 body could no longer stand on / jump off that platform (the original "exit not body-clear" wedge). A
+    // branch only ever ADDS reach (it must not degrade a platform the body relies on), so stop the branch here.
+    if (runBuriesHeadroom(run, entrance) || runBuriesHeadroom(run, exit)) break
+    if (critical.some((cp) => runBuriesHeadroom(run, cellAbove(cp)))) break
     // The branch's TOP must be CLEAR: every cell directly above the run (where the player stands + where
     // the treasure goes) must be EMPTY (no critical platform / wall overlapping it), else the treasure ledge
     // wouldn't be standable (the verifier's standable check). A bad overlap → stop (skip this + later steps).
@@ -917,14 +1023,29 @@ function runOverlapsCell(run: Platform, cell: LevelPoint | null): boolean {
   return cell.row === run.row || cell.row === run.row - 1
 }
 
-// True iff every cell directly ABOVE the run (row-1, across its span) is EMPTY — so the run's top is a
-// clear standable surface (no overlapping platform/wall). Used so a branch platform's treasure ledge (and
-// the player's footing on it) is guaranteed standable (§6.14, Decision 80).
+// True iff `run`'s SOLID body sits in the CLEAR_ROWS-row body-HEADROOM band directly ABOVE `cell` (rows
+// [cell.row-CLEAR_ROWS+1 .. cell.row]) over `cell`'s column — i.e. it would leave < CLEAR_ROWS clear rows above
+// the standable `cell`, so the 36×52 body could no longer stand there. (A contiguous run that breaks the body's
+// sliding window over cell.col must cover cell.col itself, so testing cell.col is exact.) body-aware-clearance §6.3.
+function runBuriesHeadroom(run: Platform, cell: LevelPoint | null): boolean {
+  if (!cell) return false
+  if (cell.col < run.col || cell.col >= run.col + run.len) return false
+  return run.row >= cell.row - CLEAR_ROWS + 1 && run.row <= cell.row
+}
+
+// True iff every cell in the body's headroom band ABOVE the run (rows [run.row-CLEAR_ROWS .. run.row-1],
+// across its span) is EMPTY — so the run's top is a clear standable surface for the 36×52 body (no
+// overlapping platform/wall within its standing height). Used so a branch platform's treasure ledge (and the
+// player's footing on it) is guaranteed BODY-standable (§6.14 + body-aware-clearance §6.3): CLEAR_ROWS rows,
+// not just 1, so a hung branch ledge always has real headroom. (At branch-placement time only shell + critical
+// SOLID exist, so EMPTY here is equivalent to bodyFits' SOLID-free — scatter/one-ways come later.)
 function runTopClear(tiles: number[][], run: Platform): boolean {
-  const r = run.row - 1
-  if (r < 0) return false
-  for (let c = run.col; c < run.col + run.len; c++) {
-    if (tiles[r][c] !== TILE.EMPTY) return false
+  const top = run.row - CLEAR_ROWS
+  if (top < 0) return false
+  for (let r = top; r < run.row; r++) {
+    for (let c = run.col; c < run.col + run.len; c++) {
+      if (tiles[r][c] !== TILE.EMPTY) return false
+    }
   }
   return true
 }
@@ -953,12 +1074,26 @@ function placeRecoveryBridges(
   rng: RNG,
   lenMin: number,
   lenMax: number,
+  entrance: LevelPoint,
+  exit: LevelPoint,
 ): Platform[] {
   if (cols < RECOVERY_MIN_COLS) return [] // narrow grid (the pin) → no recovery (pin tiles unchanged).
   const floorRow = rows - 1
   const stoneRow = floorRow - RECOVERY_REMOUNT_UP // the player fits UNDER this row; re-mountable from the floor.
   const stoneMax = cols - 3 // confine stones to [2, cols-3] so a stone never fuses with a side wall (Decision 13).
   if (stoneRow < 1 || stoneMax < 2) return [] // degenerate tiny grid (cannot happen for cols ≥ RECOVERY_MIN_COLS).
+
+  // body-aware-clearance §6.3: when a goal cell (entrance/exit) is LOW enough that the stone row falls in its body
+  // band [row-CLEAR_ROWS+1, row], a stone in its CLEAR_COLS-window would bury the goal's footprint (the
+  // low-exit-at-stone-row wedge — the body bridges the gap beside the goal and the stone fills its window). Reserve
+  // those columns so a stone never lands in a goal's body window. (The goal's own platform is its re-mount, so the
+  // reserved column is covered for the floor-recovery locality proof.)
+  const reservedCol = new Array(cols).fill(false)
+  for (const g of [entrance, exit]) {
+    if (stoneRow >= g.row - CLEAR_ROWS + 1 && stoneRow <= g.row) {
+      for (let c = g.col - CLEAR_COLS + 1; c <= g.col + CLEAR_COLS - 1; c++) if (c >= 0 && c < cols) reservedCol[c] = true
+    }
+  }
 
   // Re-derive the SOLID in-band re-mounts from the EMITTED grid (critical + branch + stones placed so far) so
   // the generator's gap view matches the verifier's, which reads the merged emitted tiles (DRY — same metric).
@@ -978,11 +1113,15 @@ function placeRecoveryBridges(
       const right = Math.min(hi, stoneMax)
       let col = clampInt(lo, 2, stoneMax)
       while (col <= right) {
+        while (col <= right && reservedCol[col]) col++ // skip a goal's reserved body-window columns (no stone there).
+        if (col > right) break
         // Confine the stone to the gap [lo, hi] (clamp its right edge to `right`): a stone must NEVER spill
         // its length into a COVERED column, because a covered column is exactly where a re-mount AND any
         // standable cell (entrance/exit/branch) lives — spilling there would bury that cell (its support is
         // in the band, so its column is always covered, hence never in a gap). Confinement makes burial impossible.
-        const stone = makeRun(col, stoneRow, randInt(rng, lenMin, lenMax), right)
+        let len = randInt(rng, lenMin, lenMax)
+        for (let k = 1; k < len; k++) if (reservedCol[col + k]) { len = k; break } // clip before a reserved column.
+        const stone = makeRun(col, stoneRow, len, right)
         stampRun(tiles, cols, rows, stone.col, stone.row, stone.len, TILE.SOLID)
         stones.push(stone)
         progressed = true

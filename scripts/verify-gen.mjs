@@ -35,7 +35,7 @@ import { mulberry32 } from '../src/util/rng.js'
 import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
-import { generateLevel, TILE, canReachPlatform, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS } from '../src/world/LevelGenerator.js'
+import { generateLevel, TILE, TILE_SIZE, canReachPlatform, canReachStep, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS, bodyFits, bodyStandClear, CLEAR_COLS, CLEAR_ROWS, APEX_H } from '../src/world/LevelGenerator.js'
 import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
@@ -327,6 +327,13 @@ function checkDescription(desc, biome) {
   const fr = checkFloorRecovery(desc)
   if (fr) return fr
 
+  // (h) Body-aware clearance (body-aware-clearance design, AC1/AC2) — the STRONGEST proof, layered after the
+  // point-mass BFS (a cheap first gate): the REAL 36×52 collision body (not a point mass) is body-clear at every
+  // node it stands on AND provably travels entrance→exit (no 1-tile wedge / low-ceiling trap). RE-derived from
+  // the EMITTED tiles, independent of the generator's intent.
+  const cl = checkClearance(desc)
+  if (cl) return cl
+
   return null
 }
 
@@ -422,6 +429,113 @@ function bfsReaches(desc, fromCell, toCell) {
   return { ok: false, reason: 'goal platform not reachable' }
 }
 
+// ── checkClearance(desc) (body-aware-clearance design, AC1/AC2) ── prove the REAL 36×52 collision body (not a
+// point mass) (a) is body-clear at every node it stands on, and (b) can travel entrance→exit. Re-derived from the
+// EMITTED tiles (independent of the generator). Two parts:
+//   (a) bodyStandClear at entrance / exit / branch treasure / every enemy + pickup spawn cell.
+//   (b) a body-aware flood-fill over WINDOW nodes W=(lc,r): columns {lc … lc+CLEAR_COLS-1}, feet row r (the body
+//       occupies rows {r-CLEAR_ROWS+1 … r}, supported by row r+1). A REACH edge P→Q exists iff canReachStep(dx,dy)
+//       — the SAME envelope the generator placed with, base-jump-only so it is CONSERVATIVE vs the player's
+//       double-jump + wall-jump (which only ADD reach), making a PASS sound — AND the full SWEPT-AIRSPACE bounding
+//       box is SOLID-free, so the real (arcing, overshooting) trajectory can never clip a ceiling over the gap.
+// Returns null on pass or a reason string. (Only runs for normal levels — the boss arena goes through checkBossArena.)
+function checkClearance(desc) {
+  const { tiles, cols, rows } = desc
+
+  // (a) Node clearance (AC2) — every cell the body stands on must fit the 36×52 footprint.
+  const badNode = (cell, what) =>
+    cell && !bodyStandClear(tiles, cols, rows, cell.col, cell.row)
+      ? `${what} (${cell.col},${cell.row}) not body-clear (36×52 wedge)`
+      : null
+  const nodeChecks = [badNode(desc.entrance, 'entrance'), badNode(desc.exit, 'exit'), badNode(desc.branchTreasure, 'branch treasure')]
+  for (const e of desc.enemies) nodeChecks.push(badNode(e, 'enemy spawn'))
+  for (const p of desc.pickups) nodeChecks.push(badNode(p, 'pickup spawn'))
+  for (const c of nodeChecks) if (c) return c
+
+  // (b) Body-aware traversal — window-node flood-fill (design §6.4).
+  const APEX_ROWS = Math.ceil(APEX_H / TILE_SIZE) // = 5 — a full base jump apexes this many rows above launch.
+  const isSupport = (t) => t === TILE.SOLID || t === TILE.ONEWAY
+  const grounded = (lc, r) =>
+    bodyFits(tiles, cols, rows, lc, r) && (isSupport(tiles[r + 1][lc]) || isSupport(tiles[r + 1][lc + 1]))
+
+  // Enumerate grounded windows into a compact node list (index unused — small N, all-pairs with a canReachStep prefilter).
+  const nodes = [] // { lc, r }
+  for (let r = 1; r < rows - 1; r++) {
+    for (let lc = 0; lc + CLEAR_COLS - 1 < cols; lc++) {
+      if (grounded(lc, r)) nodes.push({ lc, r })
+    }
+  }
+
+  // near-edge column gap between two CLEAR_COLS-wide footprints (the platformStep near-edge metric — BLOCKER #2).
+  const nearGap = (P, Q) => {
+    const pR = P.lc + CLEAR_COLS - 1, qR = Q.lc + CLEAR_COLS - 1
+    if (Q.lc > pR) return Q.lc - pR // Q to the right.
+    if (qR < P.lc) return P.lc - qR // Q to the left.
+    return 0 // footprints overlap in columns.
+  }
+  // an UP / LEVEL jump's swept airspace must be SOLID-free so the real (arcing, overshooting) trajectory can't
+  // clip a ceiling over the gap (the reviewer's gap-1). DOWN jumps need no such check: the body simply falls
+  // (always reaches, never rises above its launch) — exactly the existing point-mass BFS's treatment, so a SOLID
+  // in the way just means the body lands on it (an intermediate node the BFS routes through). The body sweeps an
+  // L-shape, NOT a rectangle: it rises in the LOWER (launch) column, and over the gap it flies ABOVE the HIGHER
+  // (landing) platform — it lands ON TOP from the side, never through it. So below the landing row we check only
+  // the launch column (the rise); above it, the whole gap span (the flight). Both endpoint footprints are
+  // separately bodyFits-checked, so excluding the region under the landing avoids false rejection.
+  const airspaceClear = (P, Q) => {
+    const dx = nearGap(P, Q)
+    const dy = Q.r - P.r
+    if (dy > 0) return true // DOWN jump/fall — falls always reach (matches the point-mass BFS; no apex to clip).
+    // ADJACENT WALK / STEP / BRIDGE (|dy| ≤ 1 and the body bridges a ≤1-tile gap): the move is between two
+    // overlapping/adjacent footprints that are ALREADY grounded (bodyFits), so the body never sweeps a wider
+    // region — no box needed. A 1-tile slot never qualifies (no grounded window), so this can't bridge a wedge.
+    if (dx <= 1 && Math.abs(dy) <= 1) return true
+    const lower = P.r >= Q.r ? P : Q // larger row = the LOWER (launch) platform (carries the vertical rise column).
+    const rLo = lower.r // launch feet row (bottom of the swept region).
+    const rHi = Math.min(P.r, Q.r) // landing (higher) feet row — the flight band sits above this.
+    const loC0 = lower.lc, loC1 = lower.lc + CLEAR_COLS - 1
+    const cLo = Math.min(P.lc, Q.lc)
+    const cHi = Math.max(P.lc, Q.lc) + (CLEAR_COLS - 1)
+    let rTop = rHi - APEX_ROWS - (CLEAR_ROWS - 1) // apex overshoot above the landing (conservative full-arc apex).
+    if (rTop < 0) rTop = 0
+    for (let r = rTop; r <= rLo; r++) {
+      for (let c = cLo; c <= cHi; c++) {
+        // Below the landing (r > rHi), only the LOWER (launch) column is swept — its rise; every other column
+        // there is under the landing, which the body never enters from the side, so skip (no false reject).
+        if (r > rHi && (c < loC0 || c > loC1)) continue
+        if (tiles[r][c] === TILE.SOLID) return false
+      }
+    }
+    return true
+  }
+
+  // Seed from every grounded window standing on the entrance's platform; PASS when one over the exit platform is reached.
+  const plats = desc.platforms.filter((p) => p.type === TILE.SOLID || p.type === TILE.ONEWAY)
+  const platUnder = (cell) => plats.find((p) => p.row === cell.row + 1 && cell.col >= p.col && cell.col < p.col + p.len)
+  const startPlat = platUnder(desc.entrance)
+  const goalPlat = platUnder(desc.exit)
+  if (!startPlat) return 'clearance: entrance has no supporting platform'
+  if (!goalPlat) return 'clearance: exit has no supporting platform'
+  const onPlat = (nd, p) => nd.r === p.row - 1 && nd.lc + CLEAR_COLS - 1 >= p.col && nd.lc <= p.col + p.len - 1
+
+  const seen = new Uint8Array(nodes.length)
+  const queue = []
+  for (let i = 0; i < nodes.length; i++) if (onPlat(nodes[i], startPlat)) { seen[i] = 1; queue.push(i) }
+  if (queue.length === 0) return 'clearance: no body-clear footing on the entrance platform'
+  while (queue.length) {
+    const P = nodes[queue.shift()]
+    if (onPlat(P, goalPlat)) return null // reached a body-clear footing on the exit platform.
+    for (let v = 0; v < nodes.length; v++) {
+      if (seen[v]) continue
+      const Q = nodes[v]
+      if (!canReachStep(nearGap(P, Q), Q.r - P.r)) continue // cheap reach prefilter.
+      if (!airspaceClear(P, Q)) continue
+      seen[v] = 1
+      queue.push(v)
+    }
+  }
+  return 'clearance: exit platform not body-reachable from entrance (36×52 body would wedge)'
+}
+
 // ── 3a) Determinism (AC19): generateLevel twice → DEEP-EQUAL (element-wise over the int grid). ──
 // ── 3c/3d/3e) Per-seed bounds + spawn-validity + traversability over N seeds, for EVERY biome. ──
 // §6.4 extends the sweep to the WHOLE BIOME_ORDER (not just PRISON) so AC28 (bounds / no-wall-spawn /
@@ -502,7 +616,12 @@ const PIN_EXPECTED = {
     { col: 14, row: 15, x: 464, y: 496, patrolMinX: 86, patrolMaxX: 522, spec: 'brute' },
     { col: 15, row: 15, x: 496, y: 496, patrolMinX: 86, patrolMaxX: 522, spec: 'brute' },
   ],
-  pickups: [{ col: 20, row: 15, x: 656, y: 496, kind: 'cell' }],
+  // Regenerated for body-aware-clearance: the spawn pool is now filtered by bodyStandClear, which excludes the
+  // staircase pin's two 1-tile standable SLOTS — (col 1, row 16) between the left wall and a platform, and
+  // (col 17, row 16) between two same-row platforms — where the 36×52 body cannot stand. Removing them shifts
+  // the pickup pick from (col 20) to (col 19). The TILES are byte-unchanged (PIN_TILES holds); only the pickup
+  // spawn moved to a body-clear cell — a deliberate, correct consequence of the filter (design Decision 5, §7b).
+  pickups: [{ col: 19, row: 15, x: 624, y: 496, kind: 'cell' }],
   seed: PIN_SEED,
   biomeId: 'prison',
 }
@@ -1646,7 +1765,8 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
-    `traversable(AC27) + branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2) + ` +
+    `traversable(AC27) + body-clearance: 36×52 body fits every node + entrance→exit (body-aware BFS, AC1/AC2) + ` +
+    `branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2) + ` +
     `floor-recovery locality+reconnect+hazard-free-lane (cols≥${RECOVERY_MIN_COLS}); level pin OK; ` +
     `curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
