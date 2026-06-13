@@ -63,12 +63,22 @@ import { BOSS_ORDER, BOSS_ATTACK_KINDS, BOSSES } from '../src/config/bosses.js'
 // well-formed (a non-empty list, an apply()/identity-safe shape) — the same guardrail every config table gets.
 import { SCROLLS, SCROLL_IDS } from '../src/config/scrolls.js'
 import { createRunState as createRunStateForScrolls } from '../src/core/RunState.js'
+// Build-&-replay slice PURE table: the MUTATIONS perk table (the choice-driven run-power layer). Node-importable
+// (config/mutations.js imports NOTHING from Phaser — only a type from config/scrolls.js) — a successful import
+// re-proves its purity, and the §12 sweep below asserts it's well-formed (a non-empty list, an apply()/identity-
+// safe shape that never WEAKENS a bigger-is-better RunState field) — the same guardrail every config table gets.
+import { MUTATIONS, MUTATIONS_BY_ID, MUTATION_ORDER } from '../src/config/mutations.js'
 // Enrichment PURE modules (§6.10/§6.11/§6.12, Decision 76/77/78): the in-run shop catalog (the gold sink),
 // the elite-affix table, and the status-effect table. All node-importable (no Phaser) — a successful import
 // re-proves their purity, and the new sections below assert each table is well-formed (KISS guardrails).
 import { SHOP_ITEMS, SHOP_ITEM_KINDS } from '../src/config/shop.js'
 import { STATUS_KINDS, makeStatus, applyStatus, tickStatuses, hasStatus } from '../src/combat/status.js'
 import { WEAPONS } from '../src/config/weapons.js'
+// Skills slice PURE table: the SKILLS loadout table (the secondary-item layer). Node-importable (config/
+// skills.js imports NOTHING from Phaser — only a type from config/weapons.js) — a successful import re-proves
+// its purity, and the §11 sweep below asserts it's well-formed (a non-empty list, known kinds, positive
+// cooldowns, kind-specific params present + numeric) — the same guardrail every config table gets.
+import { SKILLS, SKILL_KINDS, SKILLS_BY_ID, SKILL_ORDER } from '../src/config/skills.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -1131,6 +1141,159 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 11) Skills loadout table (skills/secondary-items design §6.7, AC7). An INDEPENDENT proof of the PURE
+//     SKILLS table (the secondary-item layer) that stays Phaser-free: a non-empty list, every kind ∈
+//     SKILL_KINDS, a positive cooldown, and the kind-specific fields present + numeric (volley: count > 0 +
+//     a projectile; blast: radius > 0 + damage > 0; turret: duration > 0 + fireInterval > 0). Mirrors the
+//     weapon / shop / boss table well-formedness checks — a malformed skill fails loudly under node.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  if (!Array.isArray(SKILLS) || SKILLS.length === 0) fail('SKILLS is empty (AC7 — the loadout layer needs skills)')
+  // The lookup + ordered list must stay in lockstep with the table (no id drift / dead config).
+  if (SKILL_ORDER.length !== SKILLS.length) fail('SKILL_ORDER length != SKILLS length (id list drift)')
+  if (Object.keys(SKILLS_BY_ID).length !== SKILLS.length) fail('SKILLS_BY_ID size != SKILLS length (duplicate/missing id)')
+  // Every kind in the table must be used by at least one skill (proves the 3 kinds aren't dead config), and
+  // every kind a skill declares must be a KNOWN kind. Track which kinds appear to assert full coverage.
+  const kindsSeen = new Set()
+  const PROJ_FIELDS = ['speed', 'damage', 'knockback', 'lifetime']
+  const seenSkillIds = new Set()
+  for (const s of SKILLS) {
+    if (typeof s.id !== 'string' || !s.id) fail('skill missing id')
+    if (seenSkillIds.has(s.id)) fail(`skill ${s.id}: duplicate id`)
+    seenSkillIds.add(s.id)
+    if (typeof s.name !== 'string' || !s.name) fail(`skill ${s.id}: missing name`)
+    if (typeof s.desc !== 'string' || !s.desc) fail(`skill ${s.id}: missing desc`)
+    if (!SKILL_KINDS.includes(s.kind)) fail(`skill ${s.id}: unknown kind "${s.kind}" (AC7 — must be in SKILL_KINDS)`)
+    kindsSeen.add(s.kind)
+    if (!(typeof s.cooldown === 'number') || s.cooldown <= 0) fail(`skill ${s.id}: cooldown must be > 0`)
+    // SKILLS_BY_ID must resolve this id back to THIS spec (the lookup is the real source GameScene uses).
+    if (SKILLS_BY_ID[s.id] !== s) fail(`skill ${s.id}: SKILLS_BY_ID does not resolve to the same spec`)
+    // Kind-specific params (GameScene._useSkill reads these — assert the right ones are present + sane).
+    if (s.kind === 'volley') {
+      if (!(typeof s.count === 'number') || s.count <= 0) fail(`skill ${s.id}: volley needs count > 0`)
+      if (typeof s.spread !== 'number') fail(`skill ${s.id}: volley needs a numeric spread`)
+      if (!s.projectile) fail(`skill ${s.id}: volley needs a projectile spec`)
+      for (const f of PROJ_FIELDS) {
+        if (typeof s.projectile[f] !== 'number') fail(`skill ${s.id}: volley projectile missing numeric field "${f}"`)
+      }
+    } else if (s.kind === 'blast') {
+      if (!(typeof s.radius === 'number') || s.radius <= 0) fail(`skill ${s.id}: blast needs radius > 0`)
+      if (!(typeof s.damage === 'number') || s.damage <= 0) fail(`skill ${s.id}: blast needs damage > 0`)
+      if (typeof s.knockback !== 'number') fail(`skill ${s.id}: blast needs a numeric knockback`)
+    } else if (s.kind === 'turret') {
+      if (!(typeof s.duration === 'number') || s.duration <= 0) fail(`skill ${s.id}: turret needs duration > 0`)
+      if (!(typeof s.fireInterval === 'number') || s.fireInterval <= 0) fail(`skill ${s.id}: turret needs fireInterval > 0`)
+      if (!s.projectile) fail(`skill ${s.id}: turret needs a projectile spec (what it fires)`)
+      for (const f of PROJ_FIELDS) {
+        if (typeof s.projectile[f] !== 'number') fail(`skill ${s.id}: turret projectile missing numeric field "${f}"`)
+      }
+    }
+    // An OPTIONAL status (volley/blast/turret) must reference a KNOWN status kind with a positive duration when
+    // present (a damaging status also needs positive tick params — the same shape weapon statuses are checked).
+    if (s.status) {
+      if (!STATUS_KINDS.includes(s.status.kind)) fail(`skill ${s.id}: unknown status kind "${s.status.kind}"`)
+      if (!(s.status.duration > 0)) fail(`skill ${s.id}: status duration must be > 0`)
+      const damaging = s.status.kind === 'bleed' || s.status.kind === 'poison'
+      if (damaging && !(s.status.tickInterval > 0 && s.status.tickDmg > 0)) {
+        fail(`skill ${s.id}: a damaging status needs tickInterval > 0 AND tickDmg > 0`)
+      }
+    }
+  }
+  // Every declared kind must actually be USED (no dead kind config) — the FULL scope ask (volley+blast+turret).
+  for (const k of SKILL_KINDS) {
+    if (!kindsSeen.has(k)) fail(`skill kind "${k}" is in SKILL_KINDS but no skill uses it (dead config / cut scope)`)
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 12) MUTATIONS table (build-&-replay design §6.6, AC1/AC6). An INDEPENDENT proof of the PURE MUTATIONS
+//     perk table (the choice-driven run-power layer): a non-empty list, each row with a string id/name/desc
+//     + a function apply, a unique id set, and the lookup/order in lockstep with the table. The IDENTITY-
+//     SAFETY check (AC6): applying EVERY mutation to a FRESH RunState never throws AND never lowers a
+//     bigger-is-better field (nor raises the smaller-is-better dodge-cooldown mult) — the same "never
+//     weakens" sense the upgrade + scroll sweeps use — so a malformed mutation fails loudly under node.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 12a) MUTATIONS well-formed (AC1): non-empty; each row a string id/name/desc + a function apply; ids
+  // unique; the MUTATIONS_BY_ID lookup + MUTATION_ORDER list stay in lockstep with the table (no id drift). ──
+  if (!Array.isArray(MUTATIONS) || MUTATIONS.length === 0) fail('MUTATIONS is empty (AC1 — the choice layer needs perks)')
+  // The seeded 3-of-N pick needs at least 3 distinct mutations to offer a real choice (else the overlay is dull).
+  if (MUTATIONS.length < 3) fail(`MUTATIONS has ${MUTATIONS.length} entries, expected ≥3 (the 3-of-N choice, AC2)`)
+  if (MUTATION_ORDER.length !== MUTATIONS.length) fail('MUTATION_ORDER length != MUTATIONS length (id list drift)')
+  if (Object.keys(MUTATIONS_BY_ID).length !== MUTATIONS.length) fail('MUTATIONS_BY_ID size != MUTATIONS length (duplicate/missing id)')
+  const seenMutationIds = new Set()
+  for (const m of MUTATIONS) {
+    if (typeof m.id !== 'string' || !m.id) fail('mutation missing id')
+    if (typeof m.name !== 'string' || !m.name) fail(`mutation ${m.id}: missing name`)
+    if (typeof m.desc !== 'string' || !m.desc) fail(`mutation ${m.id}: missing desc`)
+    if (typeof m.apply !== 'function') fail(`mutation ${m.id}: apply is not a function`)
+    if (seenMutationIds.has(m.id)) fail(`mutation ${m.id}: duplicate id`)
+    seenMutationIds.add(m.id)
+    // The lookup must resolve this id back to THIS spec (the real source GameScene._applyMutation uses).
+    if (MUTATIONS_BY_ID[m.id] !== m) fail(`mutation ${m.id}: MUTATIONS_BY_ID does not resolve to the same spec`)
+  }
+
+  // ── 12b) Each mutation's apply() is PURE-effect + identity-safe (AC6): applying it to a FRESH RunState must
+  // NOT throw, must change at least ONE run-only/perk field (a no-op mutation is a content bug), and must never
+  // move a field the WRONG way. Bigger-is-better: scrollDamageMult / scrollMaxHpBonus / scrollLifestealFrac /
+  // scrollStatusDurationMult / scrollDodgeIframeBonus / maxFlasks / onKillHealAmount / lowHpDamageMult /
+  // firstHitBonusMult. Smaller-is-better: scrollDodgeCdMult (a shorter dodge cooldown). ──
+  for (const m of MUTATIONS) {
+    const run = createRunStateForScrolls(0xc0ffee, 0)
+    const before = {
+      dmg: run.scrollDamageMult,
+      hp: run.scrollMaxHpBonus,
+      life: run.scrollLifestealFrac,
+      stat: run.scrollStatusDurationMult,
+      cd: run.scrollDodgeCdMult,
+      ifr: run.scrollDodgeIframeBonus,
+      flasksMax: run.maxFlasks,
+      kill: run.onKillHealAmount,
+      lowHp: run.lowHpDamageMult,
+      firstHit: run.firstHitBonusMult,
+    }
+    m.apply(run) // must not throw.
+    // Bigger-is-better fields must not DECREASE; the smaller-is-better dodge-cooldown mult must not INCREASE.
+    if (run.scrollDamageMult < before.dmg) fail(`mutation ${m.id}: scrollDamageMult decreased`)
+    if (run.scrollMaxHpBonus < before.hp) fail(`mutation ${m.id}: scrollMaxHpBonus decreased`)
+    if (run.scrollLifestealFrac < before.life) fail(`mutation ${m.id}: scrollLifestealFrac decreased`)
+    if (run.scrollStatusDurationMult < before.stat) fail(`mutation ${m.id}: scrollStatusDurationMult decreased`)
+    if (run.scrollDodgeIframeBonus < before.ifr) fail(`mutation ${m.id}: scrollDodgeIframeBonus decreased`)
+    if (run.maxFlasks < before.flasksMax) fail(`mutation ${m.id}: maxFlasks decreased`)
+    if (run.onKillHealAmount < before.kill) fail(`mutation ${m.id}: onKillHealAmount decreased`)
+    if (run.lowHpDamageMult < before.lowHp) fail(`mutation ${m.id}: lowHpDamageMult decreased`)
+    if (run.firstHitBonusMult < before.firstHit) fail(`mutation ${m.id}: firstHitBonusMult decreased`)
+    if (run.scrollDodgeCdMult > before.cd) fail(`mutation ${m.id}: scrollDodgeCdMult increased (a longer dodge cooldown is a weaken)`)
+    // At least ONE field must have changed (a found mutation must DO something — a no-op perk is a content bug).
+    const changed =
+      run.scrollDamageMult !== before.dmg || run.scrollMaxHpBonus !== before.hp ||
+      run.scrollLifestealFrac !== before.life || run.scrollStatusDurationMult !== before.stat ||
+      run.scrollDodgeCdMult !== before.cd || run.scrollDodgeIframeBonus !== before.ifr ||
+      run.maxFlasks !== before.flasksMax || run.onKillHealAmount !== before.kill ||
+      run.lowHpDamageMult !== before.lowHp || run.firstHitBonusMult !== before.firstHit
+    if (!changed) fail(`mutation ${m.id}: apply() changed no run-only/perk field (a no-op mutation)`)
+  }
+
+  // ── 12c) Identity safety in AGGREGATE (AC3/AC6): applying EVERY mutation to ONE fresh RunState in sequence
+  // never throws and the run still has sane perk fields (all bigger-is-better ≥ their neutral identity, the
+  // dodge-cooldown mult ≤ its neutral 1). This proves the WHOLE table composes without weakening the run. ──
+  {
+    const run = createRunStateForScrolls(0xc0ffee, 0)
+    for (const m of MUTATIONS) m.apply(run) // the full stack — must not throw.
+    if (run.scrollDamageMult < 1) fail('mutations aggregate: scrollDamageMult below the neutral identity')
+    if (run.scrollMaxHpBonus < 0) fail('mutations aggregate: scrollMaxHpBonus below the neutral identity')
+    if (run.scrollLifestealFrac < 0) fail('mutations aggregate: scrollLifestealFrac below the neutral identity')
+    if (run.scrollStatusDurationMult < 1) fail('mutations aggregate: scrollStatusDurationMult below the neutral identity')
+    if (run.scrollDodgeIframeBonus < 0) fail('mutations aggregate: scrollDodgeIframeBonus below the neutral identity')
+    if (run.maxFlasks < 2) fail('mutations aggregate: maxFlasks below the neutral identity')
+    if (run.onKillHealAmount < 0) fail('mutations aggregate: onKillHealAmount below the neutral identity')
+    if (run.lowHpDamageMult < 1) fail('mutations aggregate: lowHpDamageMult below the neutral identity')
+    if (run.firstHitBonusMult < 1) fail('mutations aggregate: firstHitBonusMult below the neutral identity')
+    if (run.scrollDodgeCdMult > 1) fail('mutations aggregate: scrollDodgeCdMult above the neutral identity (a longer dodge cooldown)')
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -1144,6 +1307,8 @@ console.log(
     `${SHOP_ITEMS.length} shop items well-formed (AC63); ${BOSS_ORDER.length} bosses+minibosses well-formed (AC65, round-2 roster); ` +
     `status tick/expiry/refresh pure+pinned (${STATUS_KINDS.length} kinds, AC66); ` +
     `${SCROLLS.length} scrolls + ${ELITE_AFFIXES.length} elite affixes well-formed (round-3 build variety); ` +
-    `${WEAPON_AFFIXES.length} weapon affixes pure-fold/schema-preserving/never-weaken (round-2 build engine)`,
+    `${WEAPON_AFFIXES.length} weapon affixes pure-fold/schema-preserving/never-weaken (round-2 build engine); ` +
+    `${SKILLS.length} skills well-formed (${SKILL_KINDS.length} kinds, AC7 — the loadout layer); ` +
+    `${MUTATIONS.length} mutations well-formed + identity-safe/never-weaken (build-&-replay AC1/AC6)`,
 )
 process.exit(0)

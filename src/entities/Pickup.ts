@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 
-type PickupKind = 'cell' | 'gold' | 'scroll' | 'weapon' | 'heal'
+type PickupKind = 'cell' | 'gold' | 'scroll' | 'weapon' | 'heal' | 'skill'
 
 // Per-pickup mutable state stored on the rect (mutated on acquire — never re-allocated).
 interface PickupState {
@@ -10,6 +10,7 @@ interface PickupState {
   weaponId: string | null
   weaponAffixId: string | null
   scrollId: string | null
+  skillId: string | null
   goldAmount: number
   healFrac: number
 }
@@ -22,6 +23,7 @@ interface PickupMeta {
   weaponId?: string | null
   weaponAffixId?: string | null
   scrollId?: string | null
+  skillId?: string | null
   amount?: number
   healFrac?: number
 }
@@ -52,6 +54,7 @@ const PICKUP_COLORS = {
   scroll: 0xc26bff, // magenta — a run-only stat boost.
   weapon: 0xecf0f1, // white — a weapon swap.
   heal: 0x2ecc71, // green — §6.9 (Decision 72): a fountain/heart that restores HP on touch.
+  skill: 0xff9f43, // orange — skills slice: a skill pickup (the loadout layer; distinct from weapon white).
 }
 const PICKUP_SIZE = 16 // px — a small square pickup (programmer-art primitive).
 const ARC_VELOCITY_Y = -260 // px/s — the upward pop on spawn (gravity pulls it back to settle).
@@ -85,7 +88,7 @@ export class PickupPool {
       body.setSize(PICKUP_SIZE, PICKUP_SIZE, true)
       // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC). weaponAffixId is the
       // Enrichment round-2 weapon affix rolled at placement (null = a plain weapon — the identity).
-      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, scrollId: null, goldAmount: 0, healFrac: 0 }
+      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, scrollId: null, skillId: null, goldAmount: 0, healFrac: 0 }
       rect.pickupRef = rect.pk // back-ref so the overlap callback resolves the pickup from its body.
       this._disable(rect)
       this._items.push(rect)
@@ -121,6 +124,7 @@ export class PickupPool {
     pk.weaponId = meta.weaponId ?? null
     pk.weaponAffixId = meta.weaponAffixId ?? null // round-2 — the weapon affix rolled at placement (null = plain).
     pk.scrollId = meta.scrollId ?? null
+    pk.skillId = meta.skillId ?? null // skills slice — the skill id for a 'skill' pickup (null = not a skill).
     pk.goldAmount = kind === 'gold' ? (meta.amount ?? GOLD_AMOUNT) : 0
     pk.healFrac = kind === 'heal' ? (meta.healFrac ?? HEAL_PICKUP_FRAC) : 0 // §6.9 — fraction of max HP a heal restores.
     return rect
@@ -173,6 +177,7 @@ export class PickupPool {
     rect.pk.weaponId = null
     rect.pk.weaponAffixId = null
     rect.pk.scrollId = null
+    rect.pk.skillId = null
     rect.pk.healFrac = 0
     const body = rect.body as Phaser.Physics.Arcade.Body
     body.setVelocity(0, 0)

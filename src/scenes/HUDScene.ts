@@ -35,6 +35,10 @@ export class HUDScene extends Phaser.Scene {
   private goldLabel!: Phaser.GameObjects.Text
   private weaponLabel!: Phaser.GameObjects.Text
   private flaskLabel!: Phaser.GameObjects.Text
+  private skill1Label!: Phaser.GameObjects.Text
+  private skill2Label!: Phaser.GameObjects.Text
+  private mutationsLabel!: Phaser.GameObjects.Text
+  private levelTimeLabel!: Phaser.GameObjects.Text
   private bossTrack!: Phaser.GameObjects.Rectangle
   private bossFill!: Phaser.GameObjects.Rectangle
   private bossLabel!: Phaser.GameObjects.Text
@@ -80,6 +84,33 @@ export class HUDScene extends Phaser.Scene {
     this.flaskLabel = this.add
       .text(BAR_X, BAR_Y + BAR_H + 82, '', { fontFamily: 'monospace', fontSize: '18px', color: '#2ecc71' })
       .setOrigin(0, 0)
+      .setScrollFactor(0)
+    // ── Skill loadout (skills slice, AC6) ── two slot labels under the flask line, each "SKILL F: Name" +
+    // a [####----] cooldown bar drawn as a text gauge (programmer-art primitive — no extra rects). Orange to
+    // match the skill pickup colour. Registry-only (decoupled). Defaults keep them sane before the first write.
+    this.skill1Label = this.add
+      .text(BAR_X, BAR_Y + BAR_H + 106, '', { fontFamily: 'monospace', fontSize: '18px', color: '#ff9f43' })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+    this.skill2Label = this.add
+      .text(BAR_X, BAR_Y + BAR_H + 130, '', { fontFamily: 'monospace', fontSize: '18px', color: '#ff9f43' })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+
+    // ── Active MUTATIONS list (build-&-replay slice, AC4) ── under the skill labels, the run's picked
+    // mutations as a joined name list (registry-only — decoupled). Green to match the mutation overlay frame.
+    // Empty until the first pick (a fresh run shows no line — the additive identity). Defaults keep it sane.
+    this.mutationsLabel = this.add
+      .text(BAR_X, BAR_Y + BAR_H + 154, '', { fontFamily: 'monospace', fontSize: '17px', color: '#2ecc71' })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+
+    // ── Per-level fast-clear TIMER (build-&-replay slice, AC5) ── top-RIGHT (under the HUD tag) so it reads
+    // as a speed-run clock. Shown only on a TIMED level (levelTime > 0 — a normal, non-set-piece level); turns
+    // amber as it nears the bonus threshold (so the incentive reads), hidden on a boss/miniboss arena.
+    this.levelTimeLabel = this.add
+      .text(DESIGN_WIDTH - 16, 40, '', { fontFamily: 'monospace', fontSize: '18px', color: '#2ecc71' })
+      .setOrigin(1, 0)
       .setScrollFactor(0)
 
     // ── Boss HP bar (§6.6, AC56) ── created hidden; update() shows it ONLY while `bossActive` is true
@@ -133,6 +164,35 @@ export class HUDScene extends Phaser.Scene {
     const maxFlasks = this.registry.get('maxFlasks') ?? 0
     this.flaskLabel.setText(`FLASK ${flasks}/${maxFlasks} [Q]`)
 
+    // Skill loadout (skills slice, AC6) — both slots' names + a cooldown gauge per slot. The gauge reads the
+    // 0..1 cooldown fraction (1 = just fired, 0 = ready) as a draining bar of filled blocks; an empty slot or
+    // a ready filled slot shows the full bar. Decoupled — registry reads only. Defaults keep it sane.
+    this._setSkillLabel(this.skill1Label, 'F', this.registry.get('skill1') ?? '—', this.registry.get('skill1Cd') ?? 0)
+    this._setSkillLabel(this.skill2Label, 'C', this.registry.get('skill2') ?? '—', this.registry.get('skill2Cd') ?? 0)
+
+    // Active MUTATIONS list (build-&-replay slice, AC4) — the run's picked perks. Empty string → no line shown
+    // (a fresh run / a run with no mutation picked). Registry-only (decoupled). Defaults keep it sane.
+    const mutations = this.registry.get('mutations') ?? ''
+    this.mutationsLabel.setText(mutations ? `MUTATIONS: ${mutations}` : '')
+
+    // Per-level fast-clear TIMER (build-&-replay slice, AC5) — ms elapsed on the current timed level. 0 = an
+    // untimed boss/miniboss arena → hide the clock. Turns AMBER in the last quarter of the bonus window (so
+    // the speed incentive reads), and grey once the bonus is missed (over the threshold → no longer earnable).
+    const levelTime = this.registry.get('levelTime') ?? 0
+    const bonusTime = this.registry.get('levelBonusTime') ?? 0
+    if (levelTime > 0 && bonusTime > 0) {
+      const remaining = Math.max(0, bonusTime - levelTime)
+      const secs = (remaining / 1000).toFixed(1)
+      if (remaining <= 0) {
+        this.levelTimeLabel.setText('CLEAR (no bonus)').setColor('#8b949e')
+      } else {
+        const nearing = remaining <= bonusTime * 0.25 // last quarter of the window → amber urgency.
+        this.levelTimeLabel.setText(`FAST CLEAR ${secs}s`).setColor(nearing ? '#f4d03f' : '#2ecc71')
+      }
+    } else {
+      this.levelTimeLabel.setText('')
+    }
+
     // ── Boss HP bar (§6.6, AC56) ── shown ONLY while `bossActive` is true (GameScene sets it in the
     // boss room and CLEARS it on death/teardown). When inactive the bar is hidden, so a stale prior-run
     // value never shows (review MINOR — the registry survives scene restarts).
@@ -148,5 +208,20 @@ export class HUDScene extends Phaser.Scene {
       this.bossFill.width = BOSS_BAR_W * bfrac
       this.bossLabel.setText(this.registry.get('bossName') || 'BOSS')
     }
+  }
+
+  // ── _setSkillLabel(label, key, name, cdFrac) (skills slice, AC6) ── render a skill slot as "SKILL <key>:
+  // <name> [####----]" where the bar is a text gauge of `SKILL_BAR_CELLS` blocks: filled (█) for the READY
+  // portion (1 − cdFrac), empty (░) for the cooling portion (cdFrac). An empty slot ('—') shows no bar (just
+  // "SKILL <key>: —"). Programmer-art primitive — a text gauge, no extra GameObjects (KISS).
+  _setSkillLabel(label: Phaser.GameObjects.Text, key: string, name: string, cdFrac: number) {
+    if (name === '—' || !name) {
+      label.setText(`SKILL ${key}: —`)
+      return
+    }
+    const SKILL_BAR_CELLS = 8
+    const filled = Math.round((1 - Phaser.Math.Clamp(cdFrac, 0, 1)) * SKILL_BAR_CELLS)
+    const bar = '█'.repeat(filled) + '░'.repeat(SKILL_BAR_CELLS - filled)
+    label.setText(`SKILL ${key}: ${name} [${bar}]`)
   }
 }

@@ -29,8 +29,9 @@
 // after each buy so a depleted wallet greys the rows. This keeps the data trivial + the genre's "dump gold
 // at the shop" loop intact.
 
-// The KNOWN item kinds — the effect family GameScene._buyShopItem dispatches on (a small KNOWN set).
-export type ShopItemKind = 'heal' | 'scroll' | 'weapon' | 'flask'
+// The KNOWN item kinds — the effect family GameScene._buyShopItem dispatches on (a small KNOWN set). The
+// skills slice adds 'skill' (buy a specific skill into the loadout — the same kind-dispatch the pickup uses).
+export type ShopItemKind = 'heal' | 'scroll' | 'weapon' | 'flask' | 'skill'
 
 // A self-contained shop catalog row (Decision 76). Kind-specific params are optional and read ONLY by
 // that kind's branch (undefined-safe), mirroring how Pickup reads weaponId/scrollId/healFrac.
@@ -42,6 +43,7 @@ export interface ShopItem {
   kind: ShopItemKind
   healFrac?: number
   weaponId?: string
+  skillId?: string
 }
 
 export const SHOP_ITEMS: ShopItem[] = [
@@ -86,6 +88,27 @@ export const SHOP_ITEMS: ShopItem[] = [
     kind: 'weapon',
     weaponId: 'spear',
   },
+  // ── VENDOR SKILL (KNIVES) ── a guaranteed SKILL the player can buy into the loadout (the skills slice's gold
+  // sink into the secondary-item layer). _buyShopItem dispatches 'skill' → equipSkill (fill the first empty
+  // slot, else slot 0) — the SAME path the skill pickup uses (DRY). Mid-priced (a cooldown burst tool).
+  {
+    id: 'skillKnives',
+    name: 'Throwing Knives',
+    desc: 'Equip a knife-throw skill',
+    price: 28,
+    kind: 'skill',
+    skillId: 'knives',
+  },
+  // ── VENDOR SKILL (FROST GRENADE) ── a guaranteed radial-freeze blast skill — the build-defining crowd-control
+  // pick (so gold can buy into the skill economy even on a level with no skill drops). Pricier — it's a panic-button AoE.
+  {
+    id: 'skillFrost',
+    name: 'Frost Grenade',
+    desc: 'Equip a radial-freeze skill',
+    price: 36,
+    kind: 'skill',
+    skillId: 'frostGrenade',
+  },
 ]
 
 // id → row lookup (handy for logging / a future targeted buy). DRY: one source. KISS — a flat map.
@@ -93,4 +116,4 @@ export const SHOP_ITEMS_BY_ID: Record<string, ShopItem> = Object.fromEntries(SHO
 
 // The KNOWN item kinds (the verifier asserts every item.kind is one of these — a malformed catalog fails
 // loudly under node, mirroring the boss-attack-kinds + upgrade-table well-formedness checks).
-export const SHOP_ITEM_KINDS: ShopItemKind[] = ['heal', 'scroll', 'weapon', 'flask']
+export const SHOP_ITEM_KINDS: ShopItemKind[] = ['heal', 'scroll', 'weapon', 'flask', 'skill']

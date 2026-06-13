@@ -7,9 +7,11 @@ import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
+import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
 import { Effects } from '../effects/Effects.js'
+import { Sound } from '../audio/Sound.js'
 import { generateLevel, TILE_SIZE } from '../world/LevelGenerator.js'
 import { TileMap } from '../world/TileMap.js'
 import { createRunState } from '../core/RunState.js'
@@ -17,11 +19,14 @@ import { scaleAtDepth, scaleSpec, scaleBossSpec } from '../config/difficulty.js'
 import { createMetaState } from '../core/MetaState.js'
 import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
+import { DeployablePool } from '../entities/DeployablePool.js'
 import { WEAPONS, WEAPON_AFFIXES, WEAPON_AFFIX_CHANCE, WEAPON_AFFIXES_BY_ID, foldWeaponAffix } from '../config/weapons.js'
+import { SKILLS, SKILLS_BY_ID } from '../config/skills.js'
 import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import type { BossAttackSpec } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
+import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD } from '../config/mutations.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { mulberry32 } from '../util/rng.js'
@@ -32,6 +37,7 @@ import type { EnemySpec, EliteAffixSpec } from '../config/enemies.js'
 import type { BiomeConfig } from '../config/biomes.js'
 import type { RoomType } from '../config/roomTypes.js'
 import type { ShopItem } from '../config/shop.js'
+import type { SkillSpec } from '../config/skills.js'
 import type { LevelDescription } from '../world/LevelGenerator.js'
 import type { HitResult } from '../combat/damage.js'
 import type { RNG } from '../util/rng.js'
@@ -129,6 +135,27 @@ const WEAPON_PICKUP_POOL = ['hammer', 'bow', 'sword', 'spear']
 // "spend now vs save for the next vendor" decision is real). A given run seed always places the same shops.
 const SHOP_LEVEL_CHANCE = 0.55 // ~half-plus of normal levels carry a vendor (a reliable gold outlet).
 
+// ── In-run skill pickup placement (skills design §6.5, AC5) ── a per-level FIXED chance to place ONE skill
+// pickup (the loadout layer's world drop), rolled off a fresh seeded RNG (off the generator's pinned draw —
+// the same level-pin discipline as the weapon pickup / shop, so the regression pin + determinism deep-equal
+// stay intact). Sized so a skill appears often enough to seed a loadout early but not every level (so picking
+// it up is a real moment). A given run seed always places the same skills.
+const SKILL_PICKUP_CHANCE = 0.45
+
+// ── Timed-clear bonus (build-&-replay design §6.4, AC5 — the "timed door" speed incentive, no new door
+// entity) ── each NORMAL level starts a timer when it's built; reaching the exit Door before CLEAR_BONUS_TIME
+// grants a one-shot bonus (gold + cells) with an FX/HUD pop. Over the threshold → nothing (no penalty). The
+// timer is PAUSE-AWARE (review MINOR — the real-vs-gameplay-dt fix): the world freezes on the gameplay dt while a
+// modal (the mandatory mutation offer / the in-run shop) is up, but this.time.now keeps advancing — so the frozen
+// modal interval is EXCLUDED from the measurement by advancing levelStartedAt past it on modal close
+// (_pauseLevelTimer / _resumeLevelTimer). Both _grantTimedClearBonus AND the HUD's levelTime then count only
+// un-paused, INTERACTIVE time — so reading a forced overlay or visiting the vendor never burns the fast-clear
+// window. Boss/miniboss levels are NOT timed (they're set-piece gates, not speed-runs) — _buildLevel stamps the
+// timer only for the normal path.
+const CLEAR_BONUS_TIME = 45000 // ms — clear a normal level within 45s of building it to earn the bonus.
+const CLEAR_BONUS_GOLD = 15 // run-only gold granted on a fast clear (feeds the in-run shop / gold sink).
+const CLEAR_BONUS_CELLS = 2 // meta cells granted on a fast clear (banked at run end — the lasting reward).
+
 export class GameScene extends Phaser.Scene {
   // ── Field declarations (type-only; useDefineForClassFields:false → zero runtime effect) ──
   private runSeed!: number
@@ -145,12 +172,30 @@ export class GameScene extends Phaser.Scene {
   private _shopCollider!: Phaser.Physics.Arcade.Collider | null
   private shopOpen!: boolean
   private shopOverlay!: ShopOverlay | null
+  // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
+  private mutationOpen!: boolean
+  private mutationOverlay!: MutationOverlay | null
+  // ── Timed-clear bonus state (build-&-replay §6.4) — the wall-clock the CURRENT normal level was built at
+  // (0 = an untimed level: boss/miniboss arena), used to grant a fast-clear bonus on the door-reach path. ──
+  private levelStartedAt!: number
+  // ── Modal-pause clock (build-&-replay §6.4, review MINOR — real-vs-gameplay-dt fix) — the wall-clock a modal
+  // (shop / mutation overlay) was opened at (0 = no modal up). The world FREEZES on the gameplay dt while a modal
+  // is open, but this.time.now keeps advancing — so without this, time spent reading the (mandatory) mutation
+  // offer or shopping would be charged against the fast-clear window. _pauseLevelTimer stamps this on open;
+  // _resumeLevelTimer ADVANCES levelStartedAt by the frozen interval on close, so the bonus + the HUD timer count
+  // only un-paused, interactive time. ──
+  private _modalPausedAt!: number
   private effects!: Effects
+  // audio §6.3 — the procedural-SFX façade. NAMED `sfx` (NOT `sound`): Phaser.Scene already owns a
+  // `sound` member (the WebAudioSoundManager), which Sound REUSES via scene.sound — so the façade
+  // can't shadow it. The M toggle flips `this.sfx.mute` (which proxies Phaser's global game.sound.mute).
+  private sfx!: Sound
   private playerHitboxes!: HitboxPool
   private enemyHitboxes!: HitboxPool
   private projectilePool!: ProjectilePool
   private enemyProjectilePool!: ProjectilePool
   private pickupPool!: PickupPool
+  private deployables!: DeployablePool
   private input2!: InputType
   private player!: Player
   private enemyHurtboxes!: Phaser.Physics.Arcade.Group
@@ -213,6 +258,17 @@ export class GameScene extends Phaser.Scene {
     // §6.9 — seed the flask (heal valve) HUD keys so the parallel HUD never flashes stale charges.
     this.registry.set('flasks', this.runState.flasks)
     this.registry.set('maxFlasks', this.runState.maxFlasks)
+    // skills slice — seed the two skill-slot HUD keys (name + 0..1 cooldown fraction) so a fresh run never
+    // flashes a stale prior-run skill (the registry survives scene restarts). Empty slots → '—', cd 0.
+    this.registry.set('skill1', '—')
+    this.registry.set('skill2', '—')
+    this.registry.set('skill1Cd', 0)
+    this.registry.set('skill2Cd', 0)
+    // build-&-replay slice — seed the mutation list (joined active-mutation names) + the per-level timer keys so
+    // the parallel HUD never flashes a stale prior-run mutation/timer (the registry survives scene restarts).
+    this.registry.set('mutations', '')
+    this.registry.set('levelTime', 0) // ms elapsed on the current level (0 = untimed: a boss/miniboss arena).
+    this.registry.set('levelBonusTime', CLEAR_BONUS_TIME) // the fast-clear threshold the HUD turns amber near.
     // §6.6.3 (review MINOR) — seed the boss HP-bar keys to "no boss" so a replayed run never flashes the
     // PREVIOUS run's boss bar (the registry survives scene restarts — the same stale-leak HP guards for).
     this.registry.set('bossActive', false)
@@ -236,9 +292,19 @@ export class GameScene extends Phaser.Scene {
     this._shopCollider = null // the player×vendor in-range overlap (removed on teardown).
     this.shopOpen = false // true while the shop overlay is up (gameplay is paused beneath it).
     this.shopOverlay = null // the live ShopOverlay UI while open, else null.
+    // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
+    this.mutationOpen = false // true while the mutation overlay is up (gameplay is paused beneath it).
+    this.mutationOverlay = null // the live MutationOverlay UI while open, else null.
+    // ── Timed-clear bonus state (build-&-replay §6.4) — stamped per normal level in _buildLevel (0 = untimed). ──
+    this.levelStartedAt = 0
+    this._modalPausedAt = 0 // wall-clock a modal was opened at (0 = none up); excludes frozen modal time from the timer.
     this.effects = new Effects(this, (secs) => {
       this.hitstopTimer = Math.min(HITSTOP_CAP, Math.max(this.hitstopTimer, secs))
     })
+    // ── Procedural SFX façade (audio §6.3, Decision 1/2) ── reuses Phaser's shared AudioContext
+    // (scene.sound.context). Degrades to a silent no-op under NoAudio/headless (AC7 — never throws).
+    // PERSISTS across level rebuilds (created ONCE here, like Effects), injected into the Player below.
+    this.sfx = new Sound(this)
 
     // ── Combat pools (Decisions 16/28/30/62/65) ── one player + one enemy HitboxPool + one PLAYER
     // ProjectilePool (the bow fires from it) + one ENEMY ProjectilePool (the Shooter archetype + the
@@ -246,17 +312,30 @@ export class GameScene extends Phaser.Scene {
     // (created ONCE here, released on teardown) — the same lifecycle the player pool already has.
     this.playerHitboxes = new HitboxPool(this, 'player')
     this.enemyHitboxes = new HitboxPool(this, 'enemy')
-    this.projectilePool = new ProjectilePool(this, 'player')
+    // The PLAYER pool is sized 16 (not the default 8): the bow used ≤2 in-flight shots, but skills (skills
+    // design) ALSO fire from this same pool — a 5-shard iceShards volley spends 5 slots in ONE frame, a
+    // deployed turret holds a slot every 0.7s, and bow/knife shots (0.9–1.2s lifetime) may still be live.
+    // At 8, that combination can EXHAUST the pool, and acquire() returns null silently (the skill shots just
+    // vanish — the slice reads as "not firing"). 16 pre-allocated rects comfortably cover volley+turret+
+    // in-flight shots and remove the silent-drop edge (cheap — the rects are parked+disabled until acquired).
+    this.projectilePool = new ProjectilePool(this, 'player', 16)
     this.enemyProjectilePool = new ProjectilePool(this, 'enemy') // §6.6.3 (Decision 65) — enemy/boss shots.
 
     // ── Pickup pool (§6.5, Decision 54) ── pooled Cells/gold/scroll/weapon pickups; persists across
     // rebuilds (live pickups are released on teardown). Enemy drops + generator pickups acquire from it.
     this.pickupPool = new PickupPool(this)
 
+    // ── Deployable pool (skills design §6.4, AC3 — the turret skill's ONE new pooled entity) ── pooled
+    // stationary auto-firing turrets the 'turret' skill deploys; persists across rebuilds (live turrets are
+    // released on teardown). It fires from the PLAYER projectilePool so its shots resolve through the
+    // existing projectile→enemy overlap with no new wiring (Decision 5). The cut-line entity (volley/blast
+    // need none) — mirrors the mandated pooling convention (acquire/release, zero per-deploy allocation).
+    this.deployables = new DeployablePool(this)
+
     // ── Input + Player ── created ONCE; the Player is repositioned at each new entrance (it and its
     // pools persist; only the level geometry/enemies/door rebuild).
     this.input2 = new Input(this)
-    this.player = new Player(this, 0, 0, this.playerHitboxes, this.projectilePool)
+    this.player = new Player(this, 0, 0, this.playerHitboxes, this.projectilePool, this.sfx)
     this.player.onDeath = () => this._onPlayerDeath()
     // ── Apply the META-folded start stats to the Player (§6.5, Decision 60, AC53) ── raises maxHp +
     // refills hp to it, sets the melee/dodge modifiers, equips the starting weapon. IDENTITY-safe: a
@@ -404,6 +483,13 @@ export class GameScene extends Phaser.Scene {
   // runState.hp — HP carry is owned by create() (the one-time sync) + _nextLevel (the pre-teardown
   // write), so a rebuild never refills HP.
   _buildLevel(): void {
+    // ── Re-equip the carried skill loadout (skills design §6.7, Decision 7, AC4) ── re-fold RunState's
+    // skillId1/skillId2 onto the live Player at the start of EVERY build (normal AND boss), so the loadout
+    // is carried across level rebuilds; cooldowns reset on rebuild (equipSkill zeroes them — KISS). A fresh
+    // run has both ids null → a no-op (both slots empty — the identity, AC8). DRY: ONE re-equip site for
+    // both branches (so the boss-level early-return below is still covered).
+    this._reequipSkills()
+
     // ── BOSS-LEVEL BRANCH (design §6.6.3, Decision 66/67, AC57) ── the ONE branch _buildLevel gains:
     // when the run is on the boss biome's final level, build the boss ARENA instead of a normal level
     // (a flat walled room with the boss, an arena hazard, and NO exit Door — the boss is the gate).
@@ -416,6 +502,12 @@ export class GameScene extends Phaser.Scene {
     const desc = generateLevel(this.runState.seed, biome)
     this.desc = desc
     this.tileMap = new TileMap(this, desc)
+
+    // ── Timed-clear bonus (build-&-replay §6.4, AC5) ── stamp the level-start wall-clock so reaching the exit
+    // Door before CLEAR_BONUS_TIME earns the fast-clear bonus (_nextLevel reads this). A MINIBOSS level is NOT
+    // timed (it's a set-piece gate, not a speed-run) → leave the timer at 0 (untimed) so it never grants a bonus
+    // / shows a timer. The boss arena (_buildBossLevel) also leaves it 0 (it has no exit Door at all).
+    this.levelStartedAt = this.runState.isMinibossLevel() ? 0 : this.time.now
 
     // Level-object tracking (destroyed on rebuild via _levelObjects). MUST be initialized BEFORE
     // _applyRoomType — a tagged room pops a banner that pushes here (_popRoomBanner). The constructor
@@ -501,6 +593,11 @@ export class GameScene extends Phaser.Scene {
     // to place ONE vendor, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the level pin
     // intact, the same discipline as the weapon pickup). Placed at a standable spot off the entrance/exit.
     this._maybePlaceShop(desc)
+
+    // ── Sparse skill pickup (skills design §6.5, AC5) ── a low FIXED per-level chance to offer ONE skill to
+    // equip, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the level pin intact, the same
+    // off-the-pin discipline as the weapon pickup / shop). Deterministic per seed (a replay places the same skill).
+    this._maybePlaceSkillPickup(desc)
 
     // ── Branch treasure reward (§6.14, Decision 80, AC67) ── if the generator emitted an optional treasure
     // branch (desc.branchTreasure), place a GUARANTEED reward (gold/scroll/weapon/heal) on its standable
@@ -624,6 +721,7 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('bossName', bossSpec.name)
     this.registry.set('bossHp', this.boss.hp)
     this.registry.set('bossMaxHp', this.boss.maxHp)
+    this.sfx.bossSpawn() // audio §6.3 (AC5) — the miniboss-entrance swell (same set-piece tell as the finale).
   }
 
   // ── _onMinibossDefeated() (Enrichment round-2, §6.6.8) ── the miniboss-kill edge: NOT a run-end (the run
@@ -633,6 +731,7 @@ export class GameScene extends Phaser.Scene {
   _onMinibossDefeated(): void {
     this._clearBossHud()
     this.cameras.main.flash(220, 244, 208, 63) // a brief gold flash marks the set-piece clear.
+    this.sfx.bossDefeat() // audio §6.3 (AC5) — the kill flourish (same as the finale's, DRY).
   }
 
   // ── _enemyNotFlyer(enemyRect) ── the shared collider predicate (Decision 68/AC59): true for a normal
@@ -658,6 +757,7 @@ export class GameScene extends Phaser.Scene {
     this.desc = desc
     this.tileMap = new TileMap(this, desc)
     this.isBossRoom = true // a flag the HUD-clear + teardown read (review MINOR — boss-bar lifecycle).
+    this.levelStartedAt = 0 // the boss arena is NEVER timed (no exit Door — the boss is the gate; build-&-replay §6.4).
     // ── Reset the room-type state (round-3) ── the boss arena is NEVER tagged (it IS the set-piece), and it
     // does NOT call _applyRoomType. Reset roomType/roomDamageTakenMult to the neutral identity here so a
     // PREVIOUS level's CURSED debuff (_hurtPlayer) or lootMult (boss-add drops) can't leak into the boss room.
@@ -721,6 +821,7 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('bossName', bossSpec.name)
     this.registry.set('bossHp', this.boss.hp)
     this.registry.set('bossMaxHp', this.boss.maxHp)
+    this.sfx.bossSpawn() // audio §6.3 (AC5) — the boss-entrance swell announces the set-piece.
 
     // ── Level colliders (the player + the boss stand on the floor; pickups n/a here but harmless). ──
     this._solidColliders.push(this.physics.add.collider(this.player.collider, this.tileMap.solids))
@@ -766,6 +867,7 @@ export class GameScene extends Phaser.Scene {
     // A short victory flourish (freeze/flash) then hand off to Victory with the run summary.
     this.hitstopTimer = 0.2
     this.cameras.main.flash(260, 88, 214, 141)
+    this.sfx.bossDefeat() // audio §6.3 (AC5) — the win flourish on the final boss kill.
     const summary = this.runState.summary(this.time.now, true, this.runSeed)
     this.time.delayedCall(900, () => this.scene.start('Victory', summary))
   }
@@ -785,6 +887,7 @@ export class GameScene extends Phaser.Scene {
     if (this.transitioning || this.gameOver) return // one-shot: a multi-frame overlap fires once.
     this.transitioning = true
     this.cameras.main.flash(160, 244, 208, 63) // a brief yellow flash marks the level change.
+    this.sfx.transition() // audio §6.3 (AC5) — the door/level-change whoosh.
     // Defer the rebuild off the physics step (footgun guard). delayedCall(0) runs next frame.
     this.time.delayedCall(0, () => this._nextLevel())
   }
@@ -800,6 +903,12 @@ export class GameScene extends Phaser.Scene {
       this._completeRun()
       return
     }
+    // ── Timed-clear bonus (build-&-replay §6.4, AC5) ── BEFORE advancing, check whether THIS level was
+    // cleared fast: a timed level (levelStartedAt > 0 — i.e. a normal, non-set-piece level) reached within
+    // CLEAR_BONUS_TIME of being built grants a one-shot gold+cells bonus with an FX/HUD pop. Over the
+    // threshold (or an untimed boss/miniboss level) → nothing (no penalty). Read here on the door-reach path,
+    // against the level just cleared, so it never double-fires (the one-shot transitioning guard already gates it).
+    this._grantTimedClearBonus()
     // Capture carried HP into the RunState BEFORE the rebuild (Decision 46 — sync exactly once here).
     this.runState.hp = this.player.hp
     const prevBiomeIndex = this.runState.biomeIndex // §6.9 — detect a biome ROLL across advance() (Decision 72).
@@ -817,6 +926,11 @@ export class GameScene extends Phaser.Scene {
     this._teardownLevel()
     this._buildLevel() // reads the advanced biome/seed/depth from RunState (HP NOT refilled).
     this._updateHint()
+    // ── Offer a MUTATION on a biome transition (build-&-replay §6.5, AC2) ── AFTER the new level is built (so
+    // the overlay draws over the rebuilt world + the player is at the new entrance), offer a seeded 3-of-N
+    // mutation choice when we just rolled into a NEW biome (the same seam the flask refill / power scroll use).
+    // It freezes gameplay (mutationOpen gates update) until the player picks. No-op on a within-biome advance.
+    if (this.runState.biomeIndex !== prevBiomeIndex) this._offerMutation()
     // eslint-disable-next-line no-console
     console.log(
       `[GameScene] advanced — depth ${this.runState.depth}, biome ${this.runState.biome().name} ` +
@@ -837,6 +951,7 @@ export class GameScene extends Phaser.Scene {
     // scrolls are run-only and simply NOT passed (permadeath loses them). Under the gameOver guard so it
     // fires exactly once per run. The summary carries cellsBanked for GameOver's readout.
     this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth })
+    this.sfx.bossDefeat() // audio §6.3 (AC5) — a win flourish on a completed run (the gold "RUN COMPLETE" path).
     this.scene.start('GameOver', this.runState.summary(this.time.now, true, this.runSeed))
   }
 
@@ -888,6 +1003,17 @@ export class GameScene extends Phaser.Scene {
       this.shopOverlay = null
     }
     this.shopOpen = false
+    // Mutation overlay teardown (build-&-replay §6.5) — defensive: the overlay is offered AFTER _buildLevel and
+    // a transition can't fire while it's open (mutationOpen gates update), but force-close any dangling overlay
+    // so it never leaks across a rebuild. mutationOpen is forced false so the update() gate re-opens gameplay.
+    if (this.mutationOverlay) {
+      this.mutationOverlay.close()
+      this.mutationOverlay = null
+    }
+    this.mutationOpen = false
+    // Clear any dangling modal-pause stamp (build-&-replay §6.4) so a half-open modal at teardown can't leak a
+    // paused interval into the next level's fresh timer (_buildLevel re-stamps levelStartedAt from scratch).
+    this._modalPausedAt = 0
     if (this._shopCollider) {
       this.physics.world.removeCollider(this._shopCollider)
       this._shopCollider = null
@@ -906,6 +1032,7 @@ export class GameScene extends Phaser.Scene {
     this.enemyHitboxes.releaseAll()
     this.projectilePool.releaseAll()
     this.enemyProjectilePool.releaseAll() // §6.6.3 — drop any in-flight enemy/boss shots on rebuild.
+    this.deployables.releaseAll() // skills slice — drop any deployed turret on rebuild (it doesn't carry levels).
   }
 
   _updateHint(): void {
@@ -1035,7 +1162,134 @@ export class GameScene extends Phaser.Scene {
     if (this.player.swapWeapon()) {
       this.cameras.main.flash(120, 174, 214, 241) // a faint blue pulse marks the weapon swap.
       this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 })
+      this.sfx.swap() // audio §6.3 (AC4) — the swap click-clack (only on a real swap).
     }
+  }
+
+  // ── _reequipSkills() (skills design §6.7, Decision 7, AC4) ── re-fold the carried RunState.skillId1/
+  // skillId2 onto the live Player so the loadout survives a level rebuild. Resolves each id via SKILLS_BY_ID
+  // → equipSkill(slot) (which also resets that slot's cooldown — the rebuild cooldown reset, KISS). A null id
+  // leaves the slot empty (equipSkill is only called for a present id; the empty slot already came from
+  // applyStartStats / the prior frame). Called at the start of every _buildLevel/_buildBossLevel.
+  _reequipSkills(): void {
+    const ids = [this.runState.skillId1, this.runState.skillId2]
+    for (let slot = 0; slot < 2; slot++) {
+      const id = ids[slot]
+      if (!id) continue
+      const spec = SKILLS_BY_ID[id]
+      if (spec) this.player.equipSkill(spec, slot)
+    }
+  }
+
+  // ── _acquireSkill(skillId) (skills design §6.5, AC5) ── the shared "gain a skill" path used by the pickup,
+  // shop, and treasure-branch reward arms (DRY — one place owns the slot choice + the RunState record). Fill
+  // the FIRST EMPTY skill slot; if both are full, replace slot 0 (so a third skill is still a meaningful pick,
+  // not a dead drop). equipSkill resets the chosen slot's cooldown (a freshly equipped skill is usable now).
+  // Records the id on RunState (skillId1/skillId2) so a level rebuild re-equips the SAME skill (the carry
+  // discipline the weaponId scalars follow). A bad id is a defensive no-op (never throws).
+  _acquireSkill(skillId: string): void {
+    const spec = SKILLS_BY_ID[skillId]
+    if (!spec) return
+    // First empty slot, else slot 0 (replace).
+    const slot = this.player.skills[0] == null ? 0 : this.player.skills[1] == null ? 1 : 0
+    this.player.equipSkill(spec, slot)
+    if (slot === 0) this.runState.skillId1 = skillId
+    else this.runState.skillId2 = skillId
+  }
+
+  // ── _useSkill(slot) (skills design §6.3, Decision 4, AC2/AC3) ── the kind-dispatched skill trigger. Ask the
+  // Player for the spec to fire (tryUseSkill returns it + arms the cooldown only if the slot is filled AND off
+  // cooldown — else null, a no-op: no double-fire, no crash, the identity for an empty slot). Then dispatch on
+  // the kind, REUSING the existing combat primitives — NO new combat math:
+  //   volley → a fan of pooled PLAYER projectiles fired along facing (ProjectilePool, the round-3 aim:{angle}).
+  //   blast  → instant radial damage to every enemy/boss within radius (_radialDamage over this.enemies+boss).
+  //   turret → a timed deployable auto-firer (DeployablePool — the ONE new pooled entity).
+  // Each carries the skill's OPTIONAL status (volley/turret stamp it on the shot; blast applies it per target).
+  _useSkill(slot: number): void {
+    const spec = this.player.tryUseSkill(slot)
+    if (!spec) return // empty / on cooldown → no-op (the identity).
+    const cx = this.player.body.center.x
+    const cy = this.player.body.center.y
+    const facing = this.player.facing
+    if (spec.kind === 'volley') {
+      // Fire `count` projectiles fanned across `spread` radians centered on facing. The base aim is 0 (right)
+      // or π (left); each shot offsets by an even slice of the spread so the fan is symmetric about facing.
+      if (this.projectilePool && spec.projectile && spec.count && spec.count > 0) {
+        const baseAngle = facing >= 0 ? 0 : Math.PI
+        const spread = spec.spread ?? 0
+        const n = spec.count
+        for (let i = 0; i < n; i++) {
+          // Map i ∈ [0, n-1] to a symmetric offset in [-spread/2, +spread/2] (a single shot fires straight).
+          const t = n === 1 ? 0 : i / (n - 1) - 0.5
+          const angle = baseAngle + t * spread
+          this.projectilePool.acquire({ cx, cy, facing }, spec.projectile, this.player.id, spec.status ?? null, { angle })
+        }
+      }
+    } else if (spec.kind === 'blast') {
+      // Instant radial AoE: damage every enemy/boss within radius, knock them away, apply the optional status,
+      // then pop a particle ring so the blast reads. Reuses resolveHit + effects (no new combat math).
+      this._radialDamage(cx, cy, spec.radius ?? 0, spec.damage ?? 0, spec.knockback ?? 0, spec.status)
+      this._blastRingFx(cx, cy, spec.radius ?? 0)
+    } else if (spec.kind === 'turret') {
+      // Deploy a stationary auto-firer at the player's feet for spec.duration (DeployablePool — the cut-line
+      // entity). It scans this.enemies+boss each fire beat + fires the PLAYER pool, so its hits resolve
+      // through the existing projectile→enemy overlap. Placed on the player's body so it sits where you stand.
+      this.deployables.acquire(cx, cy, spec)
+    }
+    this.sfx.skill(spec.kind) // skills slice (AC3) — the skill-use cue, timbre per kind.
+  }
+
+  // ── _radialDamage(x, y, radius, damage, knockback, status) (skills design §6.3, Decision 1, AC3) ── the
+  // 'blast' skill's instant radial AoE: damage every LIVE, hittable enemy AND the boss within `radius` px of
+  // (x, y), shoving each AWAY from the blast center. REUSES resolveHit (a synthetic swing from the blast
+  // origin) + enemy.onHit + applyStatus + effects.hit — NO new combat primitive. The blast origin is the
+  // attacker (so resolveHit's away-direction shoves each target out from the center); allowBackstab:false (a
+  // radial blast never backstabs). A null radius/damage is a defensive no-op (the verifier guards positive).
+  _radialDamage(x: number, y: number, radius: number, damage: number, knockback: number, status: SkillSpec['status']): void {
+    if (radius <= 0 || damage <= 0) return
+    const r2 = radius * radius
+    const swing = { damage, knockback }
+    // Apply to a single target if it's within range (DRY for the enemy loop + the boss).
+    const hitTarget = (target: Enemy | Boss) => {
+      if (!target || target.dead || (target as any).removed || !target.isHittable()) return
+      const tx = target.body.center.x
+      const ty = target.body.center.y
+      const dx = tx - x
+      const dy = ty - y
+      if (dx * dx + dy * dy > r2) return // outside the blast radius.
+      // The blast origin is the attacker; the target's away-direction shove comes from resolveHit's geometry.
+      const result = resolveHit({ cx: x, facing: dx >= 0 ? 1 : -1 }, target.attackerShape, swing, { allowBackstab: false })
+      target.onHit(result)
+      target.applyStatus(this._scaleStatus(status)) // the skill's optional status (freeze/burn), scaled by Venom.
+      this.effects.hit(tx, ty, { damage: result.damage })
+      this.sfx.hit({ damage: result.damage }) // the impact cue (throttled in the façade for a multi-target blast).
+    }
+    for (const enemy of this.enemies) hitTarget(enemy)
+    if (this.boss && !this.boss.removed) hitTarget(this.boss)
+  }
+
+  // ── _blastRingFx(x, y, radius) (skills design §6.3) ── a particle ring marking the blast edge (the visual
+  // tell for the radial AoE). Reuses the pooled spark burst (effects.hit with damage 0 = sparks, no number/
+  // shake spam) at the center plus a camera flash — primitives only, no new FX primitive (DRY).
+  _blastRingFx(x: number, y: number, radius: number): void {
+    this.effects.hit(x, y, { damage: 0 }) // a spark pop at the blast center (reuses the pooled sparks).
+    this.cameras.main.flash(120, 120, 200, 255) // a faint blue pulse marks the blast (primitives only).
+  }
+
+  // ── _maybePlaceSkillPickup(desc) (skills design §6.5, AC5) ── deterministically (off the level seed) maybe
+  // place ONE skill pickup so the loadout layer is obtainable in the world. Off a fresh mulberry32 (a DISTINCT
+  // mix constant than the weapon/shop rolls, so the rolls don't correlate) — NOT on the generator's pinned
+  // draw, so the level pin stays intact (the SAME off-the-pin discipline as the weapon pickup). Placed at a
+  // standable spot off the entrance/exit, else a pickup point, else the midpoint.
+  _maybePlaceSkillPickup(desc: LevelDescription): void {
+    const rng = mulberry32((desc.seed ^ 0x5217115) >>> 0) // distinct mix from the weapon/shop/branch RNGs.
+    if (rng() >= SKILL_PICKUP_CHANCE) return
+    const skillId = SKILLS[Math.floor(rng() * SKILLS.length)].id
+    const spot =
+      desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
+      desc.pickups[0] ||
+      { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'skill', { skillId })
   }
 
   // ── _applyRoomType(desc) (Enrichment round-2, §6.15) ── roll a tagged ROOM TYPE off the LEVEL seed (a
@@ -1171,6 +1425,10 @@ export class GameScene extends Phaser.Scene {
     })
     enemy.onDeath = () => {
       this.runState.kills += 1 // bump the run's kill count for the GameOver summary (free; AC46).
+      // ── Predator mutation (build-&-replay §6.3, AC3) ── heal a flat amount on each kill (0 = no mutation →
+      // no-op, the identity; heal() no-ops at full HP / dead). The ONE site this new live-read field is read.
+      if (this.player.onKillHealAmount > 0) this.player.heal(this.player.onKillHealAmount)
+      this.sfx.enemyDie() // audio §6.3 (AC2) — the death crumple (throttled in the façade for a multi-kill frame).
     }
     // ── Cells/loot drop hook (§6.5, Decision 54, AC48) ── on death the Enemy fires this with the
     // captured death-center coords + the Cell count; we spawn pooled pickups there (a Cell always +
@@ -1294,6 +1552,15 @@ export class GameScene extends Phaser.Scene {
       // A run-only scroll boost (build power) — picks a deterministic scroll id off the same RNG.
       const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
       this.pickupPool.acquire(x, y, 'scroll', { scrollId })
+    } else if (roll < 0.68) {
+      // A SKILL (skills design §6.5, AC5 — the treasure branch is a prime spot for the build-defining loadout
+      // layer). Picks a deterministic skill id off the same RNG; collection equips it into the loadout.
+      // IDENTITY (AC8): the skill band is carved out of the FORMER gold band ONLY ([0.58,0.68) was gold at
+      // HEAD) so the weapon (<0.34), scroll (<0.58) and heal (≥0.8) outcomes — and their rng() draw counts —
+      // stay BYTE-IDENTICAL to pre-skills HEAD for the same seed. Only the gold band shrinks (0.58..0.8 →
+      // 0.68..0.8) to make room additively; the others are untouched.
+      const skillId = SKILLS[Math.floor(rng() * SKILLS.length)].id
+      this.pickupPool.acquire(x, y, 'skill', { skillId })
     } else if (roll < 0.8) {
       // A fat gold payout (5× a normal gold pickup) — feeds the in-run shop economy (the gold sink).
       this.pickupPool.acquire(x, y, 'gold', { amount: 25 })
@@ -1331,11 +1598,12 @@ export class GameScene extends Phaser.Scene {
     const enemy = enemyRect.enemyRef
     if (!hb.active || !enemy || !enemy.isHittable() || hb.hitSet.has(enemy.id)) return
     hb.hitSet.add(enemy.id)
-    // PLAYER melee damage = swing × backstab × (meta meleeDamageMult × run scrollDamageMult), composed
-    // + rounded ONCE in resolveHit (§6.5, Decision 60 — the mult is PASSED IN, damage.js stays pure).
+    // PLAYER melee damage = swing × backstab × (meta meleeDamageMult × run scrollDamageMult × MUTATION folds),
+    // composed + rounded ONCE in resolveHit (§6.5, Decision 60 — the mult is PASSED IN, damage.js stays pure).
+    // _mutationDamageMult folds the Berserker (low-HP) + Assassin (full-HP target) perks (1× when no mutation).
     const result = resolveHit(this.player.attackerShape, enemy.attackerShape, hb.swing, {
       allowBackstab: true,
-      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult,
+      damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
     })
     enemy.onHit(result)
     // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the EQUIPPED melee weapon's
@@ -1354,6 +1622,8 @@ export class GameScene extends Phaser.Scene {
       damage: result.damage,
       isBackstab: result.isBackstab,
     })
+    // audio §6.3 (AC2) — the melee impact, brightness/volume scaled by damage; a backstab is distinct.
+    this.sfx.hit({ damage: result.damage, crit: result.isBackstab })
   }
 
   // ── _scaleStatus(spec) (Enrichment round 3 — the Venom scroll) ── return a status spec whose `duration`
@@ -1366,6 +1636,26 @@ export class GameScene extends Phaser.Scene {
     const mult = this.player.statusDurationMult ?? 1
     if (mult === 1) return spec
     return { ...spec, duration: (spec.duration ?? 0) * mult }
+  }
+
+  // ── _mutationDamageMult(target) (build-&-replay design §6.3, Decision 4, AC3) ── the per-hit MUTATION damage
+  // fold, multiplied INTO the player's damageMult at BOTH player hit sites (melee + projectile — DRY). Two
+  // conditional perks:
+  //   • Berserker (lowHpDamageMult) — applies while the PLAYER is below LOW_HP_THRESHOLD of max HP (fight
+  //     harder when cornered). Read off the live player HP at hit time.
+  //   • Assassin (firstHitBonusMult) — applies when the struck enemy is at FULL HP (the opener/burst bonus).
+  // Returns 1 when no mutation is armed (both fields default to 1) AND neither condition holds → byte-identical
+  // to before (the identity, AC3). The two compose multiplicatively when both apply. `target` is the Enemy/Boss
+  // being struck; we read its hp/maxHp (both expose those — DRY) to gate the full-HP opener.
+  _mutationDamageMult(target: any): number {
+    let mult = 1
+    if (this.player.lowHpDamageMult !== 1 && this.player.hp < this.player.maxHp * LOW_HP_THRESHOLD) {
+      mult *= this.player.lowHpDamageMult
+    }
+    if (this.player.firstHitBonusMult !== 1 && target && target.hp >= target.maxHp) {
+      mult *= this.player.firstHitBonusMult
+    }
+    return mult
   }
 
   // ── Projectile → enemy hit (§6.5, Decision 62, review MAJOR) ── a SEPARATE handler from the melee
@@ -1384,7 +1674,7 @@ export class GameScene extends Phaser.Scene {
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
     const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
       allowBackstab: true,
-      damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult,
+      damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy),
     })
     enemy.onHit(result)
     // ── STATUS (§6.13, Decision 79, AC66; Venom scroll round 3) ── apply the firing weapon's status
@@ -1396,6 +1686,8 @@ export class GameScene extends Phaser.Scene {
       damage: result.damage,
       isBackstab: result.isBackstab,
     })
+    // audio §6.3 (AC2) — the projectile impact, same timbre as melee (one "I connected" sound, DRY).
+    this.sfx.hit({ damage: result.damage, crit: result.isBackstab })
     this.projectilePool.release(projRect) // KISS: the shot dies on first hit (no pierce).
   }
 
@@ -1453,9 +1745,17 @@ export class GameScene extends Phaser.Scene {
         this.player.heal(Math.round(this.player.maxHp * (pk.healFrac || 0)))
         break
       }
+      case 'skill': {
+        // skills slice (AC5) — equip the skill into the loadout (first empty slot, else slot 0) + record the
+        // id on RunState so a level rebuild re-equips it (DRY — _acquireSkill is shared with the shop/branch).
+        if (pk.skillId) this._acquireSkill(pk.skillId)
+        break
+      }
     }
     // A small collect pop (reuse the spark pool — no new allocation).
     this.effects.hit(pickupRect.body.center.x, pickupRect.body.center.y, { damage: 0 })
+    // audio §6.3 (AC4) — the pickup blip, pitch per kind (cell/gold/scroll/weapon/heal).
+    this.sfx.pickup(pk.kind)
     this.pickupPool.release(pickupRect)
   }
 
@@ -1472,6 +1772,12 @@ export class GameScene extends Phaser.Scene {
     this.player.scrollDodgeIframeBonus = this.runState.scrollDodgeIframeBonus
     this.player.lifestealFrac = this.runState.scrollLifestealFrac
     this.player.statusDurationMult = this.runState.scrollStatusDurationMult
+    // ── MUTATION perk fields (build-&-replay §6.3, AC3) ── mirror the NEW live-read fields too so the player's
+    // hit-site folds (lowHp/firstHit) + the enemy-kill heal (onKillHealAmount) see the armed values. All default
+    // to the neutral identity on RunState, so a run with no mutation leaves the player exactly as before.
+    this.player.onKillHealAmount = this.runState.onKillHealAmount
+    this.player.lowHpDamageMult = this.runState.lowHpDamageMult
+    this.player.firstHitBonusMult = this.runState.firstHitBonusMult
     const newMax = this.runState.maxHp + this.runState.scrollMaxHpBonus
     const grew = newMax - this.player.maxHp // how much max-HP just increased (≥0).
     this.player.maxHp = newMax
@@ -1491,6 +1797,7 @@ export class GameScene extends Phaser.Scene {
     if (healed <= 0) return // already full → don't burn a charge.
     this.runState.flasks -= 1
     this.effects.hit(this.player.body.center.x, this.player.body.center.y - 10, { damage: 0 })
+    this.sfx.flask() // audio §6.3 (AC4) — the drink/refresh blip.
     this.cameras.main.flash(160, 46, 204, 113) // a faint green pulse so the heal reads.
   }
 
@@ -1513,6 +1820,7 @@ export class GameScene extends Phaser.Scene {
   _openShop(): void {
     if (this.shopOpen) return
     this.shopOpen = true
+    this._pauseLevelTimer() // exclude the frozen shopping time from the fast-clear timer (review MINOR).
     this.player.body.setVelocity(0, 0)
     this.shopOverlay = new ShopOverlay(this, {
       getGold: () => this.runState.gold,
@@ -1526,6 +1834,7 @@ export class GameScene extends Phaser.Scene {
   _closeShop(): void {
     this.shopOpen = false
     this.shopOverlay = null
+    this._resumeLevelTimer() // re-stamp the timer past the frozen shopping interval (review MINOR).
   }
 
   // ── _buyShopItem(item) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── attempt a purchase: if the run
@@ -1569,6 +1878,12 @@ export class GameScene extends Phaser.Scene {
         this._equipWeaponWithAffix(item.weaponId as string, affixId) // fold + equip + record on RunState (DRY).
         break
       }
+      case 'skill': {
+        // skills slice (AC5) — buy a specific skill into the loadout (the SAME _acquireSkill path the pickup +
+        // branch use: fill the first empty slot, else slot 0; record on RunState for the rebuild — DRY).
+        this._acquireSkill(item.skillId as string)
+        break
+      }
     }
     // A small confirm pop at the player so the buy reads (reuse the spark pool — no new allocation).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 })
@@ -1610,6 +1925,117 @@ export class GameScene extends Phaser.Scene {
     if (!scroll) return
     scroll.apply(this.runState)
     this._syncPlayerScrollStats() // reflect the armed boost (a vitality scroll grows + tops up HP) live.
+  }
+
+  // ── _offerMutation() (build-&-replay design §6.5, Decision 2/3, AC2) ── on a biome transition, offer a
+  // SEEDED 3-of-N mutation choice in a paused overlay (the build lever — a different perk loadout each run).
+  // Draws 3 DISTINCT mutations off an OFF-THE-PIN sub-RNG seeded from the run seed ⊕ a biome salt (the same
+  // discipline as the weapon-pickup/room-type picks — the generator's pinned draw thread is untouched), so a
+  // run REPLAYS the same offers (determinism — AC2). Freezes gameplay (mutationOpen gates update) + opens the
+  // overlay; the pick callback applies the mutation. Defensive: if (somehow) <2 mutations exist, or one is
+  // already open, no-op. KISS: one offer site, mirroring _grantBiomePowerScroll's seam.
+  _offerMutation(): void {
+    if (this.mutationOpen || this.mutationOverlay) return // already offering (defensive — should never re-enter).
+    const rng = mulberry32((this.runSeed ^ 0x303 ^ (this.runState.biomeIndex * 0x85ebca6b)) >>> 0)
+    const offers = this._pickMutationOffers(rng, 3)
+    if (offers.length === 0) return // no mutations defined → nothing to offer (the identity — run unchanged).
+    this.mutationOpen = true
+    this._pauseLevelTimer() // exclude the (mandatory) offer-reading time from the fast-clear timer (review MINOR).
+    this.player.body.setVelocity(0, 0) // zero momentum so the body doesn't drift under the frozen overlay.
+    this.mutationOverlay = new MutationOverlay(this, {
+      offers,
+      onPick: (id) => this._applyMutation(id),
+    })
+  }
+
+  // ── _pickMutationOffers(rng, want) (build-&-replay §6.5, Decision 3) ── draw `want` DISTINCT mutations off
+  // the passed seeded RNG via a Fisher-Yates-style shuffle of a COPY of MUTATION_ORDER (no mutation of the
+  // shared table — DRY safety). Returns the first `want` (or fewer if the table is smaller). Deterministic
+  // given the RNG, so a run replays the same 3 offers (AC2). The shuffle uses the SAME mulberry32 thread the
+  // caller seeded off the run seed ⊕ biome salt — off the generator's pinned draw.
+  _pickMutationOffers(rng: RNG, want: number): typeof MUTATION_ORDER {
+    const pool = MUTATION_ORDER.slice() // a COPY so the shuffle never mutates the shared config table.
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1))
+      const tmp = pool[i]
+      pool[i] = pool[j]
+      pool[j] = tmp
+    }
+    return pool.slice(0, Math.min(want, pool.length))
+  }
+
+  // ── _applyMutation(id) (build-&-replay §6.5, Decision 5, AC2/AC3/AC4) ── the overlay's onPick callback:
+  // resolve the chosen id → its MutationSpec, apply it to the live RunState (mutating the run-only perk fields
+  // IN PLACE — they persist for the rest of the run because RunState survives level rebuilds), record the id
+  // on runState.mutations (for the HUD + summary), sync the reused/new fields onto the live Player, refresh the
+  // HUD, and un-freeze gameplay. A confirm cue (the UI-select sound) reads the pick. The overlay already tore
+  // itself down before calling this (so we just drop the handle). Defensive: an unknown id un-freezes anyway.
+  _applyMutation(id: string): void {
+    const spec = MUTATIONS_BY_ID[id]
+    if (spec) {
+      spec.apply(this.runState) // arm the run-only perk (Decision 5) — mutates RunState's fields in place.
+      this.runState.mutations.push(id) // record the pick (for the HUD list + the run summary).
+      this._syncPlayerScrollStats() // push the reused + new perk fields to the live Player (DRY — one sync site).
+      this.sfx.uiSelect() // a confirm cue for the pick (reuses the UI-select blip — no new SFX).
+    }
+    this.mutationOpen = false // un-freeze gameplay (the update() gate re-opens).
+    this.mutationOverlay = null
+    this._resumeLevelTimer() // re-stamp the timer past the frozen offer-reading interval (review MINOR).
+    this.cameras.main.flash(200, 46, 204, 113) // a brief green pulse so the granted perk reads.
+    this._emitHud() // refresh the HUD's mutation list immediately (don't wait for the next tick).
+  }
+
+  // ── _pauseLevelTimer() (build-&-replay §6.4, review MINOR — real-vs-gameplay-dt fix) ── stamp the wall-clock a
+  // modal (shop / mutation overlay) is opening at, so _resumeLevelTimer can later exclude the frozen interval from
+  // the fast-clear timer. The world freezes on the gameplay dt while a modal is up, but this.time.now keeps
+  // advancing — so reading the mandatory mutation offer or shopping must NOT be charged against the 45s window.
+  // Idempotent (a re-entrant open keeps the FIRST stamp). No-op on an untimed level (levelStartedAt <= 0): a
+  // boss/miniboss arena never times, so there's nothing to protect. DRY: ONE pause site for both modals.
+  _pauseLevelTimer(): void {
+    if (this.levelStartedAt <= 0) return // untimed level (boss/miniboss) — no timer to pause.
+    if (this._modalPausedAt > 0) return // already paused (re-entrant guard) — keep the earliest stamp.
+    this._modalPausedAt = this.time.now
+  }
+
+  // ── _resumeLevelTimer() (build-&-replay §6.4, review MINOR — real-vs-gameplay-dt fix) ── on a modal close,
+  // ADVANCE levelStartedAt by the frozen interval (now - the open stamp) so the elapsed measurement used by both
+  // _grantTimedClearBonus and the HUD's levelTime reflects only un-paused, interactive time. No-op if the timer
+  // wasn't paused (no modal was open on a timed level). DRY: ONE resume site for both modals.
+  _resumeLevelTimer(): void {
+    if (this._modalPausedAt <= 0) return // not paused (untimed level, or no modal was up) — nothing to do.
+    if (this.levelStartedAt > 0) this.levelStartedAt += this.time.now - this._modalPausedAt
+    this._modalPausedAt = 0
+  }
+
+  // ── _grantTimedClearBonus() (build-&-replay design §6.4, AC5) ── the fast-clear reward on the door-reach
+  // path: if THIS level was a TIMED level (levelStartedAt > 0 — a normal, non-set-piece level) AND the player
+  // reached the exit within CLEAR_BONUS_TIME of it being built, grant a one-shot gold+cells bonus with an FX/
+  // HUD pop. Over the threshold (or an untimed boss/miniboss level) → nothing (NO penalty — purely additive,
+  // identity-safe). Called once from _nextLevel BEFORE advancing (the transitioning guard gates the door path,
+  // so this never double-fires for one clear). A green flash + the pickup blip + a HUD pop read the reward.
+  _grantTimedClearBonus(): void {
+    if (this.levelStartedAt <= 0) return // an untimed level (boss/miniboss) → no bonus (never a penalty).
+    const elapsed = this.time.now - this.levelStartedAt
+    this.levelStartedAt = 0 // consume the stamp so a (defensive) re-entry can't grant twice.
+    if (elapsed > CLEAR_BONUS_TIME) return // too slow → no bonus, no penalty (the speed incentive only adds).
+    this.runState.gold += CLEAR_BONUS_GOLD // run-only currency (lost on death — feeds the in-run shop).
+    this.runState.cells += CLEAR_BONUS_CELLS // meta currency (banked at run end — the lasting reward).
+    // A reward pop so the fast clear reads: a green flash + the gold-pickup blip + a floating "SPEED!" tell.
+    this.cameras.main.flash(220, 244, 208, 63)
+    this.sfx.pickup('gold')
+    const pop = this.add
+      .text(this.cameras.main.width / 2, 110, `FAST CLEAR  +${CLEAR_BONUS_GOLD}g +${CLEAR_BONUS_CELLS} cells`, {
+        fontFamily: 'monospace',
+        fontSize: '24px',
+        color: '#f4d03f',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(120)
+    // Fade + rise the tell, then destroy it (a transient FX — NOT pushed onto _levelObjects since the level is
+    // about to tear down; the tween's onComplete destroys it, and a destroyed object is harmless if torn down).
+    this.tweens.add({ targets: pop, y: 80, alpha: 0, duration: 1100, onComplete: () => pop.destroy() })
   }
 
   _onEnemyHitPlayer(hitboxRect: any): void {
@@ -1658,6 +2084,7 @@ export class GameScene extends Phaser.Scene {
     this.hitstopTimer = 0.25
     this.cameras.main.flash(180, 200, 40, 40)
     this.cameras.main.shake(220, 0.01)
+    this.sfx.death() // audio §6.3 (AC5) — the death knell (distinct from an enemy death; plays once via the guard).
     // Snapshot the summary NOW (RunState may be torn down with the scene) and route to GameOver → Hub.
     const summary = this.runState.summary(this.time.now, false, this.runSeed)
     this.time.delayedCall(700, () => this.scene.start('GameOver', summary))
@@ -1682,6 +2109,23 @@ export class GameScene extends Phaser.Scene {
     return activeLabel
   }
 
+  // ── _skillLabel(slot) (skills design §6.6, AC6) ── the HUD label for a skill slot: the equipped skill's
+  // name, or '—' for an empty slot (the identity — a fresh run shows two empty slots). Registry-only (the HUD
+  // is decoupled — it never reads the Player directly).
+  _skillLabel(slot: number): string {
+    const spec = this.player.skills[slot]
+    return spec ? spec.name : '—'
+  }
+
+  // ── _skillCooldownFrac(slot) (skills design §6.6, AC6) ── the slot's cooldown as a 0..1 fraction (0 = ready,
+  // 1 = just fired) the HUD draws a drain bar from. An empty slot / a slot at full readiness reads 0. Clamped
+  // so a re-equip mid-cooldown (a different skill's longer cooldown) never overflows the bar.
+  _skillCooldownFrac(slot: number): number {
+    const spec = this.player.skills[slot]
+    if (!spec || spec.cooldown <= 0) return 0
+    return Phaser.Math.Clamp(this.player.skillCooldown[slot] / spec.cooldown, 0, 1)
+  }
+
   // Push HP (+ combo + depth/biome) to the registry for the decoupled HUD (Decision 2). The HUD reads
   // these each frame and never touches this scene. depth/biome let the HUD show the live "DEPTH n ·
   // BIOME" readout so the rising difficulty reads (AC45). (create() seeds sane defaults so the HUD
@@ -1699,6 +2143,18 @@ export class GameScene extends Phaser.Scene {
     // §6.9 — live flask charges for the HUD's flask readout (the heal valve, Decision 72).
     this.registry.set('flasks', this.runState.flasks)
     this.registry.set('maxFlasks', this.runState.maxFlasks)
+    // skills slice (AC6) — both skill slots' names + their cooldown FRACTION (0 = ready, 1 = just fired) for the
+    // decoupled HUD's two skill labels + cooldown bars. An empty slot reads '—' with cd 0 (no bar). Registry-only.
+    this.registry.set('skill1', this._skillLabel(0))
+    this.registry.set('skill2', this._skillLabel(1))
+    this.registry.set('skill1Cd', this._skillCooldownFrac(0))
+    this.registry.set('skill2Cd', this._skillCooldownFrac(1))
+    // build-&-replay slice (AC4) — the run's active MUTATIONS as a joined list of names (registry-only — the
+    // HUD is decoupled). Empty until the first pick (a fresh run shows no mutation line). Resolved id → name
+    // off the pure MUTATIONS table (DRY). build-&-replay slice (AC5) — the per-level fast-clear TIMER (ms
+    // elapsed on the current timed level; 0 = an untimed boss/miniboss level → the HUD hides the timer).
+    this.registry.set('mutations', this.runState.mutations.map((id) => MUTATIONS_BY_ID[id]?.name ?? id).join(', '))
+    this.registry.set('levelTime', this.levelStartedAt > 0 ? this.time.now - this.levelStartedAt : 0)
     // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
     // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.
     if (this.boss && !this.boss.dead) this.registry.set('bossHp', this.boss.hp)
@@ -1708,12 +2164,17 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     const dt = Math.min(delta / 1000, MAX_DT)
     this.hitstopTimer = Math.max(0, this.hitstopTimer - dt)
-    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop overlay is up (a modal
-    // pause) — so live hitboxes/projectiles/enemies all FREEZE together while shopping (§6.10), exactly as
-    // they freeze during a hit-stop. FX still tick on REAL dt so the overlay's flashes/pops play.
-    const gdt = this.hitstopTimer > 0 || this.shopOpen ? 0 : dt
+    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop / MUTATION overlay is up (a
+    // modal pause) — so live hitboxes/projectiles/enemies all FREEZE together while a modal is open (§6.10 /
+    // build-&-replay §6.5), exactly as they freeze during a hit-stop. FX still tick on REAL dt so the overlay's
+    // flashes/pops play.
+    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen ? 0 : dt
 
     const inputState = this.input2.sample()
+    // audio §6.5 (Decision 7) — M toggles global mute (flips Phaser's game.sound.mute via the façade
+    // proxy). Read on REAL dt (NOT gated by gameOver/transition/shop) so mute always works, even on the
+    // death/transition screens or under the shop overlay — the player can silence audio at any moment.
+    if (inputState.mutePressed) this.sfx.mute = !this.sfx.mute
     // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
     // ── Shop in-range RESET (§6.10) ── clear the vendor's in-range flag BEFORE the physics step runs its
@@ -1722,8 +2183,8 @@ export class GameScene extends Phaser.Scene {
     if (this.shop) this.shop.resetInRange()
 
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
-    // shop overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning && !this.shopOpen) {
+    // shop / MUTATION overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
+    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held
@@ -1734,6 +2195,11 @@ export class GameScene extends Phaser.Scene {
       if (inputState.healPressed) this._drinkFlask()
       if (inputState.interactPressed) this._tryOpenShop()
       if (inputState.swapPressed) this._swapWeapon() // round-3 (item 3) — toggle the active weapon slot.
+      // skills slice (AC2/AC3) — USE SKILL slot 1 (F) / slot 2 (C): one-shot edges resolved BEFORE the player
+      // tick so a skill fires this frame. An empty / on-cooldown slot is a no-op (Player.tryUseSkill → null),
+      // so on a skill-less run these do nothing (the additive identity, AC8).
+      if (inputState.skill1Pressed) this._useSkill(0)
+      if (inputState.skill2Pressed) this._useSkill(1)
       this.player.update(gdt, inputState)
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
       // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.
@@ -1748,6 +2214,10 @@ export class GameScene extends Phaser.Scene {
     this.projectilePool.tick(gdt)
     this.enemyProjectilePool.tick(gdt) // §6.6.3 — the enemy/boss shots, same hit-stop boundary.
     this.pickupPool.tick()
+    // skills slice (AC3) — tick deployed turrets on the GAMEPLAY dt (so they FREEZE with the world during a
+    // hit-stop / shop pause, like every other gameplay timer). Each turret scans the live enemies+boss and
+    // fires the PLAYER projectile pool, so its hits resolve through the existing projectile→enemy overlap.
+    this.deployables.tick(gdt, { enemies: this.enemies, boss: this.boss, projectilePool: this.projectilePool })
 
     if (this.enemies.some((e) => e.removed)) {
       this.enemies = this.enemies.filter((e) => !e.removed)

@@ -67,6 +67,13 @@ export interface RunState {
   scrollStatusDurationMult: number
   scrollDodgeCdMult: number
   scrollDodgeIframeBonus: number
+  // ── Run-only MUTATION perks (build-&-replay design §6.2, AC1/AC3) ── the picked mutation ids (for the
+  // HUD/summary) + the few NEW live-read perk fields a mutation arms (each default = the neutral identity,
+  // so an empty list plays byte-identically; most mutations reuse the scroll fields above — DRY).
+  mutations: string[]
+  onKillHealAmount: number
+  lowHpDamageMult: number
+  firstHitBonusMult: number
   // ── Equipped weapon (primary) ──
   weaponId: string
   weaponAffixId: string | null
@@ -74,6 +81,9 @@ export interface RunState {
   weaponSlots: number
   weaponId2: string | null
   weaponAffixId2: string | null
+  // ── Skill loadout (skills design §6.2/§6.7, Decision 7) ──
+  skillId1: string | null
+  skillId2: string | null
   // ── Run stats ──
   kills: number
   startedAt: number
@@ -145,6 +155,15 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     scrollDodgeCdMult: 1, // ×factor on the player's dodge cooldown (Alacrity scroll; synced to the player).
     scrollDodgeIframeBonus: 0, // flat extra dodge i-frame seconds (Alacrity scroll; synced to the player).
 
+    // ── Run-only MUTATION perks (build-&-replay design §6.2, AC1/AC3) ── the picked mutation ids (records
+    // the build for the HUD + summary) + the NEW live-read perk fields, all seeded to the NEUTRAL identity so
+    // a run with NO mutation chosen plays EXACTLY as before (empty list = identity). Mutations that reuse the
+    // scroll fields above (vampire/toxic/nimble/brutality/ironhide) need no new field here — DRY with scrolls.
+    mutations: [], // picked mutation ids this run (run-only — never banked; lost on death — permadeath).
+    onKillHealAmount: 0, // flat HP healed on each enemy kill (Predator); read in the enemy.onDeath hook.
+    lowHpDamageMult: 1, // ×player damage while below the low-HP threshold (Berserker); folded at the hit site.
+    firstHitBonusMult: 1, // ×player damage vs a FULL-HP enemy (Assassin); folded at the hit site (the opener).
+
     // ── Equipped weapon (§6.5, Decision 63) — the `inventory` placeholder repurposed to ONE scalar id
     // so a level rebuild keeps the equipped weapon. Seeded from the meta-unlocked starting weapon. ──
     weaponId, // the currently-equipped weapon id (carried across level rebuilds).
@@ -162,6 +181,13 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     weaponSlots: startStats ? startStats.weaponSlots ?? 1 : 1,
     weaponId2: null, // the secondary slot's weapon id (null = the slot is empty / locked).
     weaponAffixId2: null, // the secondary slot's affix id (null = a plain weapon / empty slot).
+
+    // ── SKILL loadout (skills design §6.2/§6.7, Decision 7, AC4) ── the two skill slots' ids carried as
+    // SCALARS (mirroring the secondary weaponId2) so a level rebuild re-equips BOTH skills (GameScene
+    // resolves SKILLS_BY_ID[skillId] → equipSkill). A fresh run starts with BOTH null (no skill picked up
+    // → both slots empty → the skill keys do nothing — byte-identical to before the loadout layer, AC8).
+    skillId1: null, // slot 0 (F) skill id, or null = empty.
+    skillId2: null, // slot 1 (C) skill id, or null = empty.
 
     // ── Run stats (for the GameOver summary, AC46) ──
     kills: 0, // GameScene bumps this on each enemy death.

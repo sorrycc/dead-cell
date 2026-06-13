@@ -11,6 +11,9 @@ export interface InputSnapshot {
   healPressed: boolean
   interactPressed: boolean
   swapPressed: boolean
+  mutePressed: boolean
+  skill1Pressed: boolean
+  skill2Pressed: boolean
 }
 
 // ── Input layer (design §6.1, Decisions 11/13/14 consumers) ──
@@ -68,6 +71,9 @@ export class Input {
       q: KC.Q, // §6.9 (Decision 72) — DRINK FLASK (the between-area heal valve).
       e: KC.E, // §6.9 (Decision 74) — INTERACT (open the in-run shop / vendor when in range).
       r: KC.R, // round-3 (item 3) — SWAP WEAPON (toggle the active slot when a 2nd slot is unlocked).
+      m: KC.M, // audio §6.5 (Decision 7) — toggle global mute (GameScene flips this.sound.mute).
+      f: KC.F, // skills §6.2 (Decision 3) — USE SKILL slot 1 (the left-hand cluster, free of taken keys).
+      c: KC.C, // skills §6.2 (Decision 3) — USE SKILL slot 2.
     }) as Record<string, Phaser.Input.Keyboard.Key>
 
     // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
@@ -110,7 +116,15 @@ export class Input {
     // round-3 (item 3) — SWAP WEAPON (R): a one-shot edge (JustDown, sole-owned here) that toggles the
     // active weapon slot when a 2nd slot is unlocked (a no-op single-slot — the identity).
     const swapPressed = Phaser.Input.Keyboard.JustDown(keys.r)
+    // audio §6.5 (Decision 7) — MUTE TOGGLE (M): a one-shot edge (JustDown, sole-owned here like the
+    // others) that GameScene reads to flip the global Phaser/audio mute.
+    const mutePressed = Phaser.Input.Keyboard.JustDown(keys.m)
+    // skills §6.2 (Decision 3) — USE SKILL slot 1 (F) / slot 2 (C): one-shot EDGES (JustDown, sole-owned
+    // here like every other key) GameScene reads to fire each skill slot. An empty / on-cooldown slot is a
+    // no-op (Player.tryUseSkill), so on a skill-less run these do nothing (the additive identity, AC8).
+    const skill1Pressed = Phaser.Input.Keyboard.JustDown(keys.f)
+    const skill2Pressed = Phaser.Input.Keyboard.JustDown(keys.c)
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed, swapPressed }
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed }
   }
 }

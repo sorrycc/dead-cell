@@ -4,6 +4,7 @@ import { createMetaState } from '../core/MetaState.js'
 import type { MetaStateInstance } from '../core/MetaState.js'
 import { UPGRADES } from '../config/upgrades.js'
 import { GameScene } from './GameScene.js'
+import { Sound } from '../audio/Sound.js'
 
 // ── HubScene — the between-runs shop (design §6.5/§6.9, Decision 58/71, AC52) ──
 // The meta-progression hub where banked Cells buy PERMANENT upgrades. A KEYBOARD-driven vertical list
@@ -38,6 +39,9 @@ const CURSOR_COLOR = 0x2c3e50 // the highlight bar behind the selected row.
 
 export class HubScene extends Phaser.Scene {
   private meta!: MetaStateInstance
+  // audio §6.4 — menu blips. NAMED `sfx` (Phaser.Scene already owns `sound`). Constructs its OWN Sound
+  // (which shares Phaser's ONE AudioContext, so this is cheap — just a master GainNode); no-op on NoAudio.
+  private sfx!: Sound
   private pinnedSeed!: number | null
   private seedRowIndex!: number
   private startRowIndex!: number
@@ -58,6 +62,7 @@ export class HubScene extends Phaser.Scene {
   create() {
     // Load a fresh view of the persistent meta (reflects any prior buys / the just-banked run).
     this.meta = createMetaState()
+    this.sfx = new Sound(this) // audio §6.4 — the menu-blip façade (shares Phaser's context; null-safe).
 
     // ── Seed selection state (Decision 71) ── null = RANDOM (mint fresh entropy at START RUN); a number =
     // a PINNED shareable seed (typed via the SEEDED RUN row). Starts RANDOM so the default is "every run
@@ -126,13 +131,16 @@ export class HubScene extends Phaser.Scene {
 
   // Move the cursor (clamped to the row range) + re-render so the highlight + affordability refresh.
   _move(dir: number) {
+    const before = this.cursor
     this.cursor = Phaser.Math.Clamp(this.cursor + dir, 0, this.rowCount - 1)
+    if (this.cursor !== before) this.sfx.uiMove() // audio §6.4 (AC6) — cursor-move tick (only on a real move).
     this._render()
   }
 
   // Confirm the selected row: an upgrade row → buy; SEEDED RUN → toggle/edit the pinned seed; START RUN →
   // launch Game with the chosen seed (Decision 58/71).
   _confirm() {
+    this.sfx.uiSelect() // audio §6.4 (AC6) — confirm/buy/START blip (fired before any scene-start below).
     if (this.cursor === this.startRowIndex) {
       // START RUN (Decision 58/71): use the pinned seed if set, else mint a fresh entropy seed HERE so the
       // run varies even from a Hub-launched start. Pass it to GameScene via scene-start data.

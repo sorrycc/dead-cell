@@ -2,11 +2,13 @@ import Phaser from 'phaser'
 import { PLAYER_MAX_HP } from '../config/constants.js'
 import { SWORD } from '../config/weapons.js'
 import type { WeaponSpec } from '../config/weapons.js'
+import type { SkillSpec } from '../config/skills.js'
 import type { InputSnapshot } from '../core/Input.js'
 import type { HitResult } from '../combat/damage.js'
 import type { PlayerStats } from '../config/upgrades.js'
 import type { HitboxPool } from '../combat/HitboxPool.js'
 import type { ProjectilePool } from '../combat/ProjectilePool.js'
+import type { Sound } from '../audio/Sound.js'
 
 // ── Player controller (design §6.1 + §6.3, Decisions 10/11/12/13/14 + 18/25/31/32, AC11–AC18 + AC20/AC23) ──
 // A plain class (Decision 10) that HOLDS a Phaser.GameObjects.Rectangle + its Arcade body
@@ -67,6 +69,17 @@ const MAX_VX = 4000 // px/s — generous X velocity cap (> DODGE_SPEED), never t
 const JUMP_VELOCITY = 620 // px/s — initial upward speed on a full jump (vy = −this).
 const JUMP_CUT_VELOCITY = 180 // px/s — releasing while rising clamps rise to this (short hop).
 
+// ── Movement depth (movement-depth design §6, Decisions 2/3/4, AC1–AC6) — ADDITIVE REACH ONLY ──
+// Double-jump + wall-slide + wall-jump bolt onto the UNCHANGED single-jump base. The cardinal rule:
+// these moves only ever INCREASE reach — JUMP_VELOCITY/GRAVITY/FALL_GRAVITY_EXTRA/RUN_SPEED are
+// untouched, so LevelGenerator's jump-reach envelope (keyed to the single full jump) and the verifier
+// BFS stay sound with zero edits: every level remains beatable with the base jump alone, and the new
+// moves are a strict SUPERSET of reachability (comfort + combat utility, never a gate).
+const AIR_JUMPS_MAX = 1 // one mid-air jump (Decision 2 — matches Dead Cells' default; KISS, not N).
+const WALL_SLIDE_SPEED = 140 // px/s — clamped descent while clinging a wall (≪ MAX_FALL_SPEED 1100).
+const WALL_JUMP_VX = 360 // px/s — horizontal kick AWAY from the wall on a wall-jump (Decision 4).
+const WALL_JUMP_LOCKOUT = 0.12 // s — ignore into-wall input this long after a wall-jump (no re-stick).
+
 // ── Forgiveness timers (Decision 13) — both decay by dt (SECONDS) ──
 const COYOTE_TIME = 0.1 // s — jump still fires this long after walking off a ledge.
 const JUMP_BUFFER_TIME = 0.12 // s — a jump pressed this long before landing fires on touchdown.
@@ -88,6 +101,7 @@ const BASE_COLOR = 0x58d68d // resting fill (green).
 const IFRAME_COLOR = 0xf4d03f // tint while invulnerable (dodge — yellow flash).
 const HURT_COLOR = 0xe74c3c // tint while hurt-iframed (red flash — distinct from dodge yellow).
 const ATTACK_COLOR = 0xaed6f1 // brief swing color pop (light blue) so the swing reads.
+const WALL_SLIDE_COLOR = 0x5d6d7e // tint while wall-sliding (slate — a quiet "clinging" tell, AC2).
 
 // ── Combat (design §6.3, Decisions 18/25/31/32, AC20/AC23) ──
 // player hit points (shown on the HUD). Imported from constants.js (the PURE cross-site owner) so
@@ -106,6 +120,7 @@ export class Player {
   scene: Phaser.Scene
   hitboxPool: HitboxPool | null
   projectilePool: ProjectilePool | null
+  sound: Sound | null
   id: string
   meleeDamageMult: number
   rangedDamageMult: number
@@ -116,9 +131,14 @@ export class Player {
   scrollDodgeIframeBonus: number
   lifestealFrac: number
   statusDurationMult: number
+  onKillHealAmount: number
+  lowHpDamageMult: number
+  firstHitBonusMult: number
   weapons: (WeaponSpec | null)[]
   activeWeaponIndex: number
   secondSlotUnlocked: boolean
+  skills: (SkillSpec | null)[]
+  skillCooldown: number[]
   collider: Phaser.GameObjects.Rectangle
   body: Phaser.Physics.Arcade.Body
   rect: Phaser.GameObjects.Rectangle
@@ -126,6 +146,9 @@ export class Player {
   facing: number
   coyoteTimer: number
   jumpBufferTimer: number
+  airJumpsLeft: number
+  wallDir: number
+  wallJumpLockoutTimer: number
   dodgeTimer: number
   iframeTimer: number
   dodgeCooldownTimer: number
@@ -147,16 +170,21 @@ export class Player {
   // scene: the GameScene; (x, y): spawn position in world coords. hitboxPool: a HitboxPool tagged
   // 'player' whose MELEE swings draw from (null in a Phase-1 context). projectilePool: a
   // ProjectilePool the RANGED weapon fires from (§6.5; null = ranged shots are cosmetic-only).
+  // sound: the procedural-SFX façade (audio §6.2, Decision 2) — OPTIONAL + null-safe (default null),
+  // injected like the pools. Every call site below is `this.sound?.x()`, so a Player built WITHOUT a
+  // sound (a Phase-1 / headless context) is byte-identical to before (the additive identity, AC8).
   constructor(
     scene: Phaser.Scene,
     x: number,
     y: number,
     hitboxPool: HitboxPool | null = null,
     projectilePool: ProjectilePool | null = null,
+    sound: Sound | null = null,
   ) {
     this.scene = scene
     this.hitboxPool = hitboxPool
     this.projectilePool = projectilePool // §6.5 Decision 62 — ranged weapon fires from this.
+    this.sound = sound // audio §6.2 — the SFX façade (null-safe; a null sound is a silent no-op).
     this.id = 'player' // stable id for the per-swing hitSet dedup + ownerId tag (Decision 20).
 
     // ── Injected run-start modifiers (design §6.5, Decision 60, AC53) ── seeded to the IDENTITY here
@@ -176,6 +204,13 @@ export class Player {
     this.scrollDodgeIframeBonus = 0 // run-only flat extra dodge i-frame seconds (Alacrity scroll).
     this.lifestealFrac = 0 // fraction of MELEE damage dealt healed back (Vampirism scroll; read at the hit site).
     this.statusDurationMult = 1 // ×applied status duration (Venom scroll; read when arming a weapon's status).
+    // ── Run-only MUTATION perks (build-&-replay design §6.3, AC3) ── the few NEW live-read fields a mutation
+    // arms, mirrored from RunState by GameScene._syncPlayerScrollStats. All default to the neutral identity
+    // (0 / 1×) so a fresh Player with no mutation plays EXACTLY as before. Read at ONE site each in GameScene:
+    // onKillHealAmount in the enemy.onDeath hook; lowHp/firstHit folds at the resolveHit site.
+    this.onKillHealAmount = 0 // flat HP healed on each enemy kill (Predator).
+    this.lowHpDamageMult = 1 // ×damage while below the low-HP threshold (Berserker).
+    this.firstHitBonusMult = 1 // ×damage vs a FULL-HP enemy (Assassin — the opener bonus).
     // ── TWO weapon SLOTS (Enrichment round 3, item 3 — the build-identity lever) ── the run carries up to
     // TWO weapons (a primary + a secondary) and a SWAP key toggles which is active, so a run can hold
     // melee+ranged or two movesets — turning a loot pickup into a BUILD decision (carry the new weapon in
@@ -186,6 +221,17 @@ export class Player {
     this.weapons = [SWORD, null] // [primary, secondary]; null = an empty/locked slot.
     this.activeWeaponIndex = 0 // which slot drives attacks (0 = primary; toggled by swapWeapon).
     this.secondSlotUnlocked = false // a meta upgrade flips this on (applyStartStats); else single-slot.
+
+    // ── TWO SKILL SLOTS (skills/secondary-items design §6.2, AC2) ── the loadout layer orthogonal to the
+    // weapon combo: up to TWO cooldown-gated abilities (volley/blast/turret), triggered by two keys (F/C),
+    // each with its OWN cooldown timer. Both slots start EMPTY (free, no meta gate — KISS) so a fresh run
+    // is byte-identical to before: an empty slot OR a slot on cooldown is a no-op (tryUseSkill returns null),
+    // so the two keys do NOTHING until a skill is acquired (the additive identity, AC8). The Player only
+    // ARMS the cooldown + returns the spec to fire — GameScene owns the pools/world (same discipline as
+    // attack() → GameScene._startSwing spawns the effect). The cooldown timers decay by the gameplay dt in
+    // update() alongside every other timer (so they freeze during hit-stop / the shop pause — Decision 4).
+    this.skills = [null, null] // [slot 0 (F), slot 1 (C)]; null = an empty slot.
+    this.skillCooldown = [0, 0] // s — per-slot cooldown remaining (0 = ready). Decayed by dt in update().
 
     // ── Physics collider (owns the body) + separate visual rect (review issue #6) ──
     // `collider` owns the Arcade body and is INVISIBLE (alpha 0). Arcade owns its position;
@@ -210,6 +256,15 @@ export class Player {
     // Timers (all in SECONDS, decayed by dt). 0 ⇒ inactive/expired.
     this.coyoteTimer = 0 // refreshed to COYOTE_TIME while grounded, decays airborne.
     this.jumpBufferTimer = 0 // set to JUMP_BUFFER_TIME on a press, decays.
+    // ── Movement-depth state (movement-depth §6, Decisions 2/3/4) ── ADDITIVE on top of the base jump.
+    // airJumpsLeft: how many mid-air jumps remain (refilled to AIR_JUMPS_MAX on ground/coyote AND on a
+    // wall-jump, consumed by an air-jump). wallDir: which wall the player is into THIS frame (−1 left /
+    // +1 right / 0 none), recomputed every frame from body.blocked + held moveX. wallJumpLockoutTimer:
+    // > 0 briefly after a wall-jump → into-wall input is ignored so the player arcs away (no re-stick).
+    // Seeded to the airborne/no-wall identity so a fresh Player that never uses the moves is unchanged.
+    this.airJumpsLeft = 0 // refilled on the first grounded frame (step 1) — starts spent (no free air jump).
+    this.wallDir = 0 // 0 = not clinging a wall this frame.
+    this.wallJumpLockoutTimer = 0 // > 0 → ignore into-wall input (post-wall-jump re-stick guard).
     this.dodgeTimer = 0 // > 0 while the DODGE dash is active.
     this.iframeTimer = 0 // > 0 while invulnerable (subset of the dodge).
     this.dodgeCooldownTimer = 0 // > 0 while dodge is gated.
@@ -279,6 +334,9 @@ export class Player {
   // write — Decision 32), arm the hurt i-frame, flash red, and fire the death edge ONCE at hp≤0.
   onHit(result: HitResult) {
     if (!this.isHittable()) return
+    // audio §6.2 (AC2) — the hurt blip. Played only on a NON-fatal hit; a fatal hit plays the death
+    // knell instead (GameScene._onPlayerDeath), so the two don't stack on the killing blow.
+    if (this.hp - result.damage > 0) this.sound?.hurt()
     this.hp = Math.max(0, this.hp - result.damage)
     this.body.setVelocity(result.knockbackX, result.knockbackY)
     this.hurtTimer = HURT_KNOCKBACK_LOCKOUT
@@ -314,9 +372,15 @@ export class Player {
     // AFTER leaving a ledge even though blocked.down is already false.
     if (onFloor) {
       this.coyoteTimer = COYOTE_TIME
+      // Movement-depth (AC1): refill the air jump(s) on the ground. Landing resets the double-jump.
+      // Set here (the grounded edge) — NOT on coyote — so walking off a ledge does NOT consume the
+      // air jump (coyote keeps the GROUND jump available; the air jump is the SEPARATE second leap).
+      this.airJumpsLeft = AIR_JUMPS_MAX
     } else {
       this.coyoteTimer = Math.max(0, this.coyoteTimer - dt)
     }
+    // Movement-depth (AC3): the post-wall-jump re-stick lockout decays by dt (SECONDS) like every timer.
+    this.wallJumpLockoutTimer = Math.max(0, this.wallJumpLockoutTimer - dt)
     // Jump buffer: arm on press, decay otherwise — lets a press a few frames BEFORE landing
     // fire on touchdown.
     if (input.jumpPressed) this.jumpBufferTimer = JUMP_BUFFER_TIME
@@ -329,6 +393,11 @@ export class Player {
     this.hurtTimer = Math.max(0, this.hurtTimer - dt)
     this.hurtIframeTimer = Math.max(0, this.hurtIframeTimer - dt)
     this.attackColorTimer = Math.max(0, this.attackColorTimer - dt)
+    // ── Skill cooldown decay (skills design §6.2, Decision 4, AC2) ── both per-slot timers decay by the
+    // GAMEPLAY dt (so a cooldown FREEZES during hit-stop / the shop pause exactly like every other timer).
+    // GameScene reads these → the registry for the HUD cooldown indicator. An empty slot leaves its timer 0.
+    this.skillCooldown[0] = Math.max(0, this.skillCooldown[0] - dt)
+    this.skillCooldown[1] = Math.max(0, this.skillCooldown[1] - dt)
 
     // ── Attack lock + SYMMETRIC ATTACK→RUN exit (Decision 25). Decrement the active+recovery lock;
     // when a swing ends, return to RUN and OPEN the combo window so a follow-up press chains
@@ -383,6 +452,7 @@ export class Player {
       // the run-only scroll factor (Alacrity) — both ≤1 → dodge sooner. Identity at 1×1 (the Phase-4 value).
       this.dodgeCooldownTimer = DODGE_COOLDOWN * this.dodgeCooldownMult * this.scrollDodgeCdMult
       this._kickScaleY(DODGE_SQUASH_Y)
+      this.sound?.dodge() // audio §6.2 (AC3) — the roll whoosh (null-safe).
     }
 
     // ── (1.5) Resolve the pending attack() edge (Decision 25). Fires only if NOT dodging (a
@@ -422,21 +492,76 @@ export class Player {
       body.setVelocityX(vx)
     }
 
-    // ── (3) Resolve jump ──
-    // CONSUME ON LAUNCH (review issue #3): when a buffered jump fires we ZERO both the buffer
+    // ── (2.5) Wall state (movement-depth §6, Decisions 3/4, AC2) — computed AFTER horizontal control
+    // so it reads the fresh blocked.* from this frame's collisions, and BEFORE jump resolution so the
+    // wall-jump branch (step 3) can consume `wallDir`. ──
+    // wallDir is which side wall the player is PRESSING INTO this frame (−1 = left wall, +1 = right
+    // wall, 0 = none). It requires: airborne (no clinging while grounded), NOT in the post-wall-jump
+    // re-stick lockout, and the HELD moveX pointing into a side where the body is blocked. We use
+    // body.blocked[side] (a solid-side contact) — thin one-way horizontal ledges collide from ABOVE
+    // only, so they never set blocked.left/right → no false clings on ledges (geometry caveat §4).
+    // DODGE/HURT own vx for their windows, so suppress wall-cling during them (the dash/knockback must
+    // not get clamped to a slow slide); precedence stays DODGE > ATTACK > RUN (Decision 5).
+    const intoLeft = input.moveX < 0 && body.blocked.left
+    const intoRight = input.moveX > 0 && body.blocked.right
+    const wallActive = !onFloor && this.wallJumpLockoutTimer <= 0 && this.state !== STATE.DODGE && this.hurtTimer <= 0
+    this.wallDir = wallActive ? (intoLeft ? -1 : intoRight ? 1 : 0) : 0
+    // Wall-slide (AC2): while clinging and DESCENDING (vy>0), clamp the fall to the slow slide speed
+    // (≪ terminal). Reading the post-control vy means the fall-gravity (step 4) re-accelerates next
+    // frame and we re-clamp — a steady slow slide. Releasing the into-wall input or landing ends it.
+    const sliding = this.wallDir !== 0 && body.velocity.y > 0
+    if (sliding) {
+      if (body.velocity.y > WALL_SLIDE_SPEED) body.setVelocityY(WALL_SLIDE_SPEED)
+      // AC2 audio tell: called every sliding frame; the façade's per-key throttle (a wide gap) collapses
+      // it into a soft recurring friction scrape (null-safe — a silent no-op under NoAudio / a null sound).
+      this.sound?.wallSlide()
+    }
+
+    // ── (3) Resolve jump ── (movement-depth §6, Decisions 2/4 — extended with wall-jump + air-jump).
+    // CONSUME ON LAUNCH (review issue #3): when a buffered GROUND jump fires we ZERO both the buffer
     // AND the coyote timer so neither can re-fire a second jump on the next frame (the single
     // most common bug in this controller). The dodge does not block jumping out of a roll —
-    // but a jump only fires when grounded-or-coyote, which a roll-off-ledge naturally allows.
+    // but a GROUND jump only fires when grounded-or-coyote, which a roll-off-ledge naturally allows.
+    // A buffered jump now resolves in PRIORITY (Decision 4): (a) ground/coyote → (b) wall-jump →
+    // (c) air-jump. Exactly ONE branch fires per buffered press (the buffer is zeroed on launch), and
+    // the variable-height release-cut below applies uniformly to all three (so the second/wall leap
+    // is tap-shortenable too — AC1/AC3). All three are ADDITIVE: they only ever add reach on top of
+    // the base ground jump, which is identical to before (AC6); the generator/verifier are untouched.
     const canJump = this.coyoteTimer > 0 || onFloor
     if (this.jumpBufferTimer > 0 && canJump) {
+      // (a) GROUND / coyote jump (UNCHANGED, AC4/AC6) — the base arc that LevelGenerator's reach
+      // envelope is keyed to. Consumes the buffer + coyote.
       body.setVelocityY(-JUMP_VELOCITY)
       this.jumpBufferTimer = 0
       this.coyoteTimer = 0
       this._kickScaleY(JUMP_STRETCH_Y)
+      this.sound?.jump() // audio §6.2 (AC3) — the jump chirp (null-safe).
+    } else if (this.jumpBufferTimer > 0 && this.wallDir !== 0) {
+      // (b) WALL-JUMP (AC3): launch UP and AWAY from the wall, REFRESH the air jump (so wall-jump →
+      // air-jump chains), and arm the re-stick lockout so the held into-wall input doesn't immediately
+      // re-cling — the player arcs away instead. vx is kicked away from the wall (−wallDir·VX), vy is
+      // the full jump impulse. Consumes the buffer (one launch per press).
+      body.setVelocityY(-JUMP_VELOCITY)
+      body.setVelocityX(-this.wallDir * WALL_JUMP_VX)
+      this.jumpBufferTimer = 0
+      this.airJumpsLeft = AIR_JUMPS_MAX // refresh (AC3) — a fresh air jump after the wall kick.
+      this.wallJumpLockoutTimer = WALL_JUMP_LOCKOUT // no re-stick during the arc-away (AC3).
+      this.wallDir = 0 // we just left the wall — clear it so step 6 reads "not sliding" this frame.
+      this._kickScaleY(JUMP_STRETCH_Y)
+      this.sound?.wallJump() // audio (AC4) — the wall kick-off (null-safe; silent under NoAudio).
+    } else if (this.jumpBufferTimer > 0 && this.airJumpsLeft > 0 && this.coyoteTimer <= 0) {
+      // (c) AIR-JUMP / double-jump (AC1): a mid-air jump when airborne (coyote already lapsed so this
+      // is NOT a missed ground jump), one per airtime. Consumes the buffer + one air jump. Coyote is
+      // already 0 here, so it can't ALSO fire branch (a); the guard `coyoteTimer<=0` makes that explicit.
+      body.setVelocityY(-JUMP_VELOCITY)
+      this.jumpBufferTimer = 0
+      this.airJumpsLeft--
+      this._kickScaleY(JUMP_STRETCH_Y)
+      this.sound?.doubleJump() // audio (AC4) — the brighter second-leap chirp (null-safe).
     }
     // Variable height: releasing jump while still RISING cuts the upward speed to a small
     // value → tap = short hop, hold = full jump (Decision 12). vy<0 is "rising" in Phaser
-    // (y grows downward).
+    // (y grows downward). UNCHANGED (AC4) and applies to all three launches above (AC1/AC3).
     if (!input.jumpHeld && body.velocity.y < -JUMP_CUT_VELOCITY) {
       body.setVelocityY(-JUMP_CUT_VELOCITY)
     }
@@ -463,7 +588,10 @@ export class Player {
 
     // ── (6) Visuals: squash/stretch + tint (display object ONLY — never the body) ──
     // Landing edge: airborne last frame, grounded now → a land-squash impulse.
-    if (onFloor && !this.wasOnFloor) this._kickScaleY(LAND_SQUASH_Y)
+    if (onFloor && !this.wasOnFloor) {
+      this._kickScaleY(LAND_SQUASH_Y)
+      this.sound?.land() // audio §6.2 (AC3) — the touchdown thud (null-safe).
+    }
     this.wasOnFloor = onFloor
 
     // Ease scaleY back to rest (1) framerate-independently: lerp factor = 1−exp(−k·dt).
@@ -480,12 +608,18 @@ export class Player {
     this.rect.x = this.body.center.x
 
     // Tint priority (most-urgent-first): HURT flash (red) > dodge i-frame (yellow) > swing pop
-    // (blue) > base. The hurt-iframe flash is DISTINCT from the dodge tint (design §6.3) so a hit
-    // reads differently from a dodge.
+    // (blue) > wall-slide (slate) > base. The hurt-iframe flash is DISTINCT from the dodge tint
+    // (design §6.3) so a hit reads differently from a dodge. The wall-slide tell (movement-depth AC2)
+    // sits LOWEST of the tints so combat/dodge states always win — it only shows during an actual
+    // cling (wallDir set + descending), giving a clear visual that you're sliding (programmer-art:
+    // a slate tint, no sprite/particle asset). Recomputed from the LIVE wallDir so a wall-jump (which
+    // zeroed wallDir in step 3) reads "not sliding" the same frame it kicks off.
+    const slidingNow = this.wallDir !== 0 && body.velocity.y > 0
     let tint = BASE_COLOR
     if (this.hurtIframeTimer > 0) tint = HURT_COLOR
     else if (this.isInvulnerable()) tint = IFRAME_COLOR
     else if (this.attackColorTimer > 0) tint = ATTACK_COLOR
+    else if (slidingNow) tint = WALL_SLIDE_COLOR
     this.rect.setFillStyle(tint)
 
     // Facing cue: park the front marker on the leading edge. During the swing's active window it
@@ -527,6 +661,7 @@ export class Player {
 
     const attacker = { cx: this.body.center.x, cy: this.body.center.y, facing: this.facing }
     if (weapon.type === 'ranged') {
+      this.sound?.shoot() // audio §6.2 (AC3) — the bow twang (null-safe; fires even on a null pool).
       // RANGED (Decision 62): fire a pooled projectile along facing per the weapon's projectile spec.
       // Its hit is resolved by GameScene's projectile-specific overlap (its own attacker shape = the
       // SHOT's position + dir — NOT the player's, review MAJOR). The pool may be null (cosmetic-only).
@@ -536,6 +671,7 @@ export class Player {
         this.projectilePool.acquire(attacker, weapon.projectile, this.id, weapon.status)
       }
     } else {
+      this.sound?.swing(weapon.id) // audio §6.2 (AC3) — the melee whoosh, timbre per weapon (null-safe).
       // MELEE (Decision 16/20): acquire the transient hitbox; it lives for swing.active then the pool
       // releases it; its per-swing hitSet dedups multi-hit. Null pool = cosmetic-only (Phase-1).
       if (this.hitboxPool) this.hitboxPool.acquire(attacker, swing, this.id)
@@ -568,6 +704,11 @@ export class Player {
     this.weapons = [w, null]
     this.comboIndex = -1
     this.comboWindowTimer = 0
+    // ── Reset the skill loadout (skills design §6.2, AC2/AC8) ── both slots EMPTY + cooldowns 0 (the run-start
+    // identity: no meta gate this slice — slots start free + empty, so a fresh run's skill keys do nothing).
+    // GameScene re-equips the carried RunState.skillId1/skillId2 AFTER this on a level rebuild (Decision 7/AC4).
+    this.skills = [null, null]
+    this.skillCooldown = [0, 0]
   }
 
   // ── equippedWeapon (getter) (Decision 61; round-3 item 3 — slot-backed) ── the ACTIVE weapon = the
@@ -625,6 +766,33 @@ export class Player {
     this.comboIndex = -1
     this.comboWindowTimer = 0
     return true
+  }
+
+  // ── equipSkill(spec, slot) (skills design §6.2, AC2/AC5) ── put `spec` into a skill slot (0 = F, 1 = C)
+  // and RESET that slot's cooldown to 0 (a freshly equipped skill is immediately usable). The pickup/shop/
+  // branch paths call this (GameScene resolves which slot — fill the first empty, else replace slot 0). A
+  // slot index out of range is a defensive no-op (never throws). The Player does NOT fire the skill — that's
+  // GameScene's job (same discipline as equipWeapon → the scene drives the world).
+  equipSkill(spec: SkillSpec, slot: number) {
+    if (slot < 0 || slot >= this.skills.length) return
+    this.skills[slot] = spec
+    this.skillCooldown[slot] = 0
+  }
+
+  // ── tryUseSkill(slot) → SkillSpec | null (skills design §6.2/§6.3, Decision 4, AC2) ── the cooldown gate:
+  // returns the spec to FIRE if the slot is FILLED and OFF cooldown (and ARMS the cooldown for spec.cooldown
+  // seconds), else null. A slot that is empty OR on cooldown is a no-op (returns null → GameScene fires
+  // nothing — no double-fire, no crash). The IDENTITY: with both slots empty (a fresh run) this always
+  // returns null, so the two skill keys do nothing (a skill-less run is byte-identical, AC8). GameScene
+  // owns spawning the effect; the Player only owns the slot/cooldown bookkeeping (SOLID — same split as
+  // attack() latches intent and update()/_startSwing resolve it).
+  tryUseSkill(slot: number): SkillSpec | null {
+    if (slot < 0 || slot >= this.skills.length) return null
+    const spec = this.skills[slot]
+    if (!spec) return null // empty slot → no-op (the identity case).
+    if (this.skillCooldown[slot] > 0) return null // still on cooldown → no-op (no double-fire).
+    this.skillCooldown[slot] = spec.cooldown // arm the cooldown; the caller fires the effect.
+    return spec
   }
 
   // Expose a plain attacker shape for damage.js (cx + facing — the pure resolveHit input).
