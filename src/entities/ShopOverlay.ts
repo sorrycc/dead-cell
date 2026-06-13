@@ -37,6 +37,13 @@ const PANEL_W = 560
 const PANEL_H = 360
 const ROW_H = 44
 const ROW_TOP_OFFSET = 96 // px below the panel top where the first item row sits.
+// ── Column x-offsets from the panel's left edge (i18n alignment fix) ── each row cell is its own fixed-x
+// Text, so columns line up under the proportional CJK fallback font (char-count padEnd only aligns under
+// monospace). Name origin at +30 (unchanged); price at +210 (~18px gap past the longest 15ch name); desc
+// at +270 (clears the ≤4ch `{price}g`).
+const COL_NAME_DX = 30
+const COL_PRICE_DX = 210
+const COL_DESC_DX = 270
 const CURSOR_COLOR = 0x2c3e50
 const PANEL_COLOR = 0x10141c
 const PANEL_STROKE = 0x9b59b6
@@ -54,7 +61,9 @@ export class ShopOverlay {
   private goldHeader!: Phaser.GameObjects.Text
   private cursorBar!: Phaser.GameObjects.Rectangle
   private _rowBaseY!: number
-  private rowTexts!: Phaser.GameObjects.Text[]
+  // Per-item cell-sets ([name, price, desc] at fixed x — the alignment fix); the item's color is applied
+  // to all three in _render.
+  private rowTexts!: Phaser.GameObjects.Text[][]
   private closeRowIndex!: number
   private rowCount!: number
   private closeText!: Phaser.GameObjects.Text
@@ -110,16 +119,15 @@ export class ShopOverlay {
       .setScrollFactor(0)
       .setDepth(DEPTH + 1.5)
 
-    // One text row per catalog item + a CLOSE row (the synthetic last row).
+    // One cell-set per catalog item ([name, price, desc] at fixed x — the alignment fix) + a CLOSE row.
     this._rowBaseY = panelTop + ROW_TOP_OFFSET
+    const left = cx - PANEL_W / 2
+    const makeCell = (x: number, y: number, color: string) =>
+      scene.add.text(x, y, '', { fontFamily: UI_FONT, fontSize: '20px', color }).setOrigin(0, 0.5).setScrollFactor(0).setDepth(DEPTH + 2)
     this.rowTexts = []
     for (let i = 0; i < SHOP_ITEMS.length; i++) {
-      const t = scene.add
-        .text(cx - PANEL_W / 2 + 30, this._rowBaseY + i * ROW_H, '', { fontFamily: UI_FONT, fontSize: '20px', color: '#e6edf3' })
-        .setOrigin(0, 0.5)
-        .setScrollFactor(0)
-        .setDepth(DEPTH + 2)
-      this.rowTexts.push(t)
+      const y = this._rowBaseY + i * ROW_H
+      this.rowTexts.push([left + COL_NAME_DX, left + COL_PRICE_DX, left + COL_DESC_DX].map((x) => makeCell(x, y, '#e6edf3')))
     }
     this.closeRowIndex = SHOP_ITEMS.length
     this.rowCount = SHOP_ITEMS.length + 1
@@ -193,9 +201,10 @@ export class ShopOverlay {
       const it = SHOP_ITEMS[i]
       const affordable = gold >= it.price
       const color = affordable ? '#e6edf3' : '#e5484d' // white if affordable, red if not.
-      const name = tName('shop', it.id, it.name)
-      const desc = tDesc('shop', it.id, it.desc)
-      this.rowTexts[i].setText(`${name.padEnd(18)} ${String(it.price).padStart(3)}g   ${desc}`).setColor(color)
+      const cells = this.rowTexts[i] // [name, price, desc] — fixed-x cells, all share the row color.
+      cells[0].setText(tName('shop', it.id, it.name)).setColor(color)
+      cells[1].setText(`${it.price}g`).setColor(color)
+      cells[2].setText(tDesc('shop', it.id, it.desc)).setColor(color)
     }
     // Move the highlight bar behind the selected row (the CLOSE row is the synthetic last, centered).
     const selY = this.cursor === this.closeRowIndex
@@ -216,7 +225,7 @@ export class ShopOverlay {
     kb.off('keydown-E', this._handlers.confirm)
     kb.off('keydown-SPACE', this._handlers.confirm)
     kb.off('keydown-ENTER', this._handlers.confirm)
-    for (const o of [this.dim, this.panel, this.title, this.goldHeader, this.cursorBar, this.closeText, this.help, ...this.rowTexts]) {
+    for (const o of [this.dim, this.panel, this.title, this.goldHeader, this.cursorBar, this.closeText, this.help, ...this.rowTexts.flat()]) {
       if (o && o.active) o.destroy()
     }
     if (this._onClose) this._onClose()

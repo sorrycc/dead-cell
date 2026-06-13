@@ -4,9 +4,9 @@
 // (i18n/index.ts). Config files keep English as the source of truth — these are overrides only.
 // `scroll` is intentionally absent (scrolls are apply-only — no name/desc ever renders to the player).
 //
-// NOTE on alignment: the system-font CJK fallback (config UI_FONT) is NOT monospaced, so the Hub/Shop
-// padEnd/padStart columns read slightly ragged in Chinese (accepted — KISS). Keyboard tokens (SPACE,
-// [Q], WASD, [ESC], R, J) stay literal — they name physical keys.
+// NOTE on alignment: the Hub/Shop list columns are pixel-anchored (each cell is its own fixed-x Text —
+// HubScene COL_*, ShopOverlay COL_*_DX), so they align under the proportional CJK fallback font regardless
+// of locale. Keyboard tokens (SPACE, [Q], WASD, [ESC], R, J) stay literal — they name physical keys.
 
 import type { Dict } from './index.js'
 

@@ -36,6 +36,7 @@ export const PLAYER_MAX_HP = 100
 // A bare 'monospace' falls back to a Latin-only font (Courier/Menlo) that has NO CJK glyphs → tofu boxes.
 // The fallback chain keeps the programmer-art monospace look for Latin, then hands CJK glyphs to a
 // system-installed CJK font (no external/bundled asset — honours the "programmer-art only" constraint,
-// Decision 4). TRADE-OFF (accepted, KISS): the CJK fallback is NOT monospaced, so the Hub/Shop padEnd
-// columns read slightly ragged in Chinese; English stays perfectly aligned.
+// Decision 4). The CJK fallback is NOT monospaced, so the Hub/Shop list columns are pixel-anchored (each
+// cell is its own fixed-x Text — HubScene COL_*, ShopOverlay COL_*_DX) rather than padEnd-aligned, keeping
+// columns lined up in every locale.
 export const UI_FONT = 'monospace, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif'
