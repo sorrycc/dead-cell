@@ -8,6 +8,7 @@ import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
+import { QuitConfirmOverlay } from '../entities/QuitConfirmOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
 import { hasStatus } from '../combat/status.js'
@@ -218,6 +219,11 @@ export class GameScene extends Phaser.Scene {
   // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
   private mutationOpen!: boolean
   private mutationOverlay!: MutationOverlay | null
+  // ── Quit-to-Title confirm state (esc-quit-confirm) — null/false until ESC opens the confirm modal. The ESC
+  // handler is persistent (.on, re-arms for the whole run); _onEsc holds the bound ref so SHUTDOWN can remove it. ──
+  private quitConfirmOpen!: boolean
+  private quitConfirmOverlay!: QuitConfirmOverlay | null
+  private _onEsc!: () => void
   // ── Timed-clear bonus state (build-&-replay §6.4) — the wall-clock the CURRENT normal level was built at
   // (0 = an untimed level: boss/miniboss arena), used to grant a fast-clear bonus on the door-reach path. ──
   private levelStartedAt!: number
@@ -360,6 +366,9 @@ export class GameScene extends Phaser.Scene {
     // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
     this.mutationOpen = false // true while the mutation overlay is up (gameplay is paused beneath it).
     this.mutationOverlay = null // the live MutationOverlay UI while open, else null.
+    // ── Quit-to-Title confirm state (esc-quit-confirm) — gates update() like shop/mutation; ESC toggles it. ──
+    this.quitConfirmOpen = false // true while the confirm modal is up (gameplay is paused beneath it).
+    this.quitConfirmOverlay = null // the live QuitConfirmOverlay UI while open, else null.
     // ── Timed-clear bonus state (build-&-replay §6.4) — stamped per normal level in _buildLevel (0 = untimed). ──
     this.levelStartedAt = 0
     this._modalPausedAt = 0 // wall-clock a modal was opened at (0 = none up); excludes frozen modal time from the timer.
@@ -534,10 +543,24 @@ export class GameScene extends Phaser.Scene {
 
     // ── Parallel HUD overlay (Decision 2) + teardown ──
     if (!this.scene.isActive('HUD')) this.scene.launch('HUD')
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.scene.stop('HUD'))
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scene.stop('HUD')
+      // esc-quit-confirm: scene.start('Title') (the QUIT path) does NOT auto-clear keyboard handlers
+      // registered via .on, so remove the persistent ESC handler + force-close a dangling overlay here.
+      this.input.keyboard!.off('keydown-ESC', this._onEsc)
+      if (this.quitConfirmOverlay) {
+        this.quitConfirmOverlay.close()
+        this.quitConfirmOverlay = null
+      }
+      this.quitConfirmOpen = false
+    })
 
-    // ESC → Title (dev). On a .once event so it never shares the JustDown path Input owns.
-    this.input.keyboard!.once('keydown-ESC', () => this.scene.start('Title'))
+    // ESC → quit-to-Title CONFIRM toggle (esc-quit-confirm). PERSISTENT (.on) so it re-arms for the whole run,
+    // surviving _buildLevel rebuilds (which rebuild only the world, not the scene/handlers). Owns the second-ESC
+    // CANCEL (the overlay never binds ESC). ESC is NOT in Input's addKeys map, so this .on never shares the
+    // JustDown path Input owns. Stored on _onEsc so the SHUTDOWN handler above can remove it.
+    this._onEsc = () => this._toggleQuitConfirm()
+    this.input.keyboard!.on('keydown-ESC', this._onEsc)
   }
 
   // ── Build a generated level in place (design §6.2/§6.4, Decision 40/45/46) ── read the CURRENT
@@ -2118,6 +2141,52 @@ export class GameScene extends Phaser.Scene {
     this._resumeLevelTimer() // re-stamp the timer past the frozen shopping interval (review MINOR).
   }
 
+  // ── _toggleQuitConfirm() (esc-quit-confirm) ── the persistent ESC handler's one entry point. ESC toggles the
+  // confirm modal: CANCEL (resume) when it's already open, else OPEN it — but never STACK on another modal / a
+  // death / an in-flight transition (the same guard set _tryOpenShop uses). ONE handler reading current state is
+  // what gives the "second ESC cancels" behaviour cleanly.
+  _toggleQuitConfirm(): void {
+    if (this.quitConfirmOpen) {
+      this._closeQuitConfirm()
+      return
+    }
+    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen) return
+    this._openQuitConfirm()
+  }
+
+  // ── _openQuitConfirm() (esc-quit-confirm) ── freeze gameplay (quitConfirmOpen gates update) + raise the confirm
+  // modal. DECOUPLED (SOLID): the overlay only gets onQuit (→ scene.start('Title'), discarding the run exactly as
+  // the old dev shortcut did) + onCancel (→ _closeQuitConfirm). Zero the player velocity so it doesn't drift under
+  // the frozen overlay, and pause the fast-clear timer so deciding isn't charged against the window (like the shop /
+  // mutation modals). Guard mirrors _offerMutation (flag OR live handle) so a desync can't stack two overlays.
+  _openQuitConfirm(): void {
+    if (this.quitConfirmOpen || this.quitConfirmOverlay) return
+    this.quitConfirmOpen = true
+    this._pauseLevelTimer()
+    this.player.body.setVelocity(0, 0)
+    this.quitConfirmOverlay = new QuitConfirmOverlay(this, {
+      onQuit: () => this.scene.start('Title'),
+      onCancel: () => this._closeQuitConfirm(),
+    })
+  }
+
+  // ── _closeQuitConfirm() (esc-quit-confirm) ── the RESUME path: drop the overlay + un-freeze gameplay. Reached
+  // three ways, all idempotent: the overlay's RESUME row (onCancel), the ESC-while-open toggle, and (defensively)
+  // SHUTDOWN. close() is a no-op if the overlay already self-tore-down (RESUME-row path); it does the real teardown
+  // on the ESC-cancel path (where the overlay did NOT self-teardown). Swallow the pending SPACE (jump) + E (interact)
+  // edges so a confirm-key RESUME doesn't leak a jump / instantly reopen a vendor onto the first un-frozen frame.
+  _closeQuitConfirm(): void {
+    if (!this.quitConfirmOpen) return
+    if (this.quitConfirmOverlay) {
+      this.quitConfirmOverlay.close()
+      this.quitConfirmOverlay = null
+    }
+    this.quitConfirmOpen = false
+    this.input2.consumeJump() // no jump on resume when RESUME was confirmed via SPACE (AC8).
+    this.input2.consumeInteract() // no shop-reopen when RESUME was confirmed via E (the close→reopen race, AC8).
+    this._resumeLevelTimer()
+  }
+
   // ── _buyShopItem(item) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── attempt a purchase: if the run
   // can't afford item.price gold → false (the overlay re-renders the row red). Otherwise DEDUCT the gold
   // and APPLY the effect by `kind` (a small known set, like the Pickup handler — DRY: it reuses the SAME
@@ -2461,11 +2530,12 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     const dt = Math.min(delta / 1000, MAX_DT)
     this.hitstopTimer = Math.max(0, this.hitstopTimer - dt)
-    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop / MUTATION overlay is up (a
-    // modal pause) — so live hitboxes/projectiles/enemies all FREEZE together while a modal is open (§6.10 /
-    // build-&-replay §6.5), exactly as they freeze during a hit-stop. FX still tick on REAL dt so the overlay's
+    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop / MUTATION / QUIT-CONFIRM
+    // overlay is up (a modal pause) — so live hitboxes/projectiles/enemies all FREEZE together while a modal is
+    // open (§6.10 / build-&-replay §6.5 / esc-quit-confirm), exactly as they freeze during a hit-stop. FX still
+    // tick on REAL dt so the overlay's
     // flashes/pops play.
-    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen ? 0 : dt
+    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.quitConfirmOpen ? 0 : dt
 
     const inputState = this.input2.sample()
     // audio §6.5 (Decision 7) — M toggles global mute (flips Phaser's game.sound.mute via the façade
@@ -2475,8 +2545,8 @@ export class GameScene extends Phaser.Scene {
     // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
-    // shop / MUTATION overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen) {
+    // shop / MUTATION / QUIT-CONFIRM overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
+    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.quitConfirmOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held

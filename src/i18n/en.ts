@@ -86,5 +86,12 @@ export const EN: Dict = {
     'shop.leave': 'LEAVE',
     'shop.help': 'UP/DOWN select · E/SPACE/ENTER buy or LEAVE',
     'shop.prompt': '[E] SHOP',
+
+    // ── Quit-to-Title confirm overlay (esc-quit-confirm) ──
+    'quit.title': 'QUIT TO MAIN MENU?',
+    'quit.subtitle': 'Your current run will be lost.',
+    'quit.resume': 'RESUME RUN',
+    'quit.confirm': 'QUIT TO MENU',
+    'quit.help': 'UP/DOWN select · E/SPACE/ENTER confirm · ESC resume',
   },
 }

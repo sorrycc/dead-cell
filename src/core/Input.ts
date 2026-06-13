@@ -160,4 +160,13 @@ export class Input {
   consumeInteract(): void {
     Phaser.Input.Keyboard.JustDown(this.keys.e)
   }
+
+  // Consume a PENDING jump (SPACE) down-edge so the NEXT sample() does not read it (mirrors consumeInteract — same
+  // sole-JustDown-owner invariant). Used when the quit-confirm overlay RESUMES via SPACE: the same physical press
+  // both fires the overlay's keydown-SPACE (confirm → resume) and arms JustDown(space), so without this the press
+  // would make the player jump on the first un-frozen frame. A no-op when no SPACE edge is pending (e.g. an ESC/E
+  // cancel). Jump is SPACE-only (see sample()), so this targets the one key the jump edge reads.
+  consumeJump(): void {
+    Phaser.Input.Keyboard.JustDown(this.keys.space)
+  }
 }

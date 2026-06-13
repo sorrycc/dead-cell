@@ -89,6 +89,13 @@ export const ZH_CN: Dict = {
     'shop.leave': '离开',
     'shop.help': '上/下 选择 · E/SPACE/ENTER 购买或离开',
     'shop.prompt': '[E] 商店',
+
+    // ── 退出到主菜单确认弹窗 (esc-quit-confirm) ──
+    'quit.title': '退出到主菜单？',
+    'quit.subtitle': '当前这局进度将丢失。',
+    'quit.resume': '继续游戏',
+    'quit.confirm': '退出到菜单',
+    'quit.help': '上/下 选择 · E/SPACE/ENTER 确认 · ESC 继续',
   },
 
   // ── 武器 (config/weapons.ts) ──
