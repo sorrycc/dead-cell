@@ -255,11 +255,15 @@ export class GameScene extends Phaser.Scene {
       (hitboxRect, enemyRect) => this._dedupFilter(hitboxRect, enemyRect),
       this,
     )
+    // SPRITE-FIRST (Phaser swap rule): Arcade normalizes a Group×Sprite overlap to
+    // collideSpriteVsGroup(sprite, group), so the callbacks ALWAYS fire as (sprite, groupChild).
+    // We therefore list the single player.collider as object1 and the hitbox GROUP as object2, then
+    // read (_playerRect, hitboxRect). Registering the group first would silently swap the args.
     this.physics.add.overlap(
-      this.enemyHitboxes.group,
       this.player.collider,
-      (hitboxRect) => this._onEnemyHitPlayer(hitboxRect),
-      (hitboxRect) => hitboxRect.hb.active && this.player.isHittable(),
+      this.enemyHitboxes.group,
+      (_playerRect, hitboxRect) => this._onEnemyHitPlayer(hitboxRect),
+      (_playerRect, hitboxRect) => hitboxRect.hb.active && this.player.isHittable(),
       this,
     )
     this.physics.add.overlap(
@@ -297,11 +301,13 @@ export class GameScene extends Phaser.Scene {
     // per-shot hitSet dedup against the PLAYER id — NOT the melee _onEnemyHitPlayer (which keys off a
     // hitbox + the enemies[] list; a projectile is not a hitbox and the boss isn't in enemies[]). The
     // filter fires only for a live shot the player can still take (so a frozen/parked shot never hits).
+    // SPRITE-FIRST (same Phaser swap rule as the melee overlap above): player.collider is object1,
+    // the projectile GROUP is object2, callbacks read (_playerRect, projRect).
     this.physics.add.overlap(
-      this.enemyProjectilePool.group,
       this.player.collider,
-      (projRect) => this._onEnemyProjectileHitPlayer(projRect),
-      (projRect) => {
+      this.enemyProjectilePool.group,
+      (_playerRect, projRect) => this._onEnemyProjectileHitPlayer(projRect),
+      (_playerRect, projRect) => {
         const pj = projRect.pj
         if (!pj.active || !this.player.isHittable()) return false
         return !pj.hitSet.has(this.player.id)
