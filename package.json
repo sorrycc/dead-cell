@@ -8,12 +8,15 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "verify": "node scripts/verify-gen.mjs"
+    "typecheck": "tsc --noEmit",
+    "verify": "tsx scripts/verify-gen.mjs"
   },
   "dependencies": {
     "phaser": "^3.80.1"
   },
   "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
     "vite": "^5.4.10"
   }
 }

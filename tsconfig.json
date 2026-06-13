@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "forceConsistentCasingInFileNames": true,
+
+    // Behavior-preserving migration: the original JS classes assign every field in the
+    // constructor (this.x = ...), so emit assignment semantics — added type-only field
+    // declarations then have ZERO runtime effect. esbuild (Vite) honors this too.
+    "useDefineForClassFields": false
+  },
+  "include": ["src"]
+}
