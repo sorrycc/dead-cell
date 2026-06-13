@@ -94,6 +94,12 @@ export const ZH_CN: Dict = {
     'color.title': '提升一种属性颜色',
     'color.subtitle': '进入新的生物群系 —— 本局永久提升一种属性颜色',
     'color.help': '上/下 选择 · E/SPACE/ENTER 确认',
+
+    // ── 路线选择 (F4 branching-biome-map §9, AC7) —— 分岔处的双向路线选择 ──
+    'biomechoice.title': '选择路线',
+    'biomechoice.subtitle': '前路分岔 —— 选择下一个生物群系',
+    'biomechoice.help': '上/下 选择 · E/SPACE/ENTER 确认',
+    'biomechoice.hint': '威胁等级 {tier}',
     'scroll.brutality': '残暴卷轴',
     'scroll.tactics': '战术卷轴',
     'scroll.survival': '生存卷轴',
@@ -184,6 +190,7 @@ export const ZH_CN: Dict = {
     prison: { name: '监狱' },
     sewers: { name: '下水道' },
     catacombs: { name: '地下墓穴' },
+    ossuary: { name: '藏骸所' }, // F4 branching-biome-map — the new alternate mid biome (parallel to Catacombs).
     ramparts: { name: '城墙' },
   },
 

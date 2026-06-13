@@ -19,7 +19,7 @@
 // run completes only when the LAST biome's LAST level is cleared (isRunComplete()). Net effect: a real
 // multi-room descent per biome with VISIBLY rising difficulty within AND across biomes (AC43/AC45).
 
-import { BIOME_ORDER } from '../config/biomes.js'
+import { BIOMES, START_BIOME_ID } from '../config/biomes.js'
 import type { BiomeConfig } from '../config/biomes.js'
 import { PLAYER_MAX_HP } from '../config/constants.js'
 import type { PlayerStats } from '../config/upgrades.js'
@@ -48,7 +48,15 @@ export interface RunSummary {
 export interface RunState {
   // ── Run identity + position ──
   seed: number
-  biomeIndex: number
+  // ── Graph position (F4 branching-biome-map, Decision 3) — REPLACES the old `biomeIndex: number`. ──
+  // `biomeId`: the CURRENT biome's id (seeded to START_BIOME_ID). biome() = BIOMES[biomeId].
+  // `path`: the ordered list of biome ids the run has VISITED (starts [START_BIOME_ID]; advance() pushes the
+  //   chosen next id on a boundary roll). Drives the HUD/summary route readout + the verifier's per-path walk.
+  // `pendingBiomeId`: the next biome the picker committed to (null = no choice yet → advance() auto-picks the
+  //   deterministic default exits[0], Decision 5). The default-path identity holds because exits[0] is canonical.
+  biomeId: string
+  path: string[]
+  pendingBiomeId: string | null
   levelInBiome: number
   depth: number
   // ── Boss-Cell TIER (meta-progression §6.6, Decision 10, AC8) ── the run's Boss-Cell multiplier, seeded from
@@ -140,6 +148,16 @@ export interface RunState {
 // biome/seed sequence (AC47). >>> 0 keeps every seed an unsigned 32-bit int.
 const nextSeed = (s: number): number => (s * 2654435761 + 0x9e3779b9) >>> 0
 
+// ── defaultNextBiomeId(biomeId) (F4 branching-biome-map, Decision 5) ── the DETERMINISTIC default/auto-pick:
+// returns the FIRST declared exit (exits[0]) so a run with NO UI (headless / the verifier / a single-exit node)
+// still advances along a fixed route. Because SEWERS.exits[0] === 'catacombs', the default path is exactly
+// today's BIOME_ORDER (Prison→Sewers→Catacombs→Ramparts) — the additive-identity guarantee. Returns null at a
+// terminal (boss) biome with no exits (advance() never rolls there — isLastBiome() guards it). PURE (no Phaser).
+export function defaultNextBiomeId(biomeId: string): string | null {
+  const exits = BIOMES[biomeId]?.exits
+  return exits && exits.length > 0 ? exits[0] : null
+}
+
 // createRunState(startSeed, startedAt=0, startStats=null) → a plain object with advance()/isLastBiome()/
 // biome()/isRunComplete()/summary(). A factory (not a class) keeps it a pure value with methods —
 // trivially snapshot-able for the GameOver handoff (Decision 47) and node-constructible by the verifier.
@@ -161,7 +179,12 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
   return {
     // ── Run identity + position ──
     seed: startSeed >>> 0, // current level seed; advance() chains it.
-    biomeIndex: 0, // index into BIOME_ORDER (0 = the first biome).
+    // ── Graph position (F4 branching-biome-map, Decision 3) — seeded to the root, an empty (root-only) path, and
+    // NO pending choice (auto-pick). A fresh run is at START_BIOME_ID with pendingBiomeId null → advance() walks
+    // the deterministic default path === today's BIOME_ORDER (the additive identity). The picker sets pendingBiomeId.
+    biomeId: START_BIOME_ID, // the CURRENT biome's id (the graph root).
+    path: [START_BIOME_ID], // ordered visited-biome ids (for the HUD/summary route readout; advance() pushes).
+    pendingBiomeId: null, // the next biome the picker committed to (null = auto-pick the default exit, Decision 5).
     levelInBiome: 0, // 0-based level WITHIN the current biome (BLOCKER 1 fix — see header).
     depth: 0, // run-GLOBAL levels cleared so far (0 at the first level). Never resets → the
     //                // difficulty curve climbs across the whole run (AC42/AC45).
@@ -265,14 +288,16 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     kills: 0, // GameScene bumps this on each enemy death.
     startedAt, // passed IN (purity, Decision 44); summary() computes timeMs = now − startedAt.
 
-    // ── The current biome config (Decision 43) ──
+    // ── The current biome config (F4 Decision 3) ── the GRAPH lookup by id (was BIOME_ORDER[biomeIndex]).
     biome() {
-      return BIOME_ORDER[this.biomeIndex]
+      return BIOMES[this.biomeId]
     },
 
-    // True when we're on the last biome in the ordered run.
+    // ── isLastBiome() (F4 Decision 3) ── true on the boss biome — the UNIQUE terminal (endsInBoss === true,
+    // equivalently exits.length === 0). Keying off the boss flag (not an array index) makes it graph-correct on
+    // EVERY path (both mid routes converge on the boss). advance() uses this to guard the boundary roll.
     isLastBiome() {
-      return this.biomeIndex >= BIOME_ORDER.length - 1
+      return this.biome().endsInBoss === true
     },
 
     // True when the LAST biome's LAST level has just been cleared — the run is finished (Decision 48).
@@ -304,17 +329,28 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
       return b.endsInBoss !== true && !!b.miniboss && this.levelInBiome >= b.levels - 1
     },
 
-    // ── advance() (Decision 46, BLOCKER 1) — next seed + next level/biome/depth ──
-    // ALWAYS: next seed (deterministic), depth += 1 (run-global), levelInBiome += 1. Only roll to the
-    // NEXT biome when the current biome's levels are exhausted (and we're not already on the last).
-    // Callers MUST check isRunComplete() first (GameScene does) so this is never called past the run's
-    // end; defensively it clamps biomeIndex at the last biome regardless.
+    // ── advance() (Decision 46, BLOCKER 1; F4 Decision 4) — next seed + next level/biome/depth ──
+    // ALWAYS: next seed (deterministic), depth += 1 (run-global), levelInBiome += 1. Only roll to the NEXT biome
+    // when the current biome's levels are exhausted (and we're not already on the boss/terminal biome). The roll
+    // consults `pendingBiomeId` (set by GameScene's picker BEFORE advance()), else the deterministic default
+    // (exits[0], Decision 5) — so a headless / auto-pick / verifier run walks the canonical linear path. A
+    // DEFENSIVE guard: if the chosen next is somehow not in the current node's exits, fall back to the default
+    // (never roll to an unreachable node — keeps the graph invariant local). Callers MUST check isRunComplete()
+    // first (GameScene does) so this is never called past the run's end; defensively the boss biome never rolls.
     advance() {
       this.seed = nextSeed(this.seed)
       this.depth += 1
       this.levelInBiome += 1
       if (this.levelInBiome >= this.biome().levels && !this.isLastBiome()) {
-        this.biomeIndex += 1
+        const exits = this.biome().exits
+        const fallback = defaultNextBiomeId(this.biomeId)
+        const chosen = this.pendingBiomeId
+        const next = chosen && exits.includes(chosen) ? chosen : fallback
+        if (next) {
+          this.biomeId = next
+          this.path.push(next)
+        }
+        this.pendingBiomeId = null // consume the choice (auto-pick again next boundary unless re-set).
         this.levelInBiome = 0
       }
       return this

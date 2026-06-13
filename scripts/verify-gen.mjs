@@ -36,7 +36,7 @@ import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
 import { generateLevel, TILE, TILE_SIZE, canReachPlatform, canReachStep, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS, bodyFits, bodyStandClear, CLEAR_COLS, CLEAR_ROWS, APEX_H } from '../src/world/LevelGenerator.js'
-import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
+import { PRISON, BIOME_ORDER, BIOMES, START_BIOME_ID, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
 // modules satisfy. The Bosses phase (§6.6, Decision 64/68) HOISTED the canonical enemy specs to the
@@ -556,9 +556,14 @@ function checkClearance(desc) {
 // ── 3a) Determinism (AC19): generateLevel twice → DEEP-EQUAL (element-wise over the int grid). ──
 // ── 3c/3d/3e) Per-seed bounds + spawn-validity + traversability over N seeds, for EVERY biome. ──
 // §6.4 extends the sweep to the WHOLE BIOME_ORDER (not just PRISON) so AC28 (bounds / no-wall-spawn /
-// traversable) holds for every biome the run can walk, not only the opener.
+// traversable) holds for every biome the run can walk, not only the opener. F4 branching-biome-map (Decision
+// 10.4) switches the sweep to Object.values(BIOMES) — EVERY GRAPH NODE incl. the new OSSUARY (which is NOT on
+// the default path / not in BIOME_ORDER) — so an off-the-default-path biome is still bounds/spawn/traversable/
+// clearance-checked like the rest. (generateLevel only emits the boss ARENA when handed a {…biome, bossArena:true}
+// config — a per-call GameScene flag, NOT endsInBoss — so the plain biome config here always generates a NORMAL
+// room; the boss arena keeps its OWN sweep via checkBossArena in §6, unchanged.)
 const N = 200
-for (const biome of BIOME_ORDER) {
+for (const biome of Object.values(BIOMES)) {
   // Enrichment round-2: track which LAYOUT TEMPLATES this biome's seed sweep actually produces, so we can
   // assert the SHAPE space is genuinely used (≥2 distinct templates) — i.e. the variety isn't dead config.
   const templatesSeen = new Set()
@@ -751,75 +756,185 @@ const MAXD = 60 // a generous run length the curve must stay monotone over (far 
   }
 }
 
-// ── 4c) Whole-run monotonicity (AC42/AC49): drive a fresh RunState through advance() for the FULL run
-// (every biome's every level) and assert effectiveDifficulty(depth, biome) is non-decreasing across
-// the ENTIRE run — the load-bearing "visibly rising difficulty" proof. Walks the EXACT chain the game
-// walks (Decision 49), so a curve/biome/levels re-tune that breaks the AC fails LOUDLY here. ──
-const RUN_SEED = 0xc0ffee
-const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
+// ── 4b') Graph well-formedness (F4 branching-biome-map, Decision 10.1 — new KISS guardrail mirroring §6b) ──
+// The BRANCHING biome graph (BIOMES + exits) must be sound: all edges resolve, exactly one boss terminal with
+// empty exits, every non-boss node has ≥1 exit (no dead end), ≥1 node has ≥2 exits (a real choice exists —
+// AC1/AC4), the graph is ACYCLIC, every node is REACHABLE from START_BIOME_ID, and BIOME_ORDER is a valid
+// root→boss path (so the default-path walks below are real paths). An INDEPENDENT proof: re-derived from the
+// real config, so a dangling edge / mis-tiered sibling / unreachable biome fails LOUDLY here, not at runtime.
 {
-  const rs = createRunState(RUN_SEED)
-  let prevEff = effectiveDifficulty(rs.depth, rs.biome())
-  // Step through every level of the run via advance() until the last biome's last level is cleared.
-  let steps = 0
-  while (!rs.isRunComplete()) {
-    rs.advance()
-    steps++
-    const eff = effectiveDifficulty(rs.depth, rs.biome())
-    if (eff < prevEff) {
-      fail(`whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+  const allIds = Object.keys(BIOMES)
+  // (i) every exits array resolves to a known biome (no dangling edge).
+  for (const b of Object.values(BIOMES)) {
+    if (!Array.isArray(b.exits)) fail(`graph: biome ${b.id} has no exits array`)
+    for (const eid of b.exits) {
+      if (!BIOMES[eid]) fail(`graph: biome ${b.id} exits to unknown biome "${eid}" (dangling edge)`)
     }
-    prevEff = eff
-    if (steps > totalLevels + 5) fail('whole-run walk did not terminate (isRunComplete never true)')
   }
-  // The run length = sum of per-biome levels; depth at completion = totalLevels − 1 (0-based start).
-  if (rs.depth !== totalLevels - 1) {
-    fail(`run length mismatch: depth ${rs.depth} at completion, expected ${totalLevels - 1}`)
+  // (ii) exactly ONE boss terminal, with EMPTY exits; every non-boss node has ≥1 exit (no dead end before boss).
+  const terminals = Object.values(BIOMES).filter((b) => b.endsInBoss === true)
+  if (terminals.length !== 1) fail(`graph: expected exactly 1 boss terminal (endsInBoss), found ${terminals.length}`)
+  if (terminals[0].exits.length !== 0) fail(`graph: the boss terminal ${terminals[0].id} must have empty exits (got ${terminals[0].exits.length})`)
+  for (const b of Object.values(BIOMES)) {
+    if (!b.endsInBoss && b.exits.length < 1) fail(`graph: non-boss biome ${b.id} has no exit (a dead end before the boss)`)
   }
-  // And we must have ended on the LAST biome (BLOCKER 1 — not looping/short-circuiting).
-  if (!rs.isLastBiome()) fail('run completed but not on the last biome (BLOCKER 1 regression)')
+  // (iii) at least one node offers a REAL choice (≥2 exits) — the 2-way-choice AC (AC1/AC4) would be dead otherwise.
+  if (!Object.values(BIOMES).some((b) => b.exits.length >= 2)) fail('graph: no biome has ≥2 exits (no real 2-way choice exists, AC1/AC4)')
+  // (iv) ACYCLIC + every node REACHABLE from START_BIOME_ID (DFS; a back-edge to a node on the current stack = a cycle).
+  if (!BIOMES[START_BIOME_ID]) fail(`graph: START_BIOME_ID "${START_BIOME_ID}" is not a known biome`)
+  const visited = new Set()
+  const onStack = new Set()
+  const dfs = (id) => {
+    if (onStack.has(id)) fail(`graph: cycle detected — back-edge revisits "${id}" on the current path (must be a DAG)`)
+    if (visited.has(id)) return
+    visited.add(id)
+    onStack.add(id)
+    for (const eid of BIOMES[id].exits) dfs(eid)
+    onStack.delete(id)
+  }
+  dfs(START_BIOME_ID)
+  for (const id of allIds) {
+    if (!visited.has(id)) fail(`graph: biome "${id}" is not reachable from START_BIOME_ID "${START_BIOME_ID}"`)
+  }
+  // (v) BIOME_ORDER is a valid root→boss path through the graph (each consecutive pair an exit; root start; boss end).
+  if (BIOME_ORDER[0].id !== START_BIOME_ID) fail(`graph: BIOME_ORDER must start at START_BIOME_ID (${START_BIOME_ID}), got ${BIOME_ORDER[0].id}`)
+  if (!BIOME_ORDER[BIOME_ORDER.length - 1].endsInBoss) fail('graph: BIOME_ORDER must end on the boss biome')
+  for (let i = 1; i < BIOME_ORDER.length; i++) {
+    if (!BIOME_ORDER[i - 1].exits.includes(BIOME_ORDER[i].id)) {
+      fail(`graph: BIOME_ORDER is not a valid path — ${BIOME_ORDER[i].id} ∉ ${BIOME_ORDER[i - 1].id}.exits`)
+    }
+  }
 }
 
-// ── 4c') Whole-run monotonicity AT EVERY TIER (meta-progression §6.10, AC3 — AC42/AC43 preserved + extended) ──
-// The existing tier-0 walk above is UNCHANGED (it calls effectiveDifficulty(depth, biome) — default mult 1 —
-// so it is byte-identical). HERE: for EACH tier in BOSS_CELL_TIERS, drive a FRESH createRunState(RUN_SEED)
-// through advance() for the FULL run, asserting effectiveDifficulty(depth, biome, tier.bossCellMult) is
-// non-decreasing across the ENTIRE run AND is >= the tier-0 value at every step (the tier is a global LIFT,
-// never an easing). Because bossCellMult is CONSTANT within a run and >= 1, and the curve term is non-
-// decreasing in depth and the biome tier non-decreasing along BIOME_ORDER, this is non-decreasing BY
-// CONSTRUCTION — the walk is a PROOF, not a filter. This is the load-bearing "a boss-cell multiplier keeps
-// effectiveDifficulty non-decreasing across the run, at every tier" assertion (the slice constraint).
+// ── enumeratePaths() (F4 Decision 10.2) ── every SIMPLE path from START_BIOME_ID to the boss terminal (the DAG
+// is tiny — full enumeration is cheap). Returns a list of id-arrays, each a complete root→boss route. The
+// acyclicity proven above guarantees this terminates. Used by the per-path monotonicity walks below.
+function enumeratePaths() {
+  const out = []
+  const walk = (id, acc) => {
+    const node = BIOMES[id]
+    const next = [...acc, id]
+    if (node.endsInBoss === true || node.exits.length === 0) {
+      out.push(next)
+      return
+    }
+    for (const eid of node.exits) walk(eid, next)
+  }
+  walk(START_BIOME_ID, [])
+  return out
+}
+
+// ── walkPath(seed, path, bossCellMult) (F4 Decision 10.2/§7.5 — drive the REAL advance() chain down a chosen
+// path) ── construct a FRESH createRunState(seed) and step it via the EXACT advance() the game runs, setting
+// rs.pendingBiomeId = path[i+1] BEFORE each boundary advance() (exactly as GameScene's picker does). This is an
+// INDEPENDENT proof (not self-certification, Decision 36): the verifier walks the real method surface for THIS
+// path, so a broken advance()/exits-guard/levels re-tune fails loudly. Calls back per step so the caller asserts
+// monotonicity. Returns the final RunState (for end-of-path assertions: boss-termination, run length, depth).
+function walkPath(seed, path, bossCellMult, onStep) {
+  const rs = createRunState(seed)
+  // sanity: a walk must START on the path's root (the run always seeds to START_BIOME_ID).
+  if (rs.biomeId !== path[0]) fail(`path walk: run starts on ${rs.biomeId}, path starts on ${path[0]}`)
+  let pathIdx = 0
+  let steps = 0
+  const maxSteps = path.reduce((sum, id) => sum + BIOMES[id].levels, 0) + 5
+  while (!rs.isRunComplete()) {
+    // If the UPCOMING advance() will roll the biome (a boundary), commit the path's NEXT id to pendingBiomeId so
+    // advance() rolls down THIS path (the same seam GameScene uses) — never relying on the default-exit fallback.
+    const willRoll = rs.levelInBiome + 1 >= rs.biome().levels && !rs.isLastBiome()
+    if (willRoll) {
+      const nextId = path[pathIdx + 1]
+      if (!nextId) fail(`path walk: boundary at ${rs.biomeId} but the path has no next id (path ${path.join('→')})`)
+      rs.pendingBiomeId = nextId
+    }
+    rs.advance()
+    if (willRoll) {
+      pathIdx++
+      // advance() must have rolled to EXACTLY the path's next id (the pendingBiomeId drive worked + the exits guard
+      // did not silently fall back to the default — the proof that the choice is honoured).
+      if (rs.biomeId !== path[pathIdx]) fail(`path walk: expected biome ${path[pathIdx]}, advance() rolled to ${rs.biomeId} (path ${path.join('→')})`)
+    }
+    steps++
+    if (onStep) onStep(rs)
+    if (steps > maxSteps) fail(`path walk did not terminate for path ${path.join('→')} (isRunComplete never true)`)
+  }
+  // The visited path RunState must match the requested path EXACTLY (the route readout proof).
+  if (rs.path.join('→') !== path.join('→')) fail(`path walk: rs.path "${rs.path.join('→')}" != requested "${path.join('→')}"`)
+  return rs
+}
+
+// ── 4c) EVERY-PATH whole-run monotonicity + boss-termination (F4 Decision 10.2 — the STRENGTHENED §4c; was a
+// single linear walk) ── for EVERY simple root→boss path, drive the REAL advance() chain (walkPath) and assert
+// effectiveDifficulty(depth, biome) is non-decreasing across the WHOLE path AND the path ENDS on the boss biome
+// (isLastBiome() true, isRunComplete() fired). Plus a redundant-but-cheap direct difficultyTier-non-decreasing
+// check per path (catches a mis-tiered sibling loudly). Plus per-path run length === sum of per-biome levels and
+// depth at completion === that sum − 1. The load-bearing "visibly rising difficulty on EVERY route" proof. ──
+const RUN_SEED = 0xc0ffee
+const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0) // the DEFAULT-path length (the additive-identity pin).
+const ALL_PATHS = enumeratePaths()
+{
+  if (ALL_PATHS.length < 2) fail(`expected ≥2 distinct root→boss paths (a real 2-way choice), found ${ALL_PATHS.length} (AC1/AC4)`)
+  for (const path of ALL_PATHS) {
+    // (i) difficultyTier non-decreasing along the path (the cheap direct check — a mis-tiered sibling fails loudly).
+    for (let i = 1; i < path.length; i++) {
+      if (BIOMES[path[i]].difficultyTier < BIOMES[path[i - 1]].difficultyTier) {
+        fail(`path ${path.join('→')}: difficultyTier dipped at ${path[i]} (${BIOMES[path[i]].difficultyTier} < prior)`)
+      }
+    }
+    // (ii) effectiveDifficulty non-decreasing across the WHOLE path (the real advance() walk).
+    const rs0 = createRunState(RUN_SEED)
+    let prevEff = effectiveDifficulty(rs0.depth, rs0.biome())
+    const finalRs = walkPath(RUN_SEED, path, 1, (rs) => {
+      const eff = effectiveDifficulty(rs.depth, rs.biome())
+      if (eff < prevEff) fail(`path ${path.join('→')}: whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+      prevEff = eff
+    })
+    // (iii) boss-termination: the path ENDS on the boss biome (the unique terminal), and run length matches.
+    if (!finalRs.isLastBiome()) fail(`path ${path.join('→')}: completed but not on the boss biome`)
+    const pathLevels = path.reduce((sum, id) => sum + BIOMES[id].levels, 0)
+    if (finalRs.depth !== pathLevels - 1) fail(`path ${path.join('→')}: depth ${finalRs.depth} at completion, expected ${pathLevels - 1}`)
+  }
+}
+
+// ── 4c') EVERY-PATH × EVERY-TIER whole-run monotonicity + non-weakening (F4 Decision 10.3 — extends the per-tier
+// §4c') ── for EACH tier in BOSS_CELL_TIERS and EACH simple path, drive the REAL advance() chain (walkPath) and
+// assert effectiveDifficulty(depth, biome, tier.bossCellMult) is non-decreasing across the WHOLE path AND is >=
+// the tier-0 value at every step (the tier is a global LIFT, never an easing). By construction (bossCellMult
+// constant ≥1, the curve non-decreasing in depth, the biome tier non-decreasing along EVERY path — proven above)
+// this is a PROOF, not a filter. The default-path tier-0 case is byte-identical to the pre-F4 §4c'/§4c walk.
 {
   for (const tier of BOSS_CELL_TIERS) {
-    const rs = createRunState(RUN_SEED)
-    let prevEff = effectiveDifficulty(rs.depth, rs.biome(), tier.bossCellMult)
-    let steps = 0
-    while (!rs.isRunComplete()) {
-      rs.advance()
-      steps++
-      const eff = effectiveDifficulty(rs.depth, rs.biome(), tier.bossCellMult)
-      if (eff < prevEff) {
-        fail(`tier ${tier.index} whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
-      }
-      // The tier is a global lift: at every step the tiered value is >= the tier-0 value (never an easing).
-      const eff0 = effectiveDifficulty(rs.depth, rs.biome())
-      if (eff < eff0) fail(`tier ${tier.index} whole-run: effectiveDifficulty below tier-0 at depth ${rs.depth} (${eff} < ${eff0})`)
-      prevEff = eff
-      if (steps > totalLevels + 5) fail(`tier ${tier.index} whole-run walk did not terminate`)
+    for (const path of ALL_PATHS) {
+      let prevEff = effectiveDifficulty(0, BIOMES[path[0]], tier.bossCellMult)
+      walkPath(RUN_SEED, path, tier.bossCellMult, (rs) => {
+        const eff = effectiveDifficulty(rs.depth, rs.biome(), tier.bossCellMult)
+        if (eff < prevEff) fail(`tier ${tier.index} path ${path.join('→')}: difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+        const eff0 = effectiveDifficulty(rs.depth, rs.biome())
+        if (eff < eff0) fail(`tier ${tier.index} path ${path.join('→')}: effectiveDifficulty below tier-0 at depth ${rs.depth} (${eff} < ${eff0})`)
+        prevEff = eff
+      })
     }
   }
 }
 
-// ── 4d) Seed-chain + biome-sequence determinism (AC47): two fresh RunStates from the SAME start seed
-// advance in lockstep to the SAME (biomeIndex, levelInBiome, seed) sequence — the run replays. ──
+// ── 4d) Seed-chain + biome-sequence determinism (AC47; F4 §7.5) ── two fresh RunStates from the SAME start seed,
+// fed the SAME pending choices, advance in LOCKSTEP to the SAME (biomeId, path, levelInBiome, depth, seed)
+// sequence — the run replays. F4 renames the old `biomeIndex` compare to `biomeId` (the index field is DELETED)
+// and ADDS a `path` lockstep + a `pendingBiomeId` set on BOTH states identically before each boundary advance(),
+// so the determinism proof covers the graph-model fields, not a now-undefined index (which would pass vacuously).
+// Walks the DEFAULT path (pendingBiomeId left null → exits[0]) here; the per-path × per-tier walks above already
+// prove every CHOSEN path replays (walkPath drives the same advance() chain deterministically per path).
 {
   const a = createRunState(RUN_SEED)
   const b = createRunState(RUN_SEED)
   for (let step = 0; step < totalLevels; step++) {
     if (a.seed !== b.seed) fail(`seed chain diverged at step ${step}: ${a.seed} !== ${b.seed}`)
-    if (a.biomeIndex !== b.biomeIndex) fail(`biome index diverged at step ${step}`)
+    if (a.biomeId !== b.biomeId) fail(`biomeId diverged at step ${step}: ${a.biomeId} !== ${b.biomeId}`)
+    if (a.path.join('→') !== b.path.join('→')) fail(`path diverged at step ${step}: ${a.path.join('→')} !== ${b.path.join('→')}`)
     if (a.levelInBiome !== b.levelInBiome) fail(`levelInBiome diverged at step ${step}`)
     if (a.depth !== b.depth) fail(`depth diverged at step ${step}`)
+    // Set the SAME pending choice on both (null = auto-pick the default exit) — the lockstep is over identical input.
+    a.pendingBiomeId = null
+    b.pendingBiomeId = null
     a.advance()
     b.advance()
   }
@@ -1038,7 +1153,9 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 // ── 6b) Per-biome enemyPool well-formed (AC59): every biome has a non-empty enemyPool referencing only
 // KNOWN archetype ids with positive weights. The single source the SCENE picks archetypes from. ──
 {
-  for (const biome of BIOME_ORDER) {
+  // F4 (Decision 10.4) — iterate EVERY graph node (Object.values(BIOMES)), not just BIOME_ORDER, so OSSUARY's
+  // pool/miniboss are well-formedness-checked like the rest (an off-the-default-path biome must still be valid).
+  for (const biome of Object.values(BIOMES)) {
     if (!Array.isArray(biome.enemyPool) || biome.enemyPool.length === 0) {
       fail(`biome ${biome.id}: enemyPool is empty (AC59)`)
     }
@@ -1047,10 +1164,12 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
       if (!(typeof entry.w === 'number') || entry.w <= 0) fail(`biome ${biome.id}: enemyPool weight for "${entry.id}" must be > 0`)
     }
   }
-  // EXACTLY one biome ends in a boss (the last), and it carries a `boss` id keyed into a known boss.
-  const bossBiomes = BIOME_ORDER.filter((b) => b.endsInBoss === true)
+  // EXACTLY one biome ends in a boss (the graph's unique terminal), and it carries a `boss` id keyed into a known
+  // boss. F4 (Decision 1) — the boss biome is also the BIOME_ORDER tail AND the unique empty-exits terminal (the
+  // graph well-formedness sweep below proves exits.length === 0 + reachability); here we check the boss id resolves.
+  const bossBiomes = Object.values(BIOMES).filter((b) => b.endsInBoss === true)
   if (bossBiomes.length !== 1) fail(`expected exactly 1 boss biome (endsInBoss), found ${bossBiomes.length} (AC57)`)
-  if (bossBiomes[0] !== BIOME_ORDER[BIOME_ORDER.length - 1]) fail('the boss biome must be the LAST in BIOME_ORDER (AC57)')
+  if (bossBiomes[0] !== BIOME_ORDER[BIOME_ORDER.length - 1]) fail('the boss biome must be the LAST in BIOME_ORDER (the default path ends on it, AC57)')
   if (!bossBiomes[0].boss) fail(`boss biome ${bossBiomes[0].id} missing a boss id (AC57)`)
   // §6.12 (Decision 78, AC65) — the boss biome's `boss` may be a SINGLE id OR an ARRAY of ids (the seeded
   // multi-boss pick). EVERY id must resolve to a known boss in BOSSES (a typo / dangling id fails loudly,
@@ -1063,7 +1182,7 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   // ── Round-2 (§6.6.8): a biome's OPTIONAL `miniboss` id must resolve to a known boss (a typo / dangling id
   // fails loudly, mirroring the boss-id check). EVERY non-boss biome SHOULD carry one (the per-biome set-piece
   // gate — so the run has an escalating climax per biome, not just the finale); we assert presence + validity. ──
-  for (const biome of BIOME_ORDER) {
+  for (const biome of Object.values(BIOMES)) {
     if (biome.miniboss !== undefined && !BOSSES[biome.miniboss]) {
       fail(`biome ${biome.id}: miniboss id "${biome.miniboss}" not in BOSSES (round-2)`)
     }
@@ -2050,11 +2169,12 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
-    `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
+    `${N} seeds × ${Object.keys(BIOMES).length} biomes (full graph) → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
     `traversable(AC27) + body-clearance: 36×52 body fits every node + entrance→exit (body-aware BFS, AC1/AC2) + ` +
     `branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2) + ` +
     `floor-recovery locality+reconnect+hazard-free-lane (cols≥${RECOVERY_MIN_COLS}); level pin OK; ` +
-    `curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
+    `biome graph well-formed (acyclic + all-reachable + 1 boss terminal + ≥1 fork, F4); ` +
+    `curve+tiers monotonic + EVERY-PATH whole-run monotonic & boss-terminating over ${ALL_PATHS.length} root→boss paths (AC2/AC42/AC43); default-path ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
     `identity/non-mutating/never-weaker (AC55); ${ENEMY_ARCHETYPES.length} enemy archetypes + per-biome ` +
     `pools (AC59); boss table well-formed + depth-scaling guardrail (AC56/AC61); ${WEAPON_ORDER.length} ` +

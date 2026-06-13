@@ -11,6 +11,7 @@ import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { ColorOverlay } from '../entities/ColorOverlay.js'
 import { QuitConfirmOverlay } from '../entities/QuitConfirmOverlay.js'
+import { BiomeChoiceOverlay } from '../entities/BiomeChoiceOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
 import { hasStatus } from '../combat/status.js'
@@ -48,6 +49,7 @@ import type { RunState, RunStartStats } from '../core/RunState.js'
 import type { MetaStateInstance } from '../core/MetaState.js'
 import type { EnemySpec, EliteAffixSpec } from '../config/enemies.js'
 import type { BiomeConfig } from '../config/biomes.js'
+import { BIOMES } from '../config/biomes.js'
 import type { RoomType } from '../config/roomTypes.js'
 import type { ShopItem, ForgeAction } from '../config/shop.js'
 import type { SkillSpec } from '../config/skills.js'
@@ -240,6 +242,12 @@ export class GameScene extends Phaser.Scene {
   private colorPickOpen!: boolean
   private colorOverlay!: ColorOverlay | null
   private _colorPickPending!: boolean
+  // ── Biome-choice picker state (F4 branching-biome-map, Decision 7) — null/false until a 2-exit boundary offers
+  // a route choice. Mirrors mutationOpen/mutationOverlay (the SAME frozen-modal + update-gate idiom): biomeChoiceOpen
+  // gates update() (freezes gameplay/projectiles beneath the open overlay), and _teardownLevel force-closes a dangling
+  // handle so it never leaks across a rebuild. ──
+  private biomeChoiceOpen!: boolean
+  private biomeChoiceOverlay!: BiomeChoiceOverlay | null
   // ── Quit-to-Title confirm state (esc-quit-confirm) — null/false until ESC opens the confirm modal. The ESC
   // handler is persistent (.on, re-arms for the whole run); _onEsc holds the bound ref so SHUTDOWN can remove it. ──
   private quitConfirmOpen!: boolean
@@ -405,6 +413,9 @@ export class GameScene extends Phaser.Scene {
     this.colorPickOpen = false // true while the colour overlay is up (gameplay is paused beneath it).
     this.colorOverlay = null // the live ColorOverlay UI while open, else null.
     this._colorPickPending = false // a colour pick deferred behind the mutation modal (offered on its close).
+    // ── Biome-choice picker state (F4 branching-biome-map, Decision 7) — null/false until a 2-exit boundary. ──
+    this.biomeChoiceOpen = false // true while the route-choice overlay is up (gameplay is paused beneath it).
+    this.biomeChoiceOverlay = null // the live BiomeChoiceOverlay UI while open, else null.
     // ── Quit-to-Title confirm state (esc-quit-confirm) — gates update() like shop/mutation; ESC toggles it. ──
     this.quitConfirmOpen = false // true while the confirm modal is up (gameplay is paused beneath it).
     this.quitConfirmOverlay = null // the live QuitConfirmOverlay UI while open, else null.
@@ -1070,13 +1081,38 @@ export class GameScene extends Phaser.Scene {
     this._grantTimedClearBonus()
     // Capture carried HP into the RunState BEFORE the rebuild (Decision 46 — sync exactly once here).
     this.runState.hp = this.player.hp
-    const prevBiomeIndex = this.runState.biomeIndex // §6.9 — detect a biome ROLL across advance() (Decision 72).
+    // ── F4 branching-biome-map (Decision 6) — the CHOICE seam ── the timing restructures so the player DECIDES
+    // the next biome BEFORE advance() rolls into it. We detect a biome boundary with a PRE-advance predicate (the
+    // upcoming advance() WILL roll the biome) — replacing the old post-advance `biomeIndex !== prevBiomeIndex`
+    // diff, which no longer exists. When the current node offers a REAL choice (exits.length >= 2), open the
+    // BiomeChoiceOverlay; its onPick sets runState.pendingBiomeId, then runs the SHARED continuation
+    // (_continueTransition). A single-exit boundary (or a within-biome step) skips the overlay and runs the SAME
+    // continuation inline — so advance()+refill+power-scroll+rebuild+mutation/colour fire EXACTLY ONCE per call,
+    // whichever branch is taken (no double-advance, no skipped flask/scroll, no modal over an un-rebuilt world).
+    const rs = this.runState
+    const atBoundary = rs.levelInBiome + 1 >= rs.biome().levels && !rs.isLastBiome()
+    if (atBoundary && rs.biome().exits.length >= 2) {
+      this._offerBiomeChoice() // → onPick sets pendingBiomeId, then calls _continueTransition().
+      return
+    }
+    this._continueTransition() // single-exit boundary / within-biome step: no choice — run the continuation inline.
+  }
+
+  // ── _continueTransition() (F4 Decision 6 — the SHARED level-transition continuation) ── the body that runs
+  // AFTER any biome choice is (or isn't) made: advance the RunState (rolling the biome via pendingBiomeId ?? the
+  // default exit), refill flasks + grant the biome power scroll ON A ROLL, rebuild the level, then offer the
+  // mutation + colour modals on a roll. Detects the roll with a PRE/POST biome-id compare (the id-based equivalent
+  // of the old index diff). Called inline (single-exit / within-biome) OR from the choice overlay's onPick (2-exit),
+  // so the WHOLE post-choice sequence runs EXACTLY once per _nextLevel (no double-advance — the reviewer's seam).
+  _continueTransition(): void {
+    const prevBiomeId = this.runState.biomeId // §6.9 / F4 — detect a biome ROLL across advance() by id (was index).
     this.runState.advance()
+    const rolled = this.runState.biomeId !== prevBiomeId // a NEW biome was entered (a boundary roll).
     // ── Flask REFILL on a biome transition (§6.9, Decision 72) ── entering a NEW biome tops the flask
     // charges back to max (the "fountain at the new biome's start" — the genre's between-area heal valve).
     // HP itself is still CARRIED (never auto-refilled, Decision 46); the flasks are the player's CHOICE to
     // spend. This makes a damaged run survivable across biomes without trivialising the within-biome slide.
-    if (this.runState.biomeIndex !== prevBiomeIndex) {
+    if (rolled) {
       this.runState.flasks = this.runState.maxFlasks
       // §6.5 (round-3) — entering a NEW biome arms a guaranteed POWER scroll so the run's own power curve
       // keeps pace with the rising difficulty (a "scroll of power" per biome — the in-run power-arc fix).
@@ -1090,7 +1126,7 @@ export class GameScene extends Phaser.Scene {
     // is at the new entrance), offer the seeded 3-of-N mutation, THEN — on its close — the +1-colour pick (two
     // SEQUENTIAL frozen modals, Decision 7). Arm the colour pick as PENDING, then offer the mutation; if no
     // mutation modal actually opens (none to offer), fire the colour pick immediately. No-op within a biome.
-    if (this.runState.biomeIndex !== prevBiomeIndex) {
+    if (rolled) {
       this._colorPickPending = true
       this._offerMutation()
       if (!this.mutationOpen) this._offerColorPick() // no mutation modal up → offer the colour pick now.
@@ -1101,6 +1137,44 @@ export class GameScene extends Phaser.Scene {
         `(level ${this.runState.levelInBiome + 1}/${this.runState.biome().levels}), seed 0x${this.runState.seed.toString(16)}`,
     )
     this.transitioning = false // re-arm the door for the NEW level.
+  }
+
+  // ── _offerBiomeChoice() (F4 branching-biome-map, Decision 6/7, AC1) ── open the BiomeChoiceOverlay at a 2-exit
+  // boundary (the player picks the next biome before advance() rolls into it). Freezes gameplay via biomeChoiceOpen
+  // (the SAME update() gate mutation/shop/colour use) + pauses the fast-clear timer, mirroring _offerMutation's
+  // seam. The overlay is handed the 2 exit BiomeConfigs + an onPick(id) that (a) commits the choice to
+  // runState.pendingBiomeId, (b) closes/un-freezes, and (c) runs the SHARED continuation _continueTransition().
+  // Defensive: if (somehow) already open, no-op (the transitioning guard + biomeChoiceOpen already gate re-entry).
+  _offerBiomeChoice(): void {
+    if (this.biomeChoiceOpen || this.biomeChoiceOverlay) return // already offering (defensive — should never re-enter).
+    const offers = this.runState.biome().exits.map((id) => BIOMES[id]).filter((b): b is BiomeConfig => !!b)
+    if (offers.length < 2) {
+      // Defensive: a dangling/unknown exit collapsed the choice — fall back to the inline (auto-pick) path so the
+      // run never stalls (advance()'s exits guard then rolls the default). Never strands the player at the door.
+      this._continueTransition()
+      return
+    }
+    this.biomeChoiceOpen = true
+    this._pauseLevelTimer() // exclude the (mandatory) route-reading time from the fast-clear timer (review MINOR).
+    this.player.body.setVelocity(0, 0) // zero momentum so the body doesn't drift under the frozen overlay.
+    this.biomeChoiceOverlay = new BiomeChoiceOverlay(this, {
+      offers,
+      onPick: (id) => this._applyBiomeChoice(id),
+    })
+  }
+
+  // ── _applyBiomeChoice(biomeId) (F4 Decision 6/7) ── the overlay's onPick callback: commit the chosen next biome
+  // to runState.pendingBiomeId (advance() will roll there), un-freeze gameplay, then run the SHARED continuation so
+  // the rest of the transition (advance+refill+power-scroll+rebuild+mutation/colour) fires EXACTLY ONCE — the same
+  // sequence the single-exit path runs inline (the reviewer's "share ONE continuation" requirement). The overlay
+  // already tore itself down before calling this (so we just drop the handle). A confirm cue reads the pick.
+  _applyBiomeChoice(biomeId: string): void {
+    this.runState.pendingBiomeId = biomeId // the picker's commitment — advance() rolls here (Decision 4/5).
+    this.sfx.uiSelect() // a confirm cue for the route pick (reuses the UI-select blip — no new SFX).
+    this.biomeChoiceOpen = false // un-freeze gameplay (the update() gate re-opens).
+    this.biomeChoiceOverlay = null
+    this._resumeLevelTimer() // re-stamp the timer past the frozen route-reading interval (review MINOR).
+    this._continueTransition() // run the SHARED post-choice continuation (the mutation/colour modals follow on it).
   }
 
   // ── Run completion (design §6.4, Decision 48, AC47) ── clearing the LAST biome's last Door ends the
@@ -1193,6 +1267,14 @@ export class GameScene extends Phaser.Scene {
     }
     this.colorPickOpen = false
     this._colorPickPending = false
+    // Biome-choice overlay teardown (F4 Decision 7) — defensive force-close mirroring the mutation/colour overlays:
+    // the choice is offered BEFORE the rebuild and gates update() while open, but force-close any dangling handle so
+    // it never leaks across a rebuild; biomeChoiceOpen forced false so the update() gate re-opens gameplay.
+    if (this.biomeChoiceOverlay) {
+      this.biomeChoiceOverlay.close()
+      this.biomeChoiceOverlay = null
+    }
+    this.biomeChoiceOpen = false
     // Clear any dangling modal-pause stamp (build-&-replay §6.4) so a half-open modal at teardown can't leak a
     // paused interval into the next level's fresh timer (_buildLevel re-stamps levelStartedAt from scratch).
     this._modalPausedAt = 0
@@ -2442,7 +2524,7 @@ export class GameScene extends Phaser.Scene {
       this._closeQuitConfirm()
       return
     }
-    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen) return
+    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen) return
     this._openQuitConfirm()
   }
 
@@ -2582,7 +2664,11 @@ export class GameScene extends Phaser.Scene {
     // Only the stat-CURVE scrolls (power / vitality) — the ones that build the run's raw power, not the
     // identity scrolls (vampirism/venom/alacrity/endurance, which the random drops + shop still cover).
     const POWER_SCROLL_IDS = ['power', 'vitality']
-    const rng = mulberry32((this.runSeed ^ 0x90 ^ (this.runState.biomeIndex * 0x9e3779b9)) >>> 0)
+    // F4 (Decision 5) — the seeded-offer salt: `path.length - 1` is the count of biome ROLLS so far, which for the
+    // DEFAULT path reproduces the old `biomeIndex` sequence EXACTLY (create() at prison → path ['prison'] → 0; into
+    // sewers → 1; catacombs → 2; ramparts → 3), so default-path power-scroll offers stay BYTE-IDENTICAL (AC3/AC5).
+    // A branching run salts off its own roll count (a different but still-deterministic sequence — replays the same).
+    const rng = mulberry32((this.runSeed ^ 0x90 ^ ((this.runState.path.length - 1) * 0x9e3779b9)) >>> 0)
     const id = POWER_SCROLL_IDS[Math.floor(rng() * POWER_SCROLL_IDS.length)]
     const scroll = SCROLLS_BY_ID[id]
     if (!scroll) return
@@ -2599,7 +2685,9 @@ export class GameScene extends Phaser.Scene {
   // already open, no-op. KISS: one offer site, mirroring _grantBiomePowerScroll's seam.
   _offerMutation(): void {
     if (this.mutationOpen || this.mutationOverlay) return // already offering (defensive — should never re-enter).
-    const rng = mulberry32((this.runSeed ^ 0x303 ^ (this.runState.biomeIndex * 0x85ebca6b)) >>> 0)
+    // F4 (Decision 5) — same id-based salt as _grantBiomePowerScroll: `path.length - 1` (the roll count) reproduces
+    // the old `biomeIndex` sequence EXACTLY for the default path, so default-path mutation offers stay byte-identical.
+    const rng = mulberry32((this.runSeed ^ 0x303 ^ ((this.runState.path.length - 1) * 0x85ebca6b)) >>> 0)
     const offers = this._pickMutationOffers(rng, 3)
     if (offers.length === 0) return // no mutations defined → nothing to offer (the identity — run unchanged).
     this.mutationOpen = true
@@ -2894,12 +2982,11 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     const dt = Math.min(delta / 1000, MAX_DT)
     this.hitstopTimer = Math.max(0, this.hitstopTimer - dt)
-    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop / MUTATION / QUIT-CONFIRM
-    // overlay is up (a modal pause) — so live hitboxes/projectiles/enemies all FREEZE together while a modal is
-    // open (§6.10 / build-&-replay §6.5 / esc-quit-confirm), exactly as they freeze during a hit-stop. FX still
-    // tick on REAL dt so the overlay's
-    // flashes/pops play.
-    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.quitConfirmOpen ? 0 : dt
+    // GAMEPLAY dt: 0 during a hit-stop (the combat micro-freeze) OR while the shop / MUTATION / COLOUR /
+    // BIOME-CHOICE / QUIT-CONFIRM overlay is up (a modal pause) — so live hitboxes/projectiles/enemies all FREEZE
+    // together while a modal is open (§6.10 / build-&-replay §6.5 / F4 branching-biome-map / esc-quit-confirm),
+    // exactly as they freeze during a hit-stop. FX still tick on REAL dt so the overlay's flashes/pops play.
+    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen || this.quitConfirmOpen ? 0 : dt
 
     const inputState = this.input2.sample()
     // audio §6.5 (Decision 7) — M toggles global mute (flips Phaser's game.sound.mute via the façade
@@ -2910,7 +2997,7 @@ export class GameScene extends Phaser.Scene {
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
     // shop / MUTATION / QUIT-CONFIRM overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.colorPickOpen && !this.quitConfirmOpen) {
+    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.colorPickOpen && !this.biomeChoiceOpen && !this.quitConfirmOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held

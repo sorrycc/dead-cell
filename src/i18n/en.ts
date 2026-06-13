@@ -91,6 +91,12 @@ export const EN: Dict = {
     'color.title': 'RAISE A STAT COLOUR',
     'color.subtitle': 'A new biome — boost one stat colour for the rest of the run',
     'color.help': 'UP/DOWN select · E/SPACE/ENTER confirm',
+
+    // ── Biome-choice overlay (F4 branching-biome-map §9, AC7) — the 2-way route picker at a fork. ──
+    'biomechoice.title': 'CHOOSE YOUR ROUTE',
+    'biomechoice.subtitle': 'A fork in the descent — pick the next biome',
+    'biomechoice.help': 'UP/DOWN select · E/SPACE/ENTER confirm',
+    'biomechoice.hint': 'Threat tier {tier}',
     // Colour-scroll names (scrolls are apply-only — these mirror the others for future list rendering).
     'scroll.brutality': 'Scroll of Brutality',
     'scroll.tactics': 'Scroll of Tactics',

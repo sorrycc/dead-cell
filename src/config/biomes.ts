@@ -41,6 +41,12 @@ export interface BiomeConfig {
   endsInBoss: boolean
   miniboss?: string
   boss?: string | string[]
+  // ── exits (F4 branching-biome-map, Decision 1) ── the biome ids this node can lead to (the GRAPH edges).
+  // A boundary roll picks the NEXT biome from here (the picker chooses when ≥2; advance() auto-picks exits[0]
+  // when no choice was made — Decision 5). The boss biome is the UNIQUE terminal (`exits: []`). Every id must
+  // resolve to a known biome in BIOMES (verifier-asserted, no dangling edge). `exits[0]` is the DEFAULT next
+  // (the canonical linear path), so order SEWERS.exits = ['catacombs', …] keeps the default run === today's.
+  exits: string[]
   levels: number
   enemyPool: WeightedChoice[]
   layoutWeights?: WeightedChoice[]
@@ -100,6 +106,7 @@ export const PRISON: BiomeConfig = {
   difficultyTier: 0, // tier 0 — the opener (monotone index, ≤ SEWERS ≤ RAMPARTS).
   endsInBoss: false, // not a boss biome.
   miniboss: 'prisonMiniboss', // round-2 (§6.6.8) — The Jailer guards this biome's last normal level (a gentle first set-piece).
+  exits: ['sewers'], // F4 (Decision 1) — single exit: the opener is a FIXED on-ramp (no choice at the very first boundary).
   levels: 3, // BLOCKER 1: this biome spans 3 generated rooms before rolling to SEWERS.
   // Enemy archetype pool (Decision 68/AC59) — Prison is all melee Grunts (a fair opener).
   enemyPool: [{ id: 'grunt', w: 1 }],
@@ -146,6 +153,10 @@ export const SEWERS: BiomeConfig = {
   difficultyTier: 1,
   endsInBoss: false,
   miniboss: 'sewersMiniboss', // round-2 (§6.6.8) — The Drowned guards this biome's last normal level (a ranged zoner set-piece).
+  // F4 (Decision 1/5) — THE 2-way choice: CATACOMBS (the crypt) vs. OSSUARY (the new parallel mid biome). Both
+  // tier 2 → both Sewers-exit routes are tier-monotone. exits[0] === 'catacombs' so the DEFAULT path (auto-pick
+  // / headless / verifier) is Prison→Sewers→Catacombs→Ramparts === today's BIOME_ORDER (the additive-identity pin).
+  exits: ['catacombs', 'ossuary'],
   levels: 3,
   // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure), plus a
   // LIGHT sprinkle of the CHARGER + FLYER (Enrichment round-3 front-loaded-variety fix). The old pool was
@@ -200,6 +211,7 @@ export const CATACOMBS: BiomeConfig = {
   difficultyTier: 2, // tier 2 — between Sewers (1) and the bumped Ramparts (3); monotone.
   endsInBoss: false,
   miniboss: 'catacombsMiniboss', // round-2 (§6.6.8) — The Bone Warden guards the last set-piece before the finale.
+  exits: ['ramparts'], // F4 (Decision 1) — converges on the boss biome (both mid routes lead to Ramparts).
   levels: 3, // 3 generated rooms before rolling to Ramparts (extends the run by a biome).
   // Enemy pool (Decision 68/AC59) — Catacombs leans on the new SPITTER shotgunner + the FLYER over a grunt
   // base (a ranged-spread + aerial mix — distinct from the Sewers' grunt+shooter kiting feel), with a light
@@ -237,6 +249,57 @@ export const CATACOMBS: BiomeConfig = {
   },
 }
 
+// ── OSSUARY — the NEW alternate mid biome (F4 branching-biome-map, Decision 2, tier 2) ── a PARALLEL to
+// CATACOMBS so the SEWERS boundary offers a real 2-way choice (Catacombs vs. Ossuary). Same field SHAPE as the
+// others (DRY — the generator reads identical keys). It MUST sit at the SAME difficultyTier (2) as Catacombs so
+// BOTH Sewers-exit routes are tier-monotone (Sewers t1 → {Catacombs t2 | Ossuary t2} → Ramparts t3 — the
+// verifier proves EVERY path independently). The flavour difference is the ENEMY/LAYOUT mix, not the tier
+// (the "safer vs. richer" framing rides the per-biome bands, not the difficulty index — Decision 2). It REUSES
+// the Bone Warden miniboss (catacombsMiniboss — a present id must resolve to a known boss; no new spec, YAGNI).
+// NOT added to BIOME_ORDER (the default path takes Catacombs) — it lives only in the GRAPH (BIOMES below).
+export const OSSUARY: BiomeConfig = {
+  id: 'ossuary',
+  name: 'Ossuary',
+  difficultyTier: 2, // tier 2 (== Catacombs) so BOTH Sewers-exit routes are tier-monotone (Decision 2/§7.6).
+  endsInBoss: false,
+  miniboss: 'catacombsMiniboss', // REUSE the Bone Warden — a present miniboss id resolves to a known boss (YAGNI, no new spec).
+  exits: ['ramparts'], // F4 (Decision 1) — converges on the boss biome (the parallel route rejoins at Ramparts).
+  levels: 3, // 3 generated rooms — SAME length as Catacombs (identical run length regardless of the choice).
+  // Enemy pool (Decision 2/68/AC59) — a DISTINCT mix from Catacombs (which is spitter/flyer crypt): a SHOOTER-
+  // heavy + CHARGER "ranged ambush galleries" feel (kiting fire + dashers down long halls), a light grunt base.
+  // References ONLY known archetype ids with positive weights (verifier-asserted, like every pool).
+  enemyPool: [
+    { id: 'grunt', w: 2 },
+    { id: 'shooter', w: 3 }, // the signature ranged-ambush tilt (vs. Catacombs' spitter spread).
+    { id: 'charger', w: 2 }, // dashers down the galleries (a distinct pressure from the crypt's flyers).
+    { id: 'flyer', w: 1 }, // a light aerial sprinkle so the roster still varies.
+  ],
+  // Layout mix (Decision 2) — ISLANDS-heavy (broken bone-bridges over the void) so it reads spatially distinct
+  // from Catacombs' vertical SHAFT, with the stair + shaft as alternates (≥2 templates across the sweep — verified).
+  layoutWeights: [
+    { id: 'staircase', w: 2 },
+    { id: 'shaft', w: 2 },
+    { id: 'islands', w: 5 },
+  ],
+  cols: 82, // like Catacombs (within [COLS_MIN, COLS_MAX]).
+  rows: 25,
+  minEnemies: 4,
+  maxEnemies: 7,
+  minPickups: 2,
+  maxPickups: 4,
+  oneWayLedges: 8,
+  hazardPatches: 8,
+  platformLenRange: [3, 6],
+  colors: {
+    solid: 0x5a5048, // bone-and-rust stone (warmer than Catacombs' violet-grey).
+    oneWay: 0x8a7a5a, // weathered bone ledges.
+    hazard: 0xc97b30, // rust-orange hazards (a galleries-of-rust read).
+    bg: 0x16120d, // dark amber-black backdrop.
+    entrance: 0x2ecc71,
+    exit: 0xf4d03f,
+  },
+}
+
 // ── RAMPARTS — the FIFTH / LAST biome (Decision 43, tier 3) ── tier bumped 2→3 with the Catacombs insert
 // so the chain stays monotone. Grey-stone fortress. Longest + densest. The boss biome.
 export const RAMPARTS: BiomeConfig = {
@@ -244,6 +307,7 @@ export const RAMPARTS: BiomeConfig = {
   name: 'Ramparts',
   difficultyTier: 3,
   endsInBoss: true, // §6.6.2 (Decision 66) — the boss biome: its FINAL level is a boss arena (no Door).
+  exits: [], // F4 (Decision 1) — the boss biome is the UNIQUE TERMINAL (empty exits — the graph's convergence point).
   // §6.12 (Decision 78) — the boss biome's final gate is now a SEEDED PICK between TWO bosses (The Warden
   // OR The Hollow Sentinel), so different runs face a different fight (the variety win). `boss` is an ARRAY
   // of ids keyed into config/bosses.js BOSSES; GameScene picks one off the run seed (a run replays the same
@@ -286,12 +350,18 @@ export const RAMPARTS: BiomeConfig = {
   },
 }
 
-// ── BIOME_ORDER (Decision 43, AC43) ── THE ordering the run walks (RunState indexes into it) and the
-// verifier sweeps. Tiers are 0/1/2/3 (monotone non-decreasing). The array is trivially extendable; the
-// round-3 CATACOMBS insert (one entry + a tier bump on the following biome) proves the architecture's
-// claim — no generator/RunState change (the run length derives from the per-biome `levels`). FOUR biomes
-// ship now → 12 generated rooms + the boss (a longer descent).
+// ── BIOME_ORDER (Decision 43 / F4 Decision 3.3) ── REPURPOSED as the canonical DEFAULT LINEAR PATH (the
+// auto-pick path — Decision 5). It must remain a REAL path through the graph: each consecutive pair satisfies
+// BIOME_ORDER[i+1].id ∈ BIOME_ORDER[i].exits (verifier-asserted), starting at START_BIOME_ID and ending at the
+// boss biome. A run that makes NO choice (headless / auto-pick / the verifier) walks exactly this chain —
+// Prison→Sewers→Catacombs→Ramparts — byte-structurally identical to today's run (the additive-identity pin).
+// OSSUARY is NOT here (the default path takes Catacombs); it lives only in the GRAPH (BIOMES). Tiers 0/1/2/3.
 export const BIOME_ORDER: BiomeConfig[] = [PRISON, SEWERS, CATACOMBS, RAMPARTS]
 
-// The biome map (id → config) — kept for any id-keyed lookup; BIOME_ORDER is the run sequence.
-export const BIOMES: Record<string, BiomeConfig> = { prison: PRISON, sewers: SEWERS, catacombs: CATACOMBS, ramparts: RAMPARTS }
+// ── BIOMES (F4 Decision 3.3) ── the authoritative GRAPH node set (id → config) — now INCLUDES `ossuary`.
+// RunState.biome() reads BIOMES[biomeId]; advance() rolls along `exits`; the verifier sweeps every node here
+// (generation/pool/clearance) so an off-the-default-path biome is still proven generable + well-formed.
+export const BIOMES: Record<string, BiomeConfig> = { prison: PRISON, sewers: SEWERS, catacombs: CATACOMBS, ossuary: OSSUARY, ramparts: RAMPARTS }
+
+// ── START_BIOME_ID (F4 Decision 3.3) ── the graph ROOT, so RunState/verifier don't hard-code 'prison'.
+export const START_BIOME_ID = 'prison'
