@@ -58,6 +58,7 @@ export const EN: Dict = {
     'hud.skill': 'SKILL {key}: {name} [{bar}]',
     'hud.skillEmpty': 'SKILL {key}: —',
     'hud.mutations': 'MUTATIONS: {list}',
+    'hud.curse': 'CURSED — {n} kills left',
     'hud.timerNoBonus': 'CLEAR (no bonus)',
     'hud.timerFast': 'FAST CLEAR {secs}s',
     'hud.boss': 'BOSS',
@@ -101,6 +102,10 @@ export const EN: Dict = {
     'shop.leave': 'LEAVE',
     'shop.help': 'UP/DOWN select · E/SPACE/ENTER buy or LEAVE',
     'shop.prompt': '[E] SHOP',
+
+    // ── Cursed chest (cursed-chests design §6, AC9) — the floating prompt + the on-open warning banner. ──
+    'chest.prompt': '[E] CURSED CHEST',
+    'chest.cursed': 'CURSED! Kill {n} enemies to break it.',
 
     // ── Quit-to-Title confirm overlay (esc-quit-confirm) ──
     'quit.title': 'QUIT TO MAIN MENU?',

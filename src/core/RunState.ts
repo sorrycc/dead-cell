@@ -92,6 +92,13 @@ export interface RunState {
   vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
   statusTickMult: number // ×applied DoT tickDmg (Virulent — "ticks harder"). 1 = neutral.
   spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
+  // ── Cursed-chest CURSE stacks (cursed-chests design §6, AC7, Decision 5) ── the remaining curse stacks: 0 =
+  // NO curse (the neutral identity → effectiveCurseMult(0) === 1 → _hurtPlayer byte-unchanged). Opening a
+  // cursed chest sets it to CURSE.killsToClear (greatly amplified damage taken); each enemy kill peels one
+  // stack (enemy.onDeath, clamped >= 0); at 0 the curse is fully cleared. RUN-ONLY (never banked to meta —
+  // permadeath drops it), CARRIED across level rebuilds (the curse follows you to the next level until killed
+  // off — the genre behaviour), distinct from the per-room roomDamageTakenMult which resets every level.
+  curseStacks: number
   // ── Per-colour run LEVELS (color-scaling-stats §6, Decision 4, AC4) ── the run's Brutality/Tactics/Survival
   // levels (run-only — lost on death, carried across level rebuilds like every other run field, NEVER seeded
   // from meta). Each defaults to 0 (the neutral identity): colorMult(0) === 1 and survivalHpBonus(0) === 0, so
@@ -210,6 +217,11 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     vsAfflictedDamageMult: 1, // ×player damage vs an afflicted enemy (Hemorrhage); folded at both hit sites.
     statusTickMult: 1, // ×applied DoT tickDmg when arming a damaging status (Virulent); applied in _scaleStatus.
     spreadAffliction: false, // killing an afflicted enemy spreads its dominant DoT (Hemorrhage); read in onDeath.
+
+    // ── Cursed-chest CURSE stacks (cursed-chests design §6, AC7, Decision 5) ── seeded 0 (the neutral
+    // identity: effectiveCurseMult(0) === 1 → a fresh run is byte-identical; the verifier's determinism walk
+    // never opens a chest → unaffected). Opening a chest sets it to CURSE.killsToClear; each kill peels one.
+    curseStacks: 0,
 
     // ── Per-colour run LEVELS (color-scaling-stats §6, Decision 4, AC4) ── all seeded 0 (the neutral identity:
     // colorMult(0) === 1, survivalHpBonus(0) === 0 → a fresh run plays byte-identically). NEVER seeded from meta

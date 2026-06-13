@@ -41,6 +41,10 @@ export class HUDScene extends Phaser.Scene {
   private skill1Label!: Phaser.GameObjects.Text
   private skill2Label!: Phaser.GameObjects.Text
   private mutationsLabel!: Phaser.GameObjects.Text
+  // cursed-chests §6 (AC8) — ONE danger-coloured line shown ONLY while cursed (curseStacks > 0); the EMPTY
+  // string when 0 hides it (the additive identity — the mutations-line idiom). The on-open banner + camera
+  // tint give the immediate "you are cursed" tell; this is the persistent counter. Registry-only (decoupled).
+  private curseLabel!: Phaser.GameObjects.Text
   // color-scaling-stats §6 (AC10) — three small per-colour pips ("B n · T n · S n"), each its own fixed-x Text
   // so they stay pixel-anchored under the proportional CJK fallback (the Hub/Shop alignment discipline). Each is
   // tinted to its colour; the equipped weapon's colour is highlighted (brighter + bracketed). Registry-only.
@@ -124,6 +128,14 @@ export class HUDScene extends Phaser.Scene {
         .setScrollFactor(0),
     )
 
+    // ── Cursed-chest CURSE line (cursed-chests §6, AC8) ── under the colour pips, a single danger-red line
+    // shown ONLY while cursed (curseStacks > 0); empty string at 0 hides it (the additive identity, the
+    // mutations-line idiom). Pixel-anchored single Text — no column-alignment work. Registry-only (decoupled).
+    this.curseLabel = this.add
+      .text(BAR_X, BAR_Y + BAR_H + 202, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#e74c3c', fontStyle: 'bold' })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+
     // ── Per-level fast-clear TIMER (build-&-replay slice, AC5) ── top-RIGHT (under the HUD tag) so it reads
     // as a speed-run clock. Shown only on a TIMED level (levelTime > 0 — a normal, non-set-piece level); turns
     // amber as it nears the bonus threshold (so the incentive reads), hidden on a boss/miniboss arena.
@@ -193,6 +205,11 @@ export class HUDScene extends Phaser.Scene {
     // (a fresh run / a run with no mutation picked). Registry-only (decoupled). Defaults keep it sane.
     const mutations = this.registry.get('mutations') ?? ''
     this.mutationsLabel.setText(mutations ? t('hud.mutations', { list: mutations }) : '')
+
+    // ── Cursed-chest CURSE line (cursed-chests §6, AC8) ── "CURSED — n kills left" while cursed (> 0), the
+    // EMPTY string when 0 (hidden — the additive identity for an uncursed run). Registry-only (decoupled).
+    const curseStacks = this.registry.get('curseStacks') ?? 0
+    this.curseLabel.setText(curseStacks > 0 ? t('hud.curse', { n: curseStacks }) : '')
 
     // ── Colour-scaling pips (color-scaling-stats §6, AC10) ── per-colour "Name n" tinted to its colour; the
     // equipped weapon's colour is HIGHLIGHTED (bracketed + white) so the active build colour reads. Defaults to

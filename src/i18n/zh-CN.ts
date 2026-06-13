@@ -61,6 +61,7 @@ export const ZH_CN: Dict = {
     'hud.skill': '技能 {key}: {name} [{bar}]',
     'hud.skillEmpty': '技能 {key}: —',
     'hud.mutations': '突变: {list}',
+    'hud.curse': '诅咒 —— 还需击杀 {n} 个',
     'hud.timerNoBonus': '通关（无奖励）',
     'hud.timerFast': '快速通关 {secs}s',
     'hud.boss': '首领',
@@ -103,6 +104,10 @@ export const ZH_CN: Dict = {
     'shop.leave': '离开',
     'shop.help': '上/下 选择 · E/SPACE/ENTER 购买或离开',
     'shop.prompt': '[E] 商店',
+
+    // ── 诅咒宝箱 (cursed-chests design §6, AC9) —— 悬浮提示 + 开启时的警告横幅 ──
+    'chest.prompt': '[E] 诅咒宝箱',
+    'chest.cursed': '已被诅咒！击杀 {n} 个敌人以解除。',
 
     // ── 退出到主菜单确认弹窗 (esc-quit-confirm) ──
     'quit.title': '退出到主菜单？',

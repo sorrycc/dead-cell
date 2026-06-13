@@ -99,6 +99,13 @@ import { COLOR_IDS, COLORS, PER_LEVEL, SURVIVAL_HP_PER_LEVEL, colorMult, surviva
 // identity at `common`, foldRarity never weakens, and the extended foldWeaponAffix(powerMult) is identity@1.
 import { RARITY_IDS, RARITIES, DEPTH_BIAS, EXTRA_AFFIX_POWER, rollRarityId, foldRarity } from '../src/config/rarity.js'
 
+// Cursed-chests PURE table: the CURSE config + the curse-damage math (§16). Node-importable (config/curses.js
+// imports ONLY config/rarity.js — pure data + one pure function) — a successful import re-proves its purity,
+// and the §16 sweep below asserts the curse is well-formed, effectiveCurseMult is the EXACT identity at 0
+// stacks + clamps at/below 0, the curse mult is monotone non-decreasing + every >= 1 (never-weaken), and the
+// loot tier is a known NON-common (guaranteed STRONG) rarity with positive loot gold.
+import { CURSE, LOOT_RARITY, LOOT_GOLD, CURSED_CHEST_CHANCE, effectiveCurseMult } from '../src/config/curses.js'
+
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
   process.exit(1)
@@ -1994,6 +2001,53 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   if (sampleRarity(20, 0x1234) < sampleRarity(0, 0x1234)) fail('rollRarityId depth bias regressed (deeper depth must not yield FEWER legendaries)')
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 16) CURSE config + the curse-damage math (cursed-chests §6/§7, Decision 4/7/8/10, AC1/AC10).
+//     An INDEPENDENT proof of the PURE curse table + the composing fold: CURSE is well-formed (a positive
+//     INTEGER killsToClear, a damageMult >= 1), effectiveCurseMult is the EXACT identity at 0 stacks (the
+//     byte-identity pin — _hurtPlayer is unchanged when uncursed) + clamps at/below 0, the curse mult is
+//     monotone non-decreasing over [0..killsToClear] + every value >= 1 (never-weaken: a curse never makes
+//     the player take LESS damage than baseline), the guaranteed loot tier resolves in RARITIES and is a
+//     NON-common (guaranteed STRONG) tier, and LOOT_GOLD / CURSED_CHEST_CHANCE are sane.
+//     Mirrors the §15 rarity / §14 colour sweeps — a malformed curse table fails loudly under node.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 16a) CURSE well-formed: killsToClear a positive INTEGER, damageMult a number >= 1 ("greatly amplified"). ──
+  if (!(typeof CURSE.killsToClear === 'number' && Number.isInteger(CURSE.killsToClear) && CURSE.killsToClear > 0)) {
+    fail(`CURSE.killsToClear must be a positive integer, got ${CURSE.killsToClear}`)
+  }
+  if (!(typeof CURSE.damageMult === 'number' && CURSE.damageMult >= 1)) {
+    fail(`CURSE.damageMult must be a number >= 1 (never-weaken), got ${CURSE.damageMult}`)
+  }
+
+  // ── 16b) effectiveCurseMult identity at 0 stacks (the byte-identity pin) + clamp at/below 0. ──
+  if (effectiveCurseMult(0) !== 1) fail(`effectiveCurseMult(0) = ${effectiveCurseMult(0)}, expected EXACTLY 1 (the no-curse identity)`)
+  if (effectiveCurseMult(-1) !== 1) fail(`effectiveCurseMult(-1) = ${effectiveCurseMult(-1)}, expected EXACTLY 1 (clamp at/below 0)`)
+
+  // ── 16c) effectiveCurseMult monotone non-decreasing over [0..killsToClear], every value >= 1 (never-weaken:
+  // a curse only ever makes the player take MORE damage than baseline, never less). ──
+  let prevCurseMult = -Infinity
+  for (let stacks = 0; stacks <= CURSE.killsToClear; stacks++) {
+    const m = effectiveCurseMult(stacks)
+    if (!(m >= 1)) fail(`effectiveCurseMult(${stacks}) = ${m} must be >= 1 (never-weaken)`)
+    if (m < prevCurseMult) fail(`effectiveCurseMult dipped at ${stacks} stacks (${m} < ${prevCurseMult})`)
+    prevCurseMult = m
+  }
+  // The fully-cursed mult must actually amplify (> the identity) — the curse must BITE (a property pin).
+  if (!(effectiveCurseMult(CURSE.killsToClear) > 1)) {
+    fail(`effectiveCurseMult(${CURSE.killsToClear}) must be > 1 (a full curse must amplify damage taken)`)
+  }
+
+  // ── 16d) Loot tier well-formed: LOOT_RARITY resolves in RARITIES AND is NOT 'common' (guaranteed STRONG
+  // loot); LOOT_GOLD a number > 0; CURSED_CHEST_CHANCE a probability in (0, 1] (rare but possible). ──
+  if (!RARITIES[LOOT_RARITY]) fail(`LOOT_RARITY "${LOOT_RARITY}" has no RARITIES entry (lookup drift)`)
+  if (LOOT_RARITY === 'common') fail(`LOOT_RARITY must NOT be 'common' (the chest grants guaranteed STRONG loot)`)
+  if (!(typeof LOOT_GOLD === 'number' && LOOT_GOLD > 0)) fail(`LOOT_GOLD must be a number > 0, got ${LOOT_GOLD}`)
+  if (!(typeof CURSED_CHEST_CHANCE === 'number' && CURSED_CHEST_CHANCE > 0 && CURSED_CHEST_CHANCE <= 1)) {
+    fail(`CURSED_CHEST_CHANCE must be a probability in (0, 1], got ${CURSED_CHEST_CHANCE}`)
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -2014,6 +2068,7 @@ console.log(
     `${BOSS_CELL_TIERS.length} boss-cell tiers (curve identity@t0 + whole-run monotonic ∀ tier, AC42/AC43) + ` +
     `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11); ` +
     `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged; ` +
-    `${RARITY_IDS.length} rarity tiers (common identity + monotone damageMult, fold never-weaken + powerMult identity@1)`,
+    `${RARITY_IDS.length} rarity tiers (common identity + monotone damageMult, fold never-weaken + powerMult identity@1); ` +
+    `+ curse config (identity at 0 stacks + monotone damage mult, strong loot tier)`,
 )
 process.exit(0)

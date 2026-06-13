@@ -6,6 +6,7 @@ import { Enemy } from '../entities/Enemy.js'
 import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
+import { CursedChest } from '../entities/CursedChest.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { ColorOverlay } from '../entities/ColorOverlay.js'
@@ -39,6 +40,7 @@ import type { ColorId } from '../config/colors.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
+import { CURSE, LOOT_RARITY, LOOT_GOLD, CURSED_CHEST_CHANCE, effectiveCurseMult } from '../config/curses.js'
 import { mulberry32 } from '../util/rng.js'
 import { t, tName } from '../i18n/index.js'
 import type { Input as InputType } from '../core/Input.js'
@@ -221,6 +223,13 @@ export class GameScene extends Phaser.Scene {
   private _shopCollider!: Phaser.Physics.Arcade.Collider | null
   private shopOpen!: boolean
   private shopOverlay!: ShopOverlay | null
+  // ── Cursed-chest state (cursed-chests §6, Decision 1/3) — null until a NORMAL level rarely places a chest
+  // (_maybePlaceCursedChest). this.chest is the live chest for THIS level (torn down + nulled by teardown);
+  // _chestCollider is the player×chest in-range overlap. NO open-flag (the chest open is instantaneous — it
+  // never pauses the world, unlike the shop overlay), so there is no chestOpen gate (Decision 3). ──
+  private chest!: CursedChest | null
+  private _chestCollider!: Phaser.Physics.Arcade.Collider | null
+  private _chestSeed!: number // the chest's placement seed (for the deterministic loot roll on open).
   // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
   private mutationOpen!: boolean
   private mutationOverlay!: MutationOverlay | null
@@ -350,6 +359,9 @@ export class GameScene extends Phaser.Scene {
     // build-&-replay slice — seed the mutation list (joined active-mutation names) + the per-level timer keys so
     // the parallel HUD never flashes a stale prior-run mutation/timer (the registry survives scene restarts).
     this.registry.set('mutations', '')
+    // cursed-chests §6 (AC8) — seed the curse-stack HUD key to 0 (the identity: no curse → the HUD line is
+    // hidden) so a replayed run never flashes a stale prior-run curse count (the registry survives restarts).
+    this.registry.set('curseStacks', this.runState.curseStacks)
     this.registry.set('levelTime', 0) // ms elapsed on the current level (0 = untimed: a boss/miniboss arena).
     this.registry.set('levelBonusTime', CLEAR_BONUS_TIME) // the fast-clear threshold the HUD turns amber near.
     // color-scaling-stats §6 (AC10) — seed the three colour-level HUD keys + the equipped weapon's colour so a
@@ -381,6 +393,10 @@ export class GameScene extends Phaser.Scene {
     this._shopCollider = null // the player×vendor in-range overlap (removed on teardown).
     this.shopOpen = false // true while the shop overlay is up (gameplay is paused beneath it).
     this.shopOverlay = null // the live ShopOverlay UI while open, else null.
+    // ── Cursed-chest state (cursed-chests §6) — null until a NORMAL level rarely places a chest (_buildLevel). ──
+    this.chest = null // the live CursedChest entity for THIS level, or null (most levels + every boss/miniboss).
+    this._chestCollider = null // the player×chest in-range overlap (removed on teardown).
+    this._chestSeed = 0 // the chest's placement seed (set in _maybePlaceCursedChest; the deterministic loot roll).
     // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
     this.mutationOpen = false // true while the mutation overlay is up (gameplay is paused beneath it).
     this.mutationOverlay = null // the live MutationOverlay UI while open, else null.
@@ -707,6 +723,12 @@ export class GameScene extends Phaser.Scene {
     // intact, the same discipline as the weapon pickup). Placed at a standable spot off the entrance/exit.
     this._maybePlaceShop(desc)
 
+    // ── Sparse CURSED CHEST (cursed-chests §6, AC3 — the choice-driven risk/reward interactable) ── a RARE
+    // per-NORMAL-level chance to place ONE cursed chest, sourced SCENE-SIDE off the level seed (NOT the
+    // generator — keeps the level pin intact, the same off-the-pin discipline as the weapon pickup / shop).
+    // NEVER on a boss/miniboss level (it's not even called from _buildBossLevel, and guards isMiniboss inside).
+    this._maybePlaceCursedChest(desc)
+
     // ── Sparse skill pickup (skills design §6.5, AC5) ── a low FIXED per-level chance to offer ONE skill to
     // equip, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the level pin intact, the same
     // off-the-pin discipline as the weapon pickup / shop). Deterministic per seed (a replay places the same skill).
@@ -831,6 +853,9 @@ export class GameScene extends Phaser.Scene {
     this.boss.onBossDeath = () => this._onMinibossDefeated()
     this.boss.onDeath = () => {
       this.runState.kills += 1
+      // cursed-chests §6 (Decision 5) — a boss kill is a kill: peel a curse stack if one was carried in (a
+      // chest never spawns on a set-piece, so this only matters for a curse carried INTO the room). No-op at 0.
+      if (this.runState.curseStacks > 0) this.runState.curseStacks -= 1
     }
     this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the miniboss.
 
@@ -913,6 +938,9 @@ export class GameScene extends Phaser.Scene {
     this.boss.onBossDeath = () => this._onBossDefeated()
     this.boss.onDeath = () => {
       this.runState.kills += 1 // the boss counts as a kill for the summary.
+      // cursed-chests §6 (Decision 5) — a boss kill is a kill: peel a curse stack if one was carried into the
+      // arena (a chest never spawns on the boss level, so this only matters for a curse brought in). No-op at 0.
+      if (this.runState.curseStacks > 0) this.runState.curseStacks -= 1
     }
     this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the boss.
 
@@ -1175,6 +1203,17 @@ export class GameScene extends Phaser.Scene {
     if (this.shop) {
       this.shop.destroy()
       this.shop = null
+    }
+    // Cursed-chest teardown (cursed-chests §6) — remove the in-range overlap + destroy the chest so it never
+    // dangles into the next level (mirror the shop teardown). curseStacks is NOT cleared here: the curse is a
+    // run scalar carried across level rebuilds until killed off (the genre behaviour, Decision 5).
+    if (this._chestCollider) {
+      this.physics.world.removeCollider(this._chestCollider)
+      this._chestCollider = null
+    }
+    if (this.chest) {
+      this.chest.destroy()
+      this.chest = null
     }
     if (this.tileMap) {
       this.tileMap.destroy()
@@ -1671,6 +1710,10 @@ export class GameScene extends Phaser.Scene {
     })
     enemy.onDeath = () => {
       this.runState.kills += 1 // bump the run's kill count for the GameOver summary (free; AC46).
+      // ── Cursed-chest curse peel (cursed-chests §6, AC5) ── each enemy kill removes ONE curse stack (clamped
+      // >= 0 by the guard); at 0 the curse is fully cleared (the damage rule reverts to identity). No-op at 0
+      // stacks (an uncursed run) — the additive identity. The ONE site the curse counts down.
+      if (this.runState.curseStacks > 0) this.runState.curseStacks -= 1
       // ── Predator mutation (build-&-replay §6.3, AC3) ── heal a flat amount on each kill (0 = no mutation →
       // no-op, the identity; heal() no-ops at full HP / dead). The ONE site this new live-read field is read.
       if (this.player.onKillHealAmount > 0) this.player.heal(this.player.onKillHealAmount)
@@ -1813,6 +1856,38 @@ export class GameScene extends Phaser.Scene {
     )
   }
 
+  // ── _maybePlaceCursedChest(desc) (cursed-chests §6, AC3, Decision 8) ── deterministically (off the level
+  // seed) maybe place ONE cursed chest on a NORMAL level so the choice-driven risk/reward interactable can
+  // appear. Off a fresh mulberry32 with a DISTINCT mix constant (uncorrelated with the weapon/shop/blueprint/
+  // room rolls) — NOT on the generator's pinned draw, so the level pin + the determinism deep-equal stay
+  // intact. A LOW chance (CURSED_CHEST_CHANCE — rare, like the genre). NEVER on a boss/miniboss level (a boss
+  // level never calls this; a miniboss level early-returns). Placed at a standable spot off the entrance/exit
+  // (the SAME spot-selection idiom as _maybePlaceShop). The chest's PLACEMENT seed is stashed on _chestSeed so
+  // the open-time loot roll is deterministic per seed (a replay grants the same loot — Decision 7).
+  _maybePlaceCursedChest(desc: LevelDescription): void {
+    // Defensive: never on a boss/miniboss level (a boss level never reaches here; a miniboss level guards here).
+    if (this.runState.isBossLevel() || this.runState.isMinibossLevel()) return
+    const seed = (desc.seed ^ 0xc0bb1e) >>> 0 // a distinct mix constant (uncorrelated with the other rolls).
+    const rng = mulberry32(seed)
+    if (rng() >= CURSED_CHEST_CHANCE) return
+    // Pick a standable spot off the critical-path ends (a generator spawn candidate — already away from the
+    // entrance + never the exit cell), else a pickup point, then the level midpoint, so it's always placeable.
+    const spot =
+      desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
+      desc.pickups[0] ||
+      { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.chest = new CursedChest(this, spot)
+    this._chestSeed = seed // the placement seed → the deterministic open-time loot roll (Decision 7).
+    this._chestCollider = this.physics.add.overlap(
+      this.player.collider,
+      this.chest.rect,
+      () => this.chest && this.chest.markInRange(), // flag the in-range frame (reset each tick — see update).
+      // An OPENED chest stops flagging in-range (it's inert); also skip while a modal / transition / death is up.
+      () => !!this.chest && !this.chest.opened && !this.shopOpen && !this.transitioning && !this.gameOver,
+      this,
+    )
+  }
+
   // ── _placeBranchReward(desc) (§6.14, Decision 80, AC67) ── place a GUARANTEED reward on the optional
   // treasure branch's ledge (desc.branchTreasure), if the generator emitted one. Sourced SCENE-SIDE off a
   // fresh seeded RNG (off the generator's pinned draw — the level-pin discipline) so the reward TYPE is
@@ -1872,7 +1947,12 @@ export class GameScene extends Phaser.Scene {
   // mult only touches DAMAGE (not knockback) so the curse is purely "you take more damage", as designed.
   // Identity-safe: a normal room's mult is 1 → result.damage is unchanged (byte-identical to before).
   _hurtPlayer(result: HitResult): void {
-    const mult = this.roomDamageTakenMult ?? 1
+    // cursed-chests §6 (AC6, Decision 6) — compose the per-ROOM debuff with the cursed-chest CURSE mult
+    // (multiplicatively — both default to 1, so the product is 1 when neither is active → byte-identical to
+    // today). effectiveCurseMult(0) === 1 EXACTLY (no curse → identity), so an uncursed run leaves this as the
+    // room mult alone. The curse only scales DAMAGE (not knockback), AFTER every caller's isHittable() gate and
+    // BEFORE player.onHit (which consumes the parry window) — so dodge i-frames + parry STILL negate hits.
+    const mult = (this.roomDamageTakenMult ?? 1) * effectiveCurseMult(this.runState.curseStacks)
     if (mult !== 1) result.damage = Math.round(result.damage * mult)
     // ── Parry cue (per-weapon-movesets §6.6, Decision 5, AC8) ── the parry window is still LIVE at this instant
     // (onHit consumes it). ALL four player-hit sites funnel through here (DRY — one place), so checking the live
@@ -2285,6 +2365,72 @@ export class GameScene extends Phaser.Scene {
     // and _tryOpenShop instantly REOPENS the shop (the close→reopen race). No-op when LEAVE came via SPACE/ENTER.
     this.input2.consumeInteract()
     this._resumeLevelTimer() // re-stamp the timer past the frozen shopping interval (review MINOR).
+  }
+
+  // ── _tryOpenChest() (cursed-chests §6, AC4, Decision 3) ── open the cursed chest if the player is standing
+  // on it and it hasn't been opened yet. Called on the SAME E edge as _tryOpenShop, RIGHT AFTER it, so one E
+  // press opens at most one interactable (the !this.shopOpen guard: if the E just opened the shop this frame,
+  // the chest open is skipped). The chest open is INSTANTANEOUS (it never pauses the world), so there is no
+  // close→reopen race and no consumeInteract() needed (Decision 3). Guards mirror _tryOpenShop's set.
+  _tryOpenChest(): void {
+    if (this.gameOver || this.transitioning || this.shopOpen) return
+    if (this.chest && this.chest.playerInRange && !this.chest.opened) this._openCursedChest()
+  }
+
+  // ── _openCursedChest() (cursed-chests §6, AC4, Decision 7) ── the chest-open edge: mark the chest spent
+  // (so a held-overlap / re-enter cannot re-fire — Decision 3), GRANT GUARANTEED strong loot (one of two
+  // outcomes rolled DETERMINISTICALLY off the chest's placement seed so a replay grants the same loot), and
+  // APPLY THE CURSE (curseStacks = CURSE.killsToClear → greatly amplified damage taken until N kills clear
+  // it). A camera tint + a brief banner give the immediate "you are cursed" tell. NO new loot machinery: the
+  // weapon outcome reuses _equipWeaponWithAffix(..., LOOT_RARITY) (the F2 fold), the scroll outcome reuses the
+  // SCROLLS_BY_ID[id].apply + _syncPlayerScrollStats + runState.gold paths (DRY).
+  _openCursedChest(): void {
+    if (!this.chest || this.chest.opened) return
+    this.chest.setOpened() // inert from here: no re-open, no prompt, no pulse.
+
+    // Deterministic loot RNG seeded from the chest's placement seed (off-the-pin — a replay grants the same
+    // loot, the discipline the weapon/branch placements follow). A distinct mix from the placement gate roll.
+    const rng = mulberry32((this._chestSeed ^ 0x10071ed) >>> 0)
+    if (rng() < 0.5) {
+      // (a) A GUARANTEED high-rarity affixed weapon — pick one NOT currently equipped (a real swap), roll an
+      // affix, and equip at LOOT_RARITY (the F2 fold gives the guaranteed strong tier). The weaponPool filter
+      // idiom mirrors _maybePlaceWeaponPickup / _placeBranchReward (DRY).
+      const choices = this.weaponPool.filter((id) => id !== this.runState.weaponId)
+      const pool = choices.length ? choices : this.weaponPool
+      const weaponId = pool[Math.floor(rng() * pool.length)]
+      const weaponAffixId = this._rollWeaponAffix(rng)
+      this._equipWeaponWithAffix(weaponId, weaponAffixId, LOOT_RARITY)
+    } else {
+      // (b) A colour scroll + gold — apply a deterministic scroll (the run-only build boost) + grant LOOT_GOLD.
+      const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
+      const scroll = SCROLLS_BY_ID[scrollId]
+      if (scroll) scroll.apply(this.runState)
+      this._syncPlayerScrollStats() // reflect a vitality/colour scroll's bump on the live player NOW.
+      this.runState.gold += LOOT_GOLD
+    }
+
+    // APPLY THE CURSE (AC4) — set the run-only stack count; each kill peels one (enemy.onDeath). Carried across
+    // level rebuilds until killed off (the genre behaviour); permadeath drops it (run-only).
+    this.runState.curseStacks = CURSE.killsToClear
+
+    // FEEDBACK (Decision 9 — programmer-art) — a dark-purple camera tint + a brief danger banner so the curse
+    // reads on open. Reuses the camera flash + a one-off scroll-fixed Text torn down on rebuild (_levelObjects).
+    this.cameras.main.flash(280, 74, 35, 90) // the cursed-purple flash (matches the chest fill).
+    const banner = this.add
+      .text(this.cameras.main.width / 2, 70, t('chest.cursed', { n: CURSE.killsToClear }), {
+        fontFamily: UI_FONT,
+        fontSize: '26px',
+        color: '#e74c3c',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(120)
+    this._levelObjects.push(banner)
+    this.tweens.add({ targets: banner, alpha: 0, delay: 1300, duration: 600 })
+
+    this.sfx.pickup('weapon') // audio §6.3 — reuse the pickup blip for the open (no new asset — no-op-safe façade).
+    this._emitHud() // surface the new curse stack count immediately (don't wait for the next tick).
   }
 
   // ── _toggleQuitConfirm() (esc-quit-confirm) ── the persistent ESC handler's one entry point. ESC toggles the
@@ -2729,6 +2875,9 @@ export class GameScene extends Phaser.Scene {
     // off the pure MUTATIONS table (DRY). build-&-replay slice (AC5) — the per-level fast-clear TIMER (ms
     // elapsed on the current timed level; 0 = an untimed boss/miniboss level → the HUD hides the timer).
     this.registry.set('mutations', this.runState.mutations.map((id) => tName('mutation', id, MUTATIONS_BY_ID[id]?.name ?? id)).join(', '))
+    // cursed-chests §6 (AC8) — the live curse-stack count (the HUD shows the danger line while > 0, hides it
+    // at 0 — the additive identity). Registry-only (decoupled). 0 on an uncursed run (the identity).
+    this.registry.set('curseStacks', this.runState.curseStacks)
     this.registry.set('levelTime', this.levelStartedAt > 0 ? this.time.now - this.levelStartedAt : 0)
     // color-scaling-stats §6 (AC10) — the three colour levels + the equipped weapon's colour (so the HUD can
     // highlight the active build colour). Registry-only (the HUD is decoupled). 0/0/0 on a fresh run (identity).
@@ -2771,6 +2920,9 @@ export class GameScene extends Phaser.Scene {
       // edges sampled in Input; resolved BEFORE the player tick so a heal/shop-open lands this frame.
       if (inputState.healPressed) this._drinkFlask()
       if (inputState.interactPressed) this._tryOpenShop()
+      // cursed-chests §6 (AC4, Decision 3) — open the cursed chest on the SAME E edge, RIGHT AFTER the shop so
+      // one E press opens at most one interactable (_tryOpenChest guards !shopOpen — see Decision 3).
+      if (inputState.interactPressed) this._tryOpenChest()
       if (inputState.swapPressed) this._swapWeapon() // round-3 (item 3) — toggle the active weapon slot.
       // skills slice (AC2/AC3) — USE SKILL slot 1 (F) / slot 2 (C): one-shot edges resolved BEFORE the player
       // tick so a skill fires this frame. An empty / on-cooldown slot is a no-op (Player.tryUseSkill → null),
@@ -2789,6 +2941,11 @@ export class GameScene extends Phaser.Scene {
     // the TOP of update (as this once did) wiped the flag before _tryOpenShop saw it, so the shop could never
     // open. resetInRange also drives the "[E] SHOP" prompt off the same-frame flag so the tell tracks the player.
     if (this.shop) this.shop.resetInRange()
+    // ── Cursed-chest in-range RESET (cursed-chests §6, Decision 3) ── clear the chest's in-range flag for the
+    // NEXT frame, AFTER _tryOpenChest (above) has read it — the SAME shop-flag-reset-ordering fix (the Arcade
+    // overlap that SETS the flag fires before update(), so the read must precede the reset). Drives the
+    // "[E] CURSED CHEST" prompt off the same-frame flag (an opened chest is inert → its prompt stays hidden).
+    if (this.chest) this.chest.resetInRange()
 
     this.playerHitboxes.tick(gdt)
     this.enemyHitboxes.tick(gdt)
