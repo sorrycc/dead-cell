@@ -225,6 +225,59 @@ const MAX_STEP_DOWN = 6 // tiles — max downward step (falling is cheap; bounde
 const MIN_GAP = 1 // tiles — min horizontal clear gap (so platforms don't fuse into one run).
 const MAX_GAP = 4 // tiles — max horizontal clear gap (128px). MUST be ≤ canReach at MAX_STEP_UP.
 
+// ── Floor-recovery budgets (floor-recovery-ledges design) — guarantee a fallen player can climb back to
+// the exit LOCALLY instead of backtracking the whole level. The entrance→exit chain is traversable BY
+// CONSTRUCTION (AC27), but nothing stopped a player who FELL to the floor from being stranded far below a
+// high chain stretch. These budgets drive a recovery pass (placeRecoveryBridges) that lays SOLID
+// stepping-stones across any under-served floor stretch, and a verifier LOCALITY proof. Gated on grid
+// WIDTH like the branch/layout features so the cols:40 regression pin emits nothing new.
+export const RECOVERY_MIN_COLS = 50 // skip recovery on narrow grids (the pin is 40 → unaffected); shared with the verifier.
+const RECOVERY_REMOUNT_UP = MAX_STEP_UP // tiles — a SOLID top ≤ this above the floor is re-mountable from it.
+const MAX_FLOOR_RECOVERY_GAP = 10 // tiles — max consecutive interior floor columns with no re-mount near.
+
+// ── Floor-recovery shared metric (Decision 8/13 — the ONE coverage definition both the generator's
+// placement AND the verifier's locality proof call, so they cannot disagree; the platformStep DRY pattern). ──
+
+// isRemountRun(p, floorRow, cols) → true iff `p` is a SOLID run in the re-mount BAND (top ≤
+// RECOVERY_REMOUNT_UP tiles above the floor) with a NON-EMPTY interior overlap. It tests interior OVERLAP,
+// not strict containment: mergeRuns fuses a band run that touches col 1 / cols-2 with the full-height side
+// wall, so an emitted run can spill onto col 0 / cols-1 — the overlap test still accepts it while excluding
+// the floor run (row === floorRow) and a pure 1-wide side-wall run (interior overlap empty).
+export function isRemountRun(p: Platform, floorRow: number, cols: number): boolean {
+  if (p.type !== TILE.SOLID) return false
+  if (p.row < floorRow - RECOVERY_REMOUNT_UP || p.row >= floorRow) return false
+  return Math.max(p.col, 1) <= Math.min(p.col + p.len - 1, cols - 2)
+}
+
+// floorRecoveryGaps(remounts, cols) → the maximal interior column intervals [lo,hi] in [1, cols-2] NOT
+// covered by any re-mount AND longer than MAX_FLOOR_RECOVERY_GAP (a leading gap from col 1 and a trailing
+// gap to col cols-2 are included). Coverage uses each re-mount's INTERIOR-CLAMPED span [max(col,1),
+// min(col+len-1, cols-2)] so a wall-fused run contributes its interior columns — making the generator's
+// un-merged view and the verifier's merged view yield the identical covered-column set (no boundary drift).
+export function floorRecoveryGaps(remounts: Platform[], cols: number): Array<[number, number]> {
+  const interiorMax = cols - 2
+  if (interiorMax < 1) return []
+  const covered: boolean[] = new Array(cols).fill(false)
+  for (const p of remounts) {
+    const lo = Math.max(p.col, 1)
+    const hi = Math.min(p.col + p.len - 1, interiorMax)
+    for (let c = lo; c <= hi; c++) covered[c] = true
+  }
+  const gaps: Array<[number, number]> = []
+  let c = 1
+  while (c <= interiorMax) {
+    if (covered[c]) {
+      c++
+      continue
+    }
+    const start = c
+    while (c <= interiorMax && !covered[c]) c++
+    const end = c - 1
+    if (end - start + 1 > MAX_FLOOR_RECOVERY_GAP) gaps.push([start, end])
+  }
+  return gaps
+}
+
 // ── canReachStep(dxTiles, dyTiles) → boolean (Decisions 35/36, the SHARED predicate) ──
 // TRUE iff a player on platform A can jump to platform B whose near-edge gap is `dxTiles` tiles and
 // whose top is `dyTiles` tiles away (negative = higher). The horizontal allowance is the COUPLED
@@ -593,6 +646,15 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   const branchRng = mulberry32((seed ^ 0xb2a4c11) >>> 0) // off-the-main-thread (pin-safe) branch RNG.
   const branchTreasure = placeBranch(tiles, cols, rows, critical, branchRng, lenMin, lenMax, entrance, exit)
 
+  // ── 4.6) Floor-recovery BRIDGES (floor-recovery-ledges design, AC1/AC2) ── stamp SOLID stepping-stones
+  // across any floor stretch that lacks a nearby re-mount, so a player who falls to the floor can always
+  // climb back to the exit LOCALLY (the verifier proves the locality bound). Off a SEPARATE seeded sub-RNG
+  // (off the main `rng` thread) so the main draw sequence — and the regression pin — is byte-unchanged, and
+  // gated on grid width so the cols:40 pin emits no stones. Stamped BEFORE the occupied mask + decoration so
+  // the stones join the mask (decoration never overwrites them) and feed collectStandable.
+  const recoveryRng = mulberry32((seed ^ 0x5eca1add) >>> 0) // off-the-main-thread (pin-safe) recovery RNG.
+  const recovery = placeRecoveryBridges(tiles, cols, rows, recoveryRng, lenMin, lenMax)
+
   // ── 5) Off-critical-path decoration (Decision: step 5) ── scatter ONEWAY ledges + HAZARD tiles at
   // seeded positions that are NOT on the critical path, so they never block the guaranteed route. We
   // additionally keep HAZARDs out of the swept JUMP CORRIDOR between consecutive critical platforms
@@ -605,6 +667,14 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   // occupied mask), but a scattered ledge/hazard could otherwise land ON it and make the treasure ledge
   // un-standable (the verifier's standable check would fail). Mark it occupied so decoration skips it.
   if (branchTreasure) occupied[branchTreasure.row][branchTreasure.col] = true
+
+  // Floor-recovery (AC4) — RESERVE each recovery stone's TOP row (the cell the player stands on while
+  // climbing) from decoration, so a scattered hazard/ledge never lands on the recovery path. Same pattern
+  // as the branch-treasure reservation above. (The floor walk lane itself is kept hazard-free in scatterHazards.)
+  for (const s of recovery) {
+    const topRow = s.row - 1
+    if (topRow >= 0) for (let c = s.col; c < s.col + s.len; c++) occupied[topRow][c] = true
+  }
 
   scatterOneWayLedges(tiles, cols, rows, rng, biomeConfig.oneWayLedges, occupied, corridor, lenMin, lenMax)
   scatterHazards(tiles, cols, rows, rng, biomeConfig.hazardPatches, occupied, corridor)
@@ -859,6 +929,71 @@ function runTopClear(tiles: number[][], run: Platform): boolean {
   return true
 }
 
+// ── placeRecoveryBridges(tiles, cols, rows, rng, lenMin, lenMax) → Platform[] (floor-recovery-ledges design) ──
+// Lay horizontal SOLID stepping-stone BRIDGES across every floor stretch that lacks a nearby re-mount, so a
+// player who FELL to the floor can always climb back to the exit LOCALLY instead of backtracking the whole
+// level. Each stone sits at row floorRow-RECOVERY_REMOUNT_UP: the 52px player fits UNDER it (64px clearance),
+// so the full-width floor stays contiguous (the floor→stone mount is an offset up-and-over hop launched from
+// the open floor beside the stone), AND a SOLID top there is re-mountable from the floor (canReachStep(0,-3)
+// is inside the envelope, proven by the module-load assertion). Stones are spaced ≤ MAX_GAP so consecutive
+// stones are a canReachStep(≤4,0) hop (a same-row reach-chain), anchored within MAX_GAP of a bounding
+// re-mount that is on the proven entrance→exit chain — so every stone reaches the exit (AC2).
+//
+// TOTAL by construction (Decision 9): a maximal uncovered gap's bottom band rows floorRow-1..floorRow-3 are
+// provably EMPTY in the gap columns (any SOLID there would satisfy isRemountRun and cover the column,
+// contradicting "uncovered"; only shell+critical+branch SOLID exist pre-decoration), so a stone is ALWAYS
+// placeable; and every gap has ≥1 bounding re-mount (every layout template lands a SOLID critical platform in
+// the band). Stones are confined to [2, cols-3] so they never fuse with a side wall in mergeRuns (Decision 13).
+// PURE + deterministic (off the passed sub-RNG, off the main thread → pin-safe). Returns the stamped stones so
+// the caller can reserve their tops from decoration. Gated on grid width so the cols:40 pin emits nothing.
+function placeRecoveryBridges(
+  tiles: number[][],
+  cols: number,
+  rows: number,
+  rng: RNG,
+  lenMin: number,
+  lenMax: number,
+): Platform[] {
+  if (cols < RECOVERY_MIN_COLS) return [] // narrow grid (the pin) → no recovery (pin tiles unchanged).
+  const floorRow = rows - 1
+  const stoneRow = floorRow - RECOVERY_REMOUNT_UP // the player fits UNDER this row; re-mountable from the floor.
+  const stoneMax = cols - 3 // confine stones to [2, cols-3] so a stone never fuses with a side wall (Decision 13).
+  if (stoneRow < 1 || stoneMax < 2) return [] // degenerate tiny grid (cannot happen for cols ≥ RECOVERY_MIN_COLS).
+
+  // Re-derive the SOLID in-band re-mounts from the EMITTED grid (critical + branch + stones placed so far) so
+  // the generator's gap view matches the verifier's, which reads the merged emitted tiles (DRY — same metric).
+  const currentGaps = (): Array<[number, number]> =>
+    floorRecoveryGaps(mergeRuns(tiles, cols, rows, TILE.SOLID).filter((p) => isRemountRun(p, floorRow, cols)), cols)
+
+  const stones: Platform[] = []
+  let guard = 0
+  while (guard++ < 10000) {
+    const gaps = currentGaps()
+    if (gaps.length === 0) break // every floor stretch is within reach of a re-mount → done.
+    let progressed = false
+    for (const [lo, hi] of gaps) {
+      // March stones left→right across [lo, min(hi, stoneMax)]: the first within MAX_GAP of the gap's left
+      // bound (col lo-1 is covered, or the wall), each next MAX_GAP past the previous (a reach-chain hop +
+      // a floor launch gap). The chain reaches within MAX_GAP of a bounding re-mount on at least one side.
+      const right = Math.min(hi, stoneMax)
+      let col = clampInt(lo, 2, stoneMax)
+      while (col <= right) {
+        // Confine the stone to the gap [lo, hi] (clamp its right edge to `right`): a stone must NEVER spill
+        // its length into a COVERED column, because a covered column is exactly where a re-mount AND any
+        // standable cell (entrance/exit/branch) lives — spilling there would bury that cell (its support is
+        // in the band, so its column is always covered, hence never in a gap). Confinement makes burial impossible.
+        const stone = makeRun(col, stoneRow, randInt(rng, lenMin, lenMax), right)
+        stampRun(tiles, cols, rows, stone.col, stone.row, stone.len, TILE.SOLID)
+        stones.push(stone)
+        progressed = true
+        col = stone.col + stone.len - 1 + 1 + MAX_GAP // next stone ≤ MAX_GAP away (reach-chain + coverage + launch gap).
+      }
+    }
+    if (!progressed) break // safety: nothing placeable (cannot happen by Decision 9) → never spin.
+  }
+  return stones
+}
+
 // Build a SOLID platform run clamped to the interior band [1, interiorMax] so its emitted {col,len}
 // matches EXACTLY what stampRun writes (no record/grid drift). If the requested run would spill past
 // interiorMax it is shortened (len ≥ 1). This single clamp site is why entrance/exit columns are
@@ -1034,11 +1169,16 @@ function scatterHazards(
   occupied: boolean[][],
   corridor: boolean[][],
 ): void {
+  // Floor-recovery (AC4): keep the floor WALK LANE (row floorRow-1 = rows-2) hazard-free so the recovery
+  // backtrack is never a damage gauntlet. Gated on grid width so the cols:40 pin's hazard draws are unchanged
+  // (the narrow pin has no recovery pass either). rows-2 is exactly the max `row` the draw below can pick.
+  const floorLane = rows - 2
   for (let i = 0; i < count; i++) {
     let placed = false
     for (let tries = 0; tries < 16 && !placed; tries++) {
       const col = randInt(rng, 2, cols - 3)
       const row = randInt(rng, 3, rows - 2)
+      if (cols >= RECOVERY_MIN_COLS && row === floorLane) continue // floor walk stays safe (recovery lane).
       if (occupied[row][col] || corridor[row][col]) continue
       if (tiles[row][col] !== TILE.EMPTY) continue
       if (!isSupport(tiles[row + 1][col])) continue // must sit on ground (no floating hazard).

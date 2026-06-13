@@ -35,7 +35,7 @@ import { mulberry32 } from '../src/util/rng.js'
 import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
-import { generateLevel, TILE, canReachPlatform, LAYOUT_TEMPLATES } from '../src/world/LevelGenerator.js'
+import { generateLevel, TILE, canReachPlatform, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS } from '../src/world/LevelGenerator.js'
 import { PRISON, BIOME_ORDER, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
@@ -300,6 +300,74 @@ function checkDescription(desc, biome) {
     if (!isStandable(desc.tiles, bt.col, bt.row, desc.rows)) return `branch treasure (${bt.col},${bt.row}) not standable`
     const r = bfsReaches(desc, desc.entrance, bt)
     if (!r.ok) return `branch treasure not reachable from entrance: ${r.reason}`
+  }
+
+  // (g) Floor-recovery LOCALITY + reconnection (floor-recovery-ledges design, AC1/AC2/AC4) — a player who
+  // FELL to the floor must be able to climb back to the exit LOCALLY (bounded walk), not only via a
+  // full-level backtrack. RE-derived from the EMITTED tiles/platforms (independent of the generator's intent).
+  const fr = checkFloorRecovery(desc)
+  if (fr) return fr
+
+  return null
+}
+
+// ── checkFloorRecovery(desc) (floor-recovery-ledges design, AC1/AC2/AC4) ── prove, independently from the
+// EMITTED platforms, that a fallen player recovers LOCALLY. Gated to cols ≥ RECOVERY_MIN_COLS (the cols:40
+// pin is exempt, mirroring the generator). Three checks:
+//   (i)  LOCALITY (AC1): no interior floor run wider than the bound lacks a SOLID re-mount — via the SHARED
+//        floorRecoveryGaps/isRemountRun the generator placed with (DRY — they cannot disagree).
+//   (ii) RECONNECTION (AC2): every SOLID re-mount reaches the exit in the platform reach graph EXCLUDING the
+//        floor run — so a climb-out leads to the exit by REAL platforming, not by walking the floor back to
+//        the entrance (the very backtrack the feature removes). ONE reverse-BFS from the exit, then membership.
+//   (iii) HAZARD-FREE LANE (AC4): no HAZARD tile on the floor walk lane (row floorRow-1).
+// Returns null on pass or a reason string.
+function checkFloorRecovery(desc) {
+  if (desc.cols < RECOVERY_MIN_COLS) return null // narrow grids (the pin) exempt — mirrors the generator gate.
+  const floorRow = desc.rows - 1
+
+  // (i) Locality — re-derive SOLID band re-mounts from the emitted platforms and assert no over-budget gap.
+  const remounts = desc.platforms.filter((p) => isRemountRun(p, floorRow, desc.cols))
+  const gaps = floorRecoveryGaps(remounts, desc.cols)
+  if (gaps.length > 0) {
+    const [lo, hi] = gaps[0]
+    return `floor not recoverable: interior columns [${lo},${hi}] (${hi - lo + 1} wide) have no nearby re-mount (locality)`
+  }
+
+  // (ii) Reconnection — the reach graph over SOLID+ONEWAY platforms EXCLUDING the floor run (row === floorRow),
+  // so reaching the exit proves a real climb, not the floor backtrack. ONE reverse-BFS from the exit platform.
+  const graph = desc.platforms.filter(
+    (p) => (p.type === TILE.SOLID || p.type === TILE.ONEWAY) && p.row !== floorRow,
+  )
+  const goal = platformSupporting(graph, desc.exit.col, desc.exit.row)
+  if (!goal) return 'floor recovery: exit cell has no supporting platform'
+  const n = graph.length
+  const radj = Array.from({ length: n }, () => [])
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      // Forward edge i→j when canReachPlatform(i,j); record the REVERSE edge so a BFS from the exit finds
+      // every node that can REACH the exit.
+      if (i !== j && canReachPlatform(graph[i], graph[j])) radj[j].push(i)
+    }
+  }
+  const goalIdx = graph.indexOf(goal)
+  const reachesExit = new Uint8Array(n)
+  reachesExit[goalIdx] = 1
+  const queue = [goalIdx]
+  while (queue.length) {
+    const u = queue.shift()
+    for (const v of radj[u]) if (!reachesExit[v]) { reachesExit[v] = 1; queue.push(v) }
+  }
+  for (const rm of remounts) {
+    const idx = graph.indexOf(rm)
+    if (idx < 0 || !reachesExit[idx]) {
+      return `floor recovery: re-mount platform (col ${rm.col}, row ${rm.row}, len ${rm.len}) cannot reach the exit by climbing`
+    }
+  }
+
+  // (iii) Hazard-free walk lane — no HAZARD on row floorRow-1 (the contiguous floor the player walks/recovers on).
+  const laneRow = floorRow - 1
+  for (let col = 0; col < desc.cols; col++) {
+    if (desc.tiles[laneRow][col] === TILE.HAZARD) return `floor recovery: HAZARD on the floor walk lane at (col ${col}, row ${laneRow})`
   }
 
   return null
@@ -1066,7 +1134,8 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
-    `traversable(AC27) + branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2); level pin OK; ` +
+    `traversable(AC27) + branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2) + ` +
+    `floor-recovery locality+reconnect+hazard-free-lane (cols≥${RECOVERY_MIN_COLS}); level pin OK; ` +
     `curve+tiers+whole-run monotonic (AC42/AC43) over ${totalLevels} ` +
     `levels; seed chain deterministic (AC47); upgrades/weapons pure+well-formed + applyUpgrades ` +
     `identity/non-mutating/never-weaker (AC55); ${ENEMY_ARCHETYPES.length} enemy archetypes + per-biome ` +
