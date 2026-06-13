@@ -151,4 +151,13 @@ export class Input {
 
     return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, attackHeld, parryPressed, downHeld, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed }
   }
+
+  // Consume a PENDING interact (E) down-edge so the NEXT sample() does not read it. JustDown() mutates the key's
+  // _justDown flag, so calling it here clears the edge — keeping THIS class the sole owner of the E JustDown call
+  // (the invariant in the class header). Used when the shop closes via E: the same physical press both fires the
+  // overlay's keydown-E (LEAVE → close) and arms JustDown(e), so without this the press would reopen the shop on
+  // the next frame (the close→reopen race). A no-op when no E edge is pending (e.g. a SPACE/ENTER close).
+  consumeInteract(): void {
+    Phaser.Input.Keyboard.JustDown(this.keys.e)
+  }
 }

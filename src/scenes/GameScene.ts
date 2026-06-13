@@ -2111,6 +2111,10 @@ export class GameScene extends Phaser.Scene {
   _closeShop(): void {
     this.shopOpen = false
     this.shopOverlay = null
+    // Swallow the E down-edge that selected LEAVE: the SAME physical press is processed at PRE_RENDER (after this
+    // frame's update) and arms JustDown(e); without consuming it, next frame's sample() reads it as interactPressed
+    // and _tryOpenShop instantly REOPENS the shop (the close→reopen race). No-op when LEAVE came via SPACE/ENTER.
+    this.input2.consumeInteract()
     this._resumeLevelTimer() // re-stamp the timer past the frozen shopping interval (review MINOR).
   }
 
@@ -2470,11 +2474,6 @@ export class GameScene extends Phaser.Scene {
     if (inputState.mutePressed) this.sfx.mute = !this.sfx.mute
     // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
-    // ── Shop in-range RESET (§6.10) ── clear the vendor's in-range flag BEFORE the physics step runs its
-    // overlaps this frame (the overlap callback re-sets it true only while the bodies actually overlap). The
-    // reset also drives the "[E] SHOP" prompt off the PREVIOUS frame's flag so the tell tracks the player.
-    if (this.shop) this.shop.resetInRange()
-
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
     // shop / MUTATION overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
     if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen) {
@@ -2498,6 +2497,13 @@ export class GameScene extends Phaser.Scene {
       // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.
       if (this.boss && !this.boss.removed) this.boss.update(gdt, { player: this.player, effects: this.effects })
     }
+
+    // ── Shop in-range RESET (§6.10) ── clear the vendor's in-range flag for the NEXT frame, AFTER _tryOpenShop
+    // (in the gated block above) has read it. Arcade physics fires the overlap callback that SETS this flag on
+    // the scene UPDATE event, which runs BEFORE this update() — so the read must precede the reset. Resetting at
+    // the TOP of update (as this once did) wiped the flag before _tryOpenShop saw it, so the shop could never
+    // open. resetInRange also drives the "[E] SHOP" prompt off the same-frame flag so the tell tracks the player.
+    if (this.shop) this.shop.resetInRange()
 
     this.playerHitboxes.tick(gdt)
     this.enemyHitboxes.tick(gdt)

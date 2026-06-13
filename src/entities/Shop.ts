@@ -15,8 +15,10 @@ import { t } from '../i18n/index.js'
 // ZERO sinks. This entity + GameScene's overlay close that gap: gold becomes the run-economy decision loop.
 //
 // IN-RANGE TRACKING (KISS): GameScene wires an overlap(player.collider, shop.rect) whose callback calls
-// shop.markInRange(); the flag is RESET to false at the TOP of every GameScene.update (before physics
-// runs the overlaps) so it reads true ONLY on the frames the bodies actually overlap. A floating "Press E"
+// shop.markInRange(). Arcade fires that overlap on the scene UPDATE event, which runs BEFORE GameScene.update,
+// so the flag is already true going into update; _tryOpenShop reads it, then GameScene RESETS it to false just
+// AFTER that read (NOT at the top of update — resetting first would wipe the flag before _tryOpenShop saw it,
+// the original bug). So it reads true ONLY on the frames the bodies actually overlap. A floating "Press E"
 // prompt is shown/hidden off the same flag so the interaction is discoverable (the genre's vendor tell).
 // destroy() lets the in-place level→level rebuild tear it down cleanly (Decision 40 discipline).
 
@@ -76,13 +78,16 @@ export class Shop {
   }
 
   // Called by GameScene's overlap callback while the player stands on the vendor (sets the flag true for
-  // this frame). GameScene resets it to false each tick before physics, so it's true ONLY on overlap frames.
+  // this frame). The overlap runs on the scene UPDATE event, before GameScene.update; GameScene resets the flag
+  // to false each tick AFTER reading it (see resetInRange), so it's true ONLY on overlap frames.
   markInRange() {
     this.playerInRange = true
   }
 
-  // Reset the in-range flag (GameScene calls this at the top of update, before the physics overlaps run).
-  // Also drives the prompt visibility off the PREVIOUS frame's flag so the tell tracks the player.
+  // Reset the in-range flag. GameScene calls this AFTER _tryOpenShop has read it (just past the gameplay-gated
+  // block), NOT at the top of update — the Arcade overlap callback that sets the flag already ran on the scene
+  // UPDATE event before update(), so resetting first would wipe it before it is read. Also drives the prompt
+  // visibility off the same-frame flag so the tell tracks the player.
   resetInRange() {
     this.prompt.setVisible(this.playerInRange)
     this.playerInRange = false
