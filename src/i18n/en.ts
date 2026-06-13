@@ -14,7 +14,7 @@ export const EN: Dict = {
 
     // ── Hub ──
     'hub.title': 'HUB',
-    'hub.footer': 'UP/DOWN select · SPACE/ENTER buy or start',
+    'hub.footer': 'UP/DOWN select · SPACE/ENTER buy or start · ESC return',
     'hub.cellsHeader': 'CELLS {cells}   ·   BEST DEPTH {depth}',
     'hub.start': 'START RUN',
     'hub.language': 'LANGUAGE',

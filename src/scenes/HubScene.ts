@@ -176,6 +176,8 @@ export class HubScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-S', () => this._move(1))
     this.input.keyboard!.on('keydown-SPACE', () => this._confirm())
     this.input.keyboard!.on('keydown-ENTER', () => this._confirm())
+    // ESC → Title (main screen) — parity with GameScene (.once; Hub tears down).
+    this.input.keyboard!.once('keydown-ESC', () => this.scene.start('Title'))
   }
 
   // Move the cursor (clamped to the row range) + re-render so the highlight + affordability refresh.

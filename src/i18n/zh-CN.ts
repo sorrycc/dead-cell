@@ -19,7 +19,7 @@ export const ZH_CN: Dict = {
 
     // ── 大厅 ──
     'hub.title': '大厅',
-    'hub.footer': '上/下 选择 · SPACE/ENTER 购买或开始',
+    'hub.footer': '上/下 选择 · SPACE/ENTER 购买或开始 · ESC 返回',
     'hub.cellsHeader': '细胞 {cells}   ·   最深 {depth}',
     'hub.start': '开始游戏',
     'hub.language': '语言',
