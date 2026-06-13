@@ -117,10 +117,15 @@ export interface WeaponSpec {
 }
 
 // A FOLDED (affixed) weapon — the same WeaponSpec schema plus the affix metadata baked in by foldWeaponAffix.
+// (item-rarity-forge §6) — an OPTIONAL rarityId/rarityName stamped by foldRarity (config/rarity.ts) when a
+// non-common tier folds ON TOP of the affixed weapon (Decision 5, fold order affix-then-rarity). Absent on a
+// common/plain weapon (the identity — the HUD shows no rarity suffix). Both folds keep the WeaponSpec schema.
 export interface FoldedWeaponSpec extends WeaponSpec {
   affixId: string
   affixName: string
   affixLifestealFrac: number
+  rarityId?: string
+  rarityName?: string
 }
 
 // A weapon affix (Enrichment round-2). All multiplier/status fields optional — an absent field is the neutral default.
@@ -399,18 +404,30 @@ export const WEAPON_AFFIXES_BY_ID: Record<string, WeaponAffix> = Object.fromEntr
 // appears (so the affix reads as a bonus, not a default). DATA so GameScene rolls it off the level seed.
 export const WEAPON_AFFIX_CHANCE = 0.7
 
-// ── foldWeaponAffix(weapon, affix) → a NEW affixed weapon (PURE; mirrors Enemy._foldElite, Decision 77) ──
+// ── foldWeaponAffix(weapon, affix, powerMult = 1) → a NEW affixed weapon (PURE; mirrors Enemy._foldElite) ──
 // Bake the affix's multipliers/lifesteal/status into a FRESH weapon object (deep-cloning the swings rows +
 // projectile so the shared WEAPONS config is NEVER mutated — the aliasing safety every fold in this codebase
 // keeps). The folded weapon has the SAME schema (id/name/type/swings/projectile/status) so the Player equips
 // + reads it UNCHANGED; it gains `affixId`/`affixName` (the HUD label) + `affixLifestealFrac` (read at the
 // melee-hit site like the scroll). Every affix field is optional (?? the neutral default) so a missing field
 // leaves the base value — a Keen weapon keeps base knockback/speed/status, a Swift weapon keeps base damage.
-export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | undefined): WeaponSpec | FoldedWeaponSpec {
+//
+// ── powerMult (item-rarity-forge §6, Decision 4 — the "stronger affix" knob) ── an OPTIONAL parameter that
+// STRENGTHENS the affix's OWN contribution (NOT a new affix pool — KISS). Default 1 = the EXACT identity for
+// every current caller (the additive-identity pin: a `powerMult === 1` fold deep-equals the legacy two-arg
+// fold). A high-rarity tier (epic/legendary → EXTRA_AFFIX_POWER) passes powerMult > 1; the scene computes it
+// from the tier and the rarity damage mult is then folded ON TOP by foldRarity (fold order affix-then-rarity).
+// The bump scales the affix's EXCESS over the neutral identity, so `powerMult === 1` is byte-identical and
+// `powerMult > 1` never weakens: a ×mult becomes 1 + (mult − 1) × powerMult; an additive frac/DoT scales
+// directly. A common/rare (powerMult 1) weapon, or a weapon with no affix, is unaffected (nothing to strengthen).
+export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | undefined, powerMult = 1): WeaponSpec | FoldedWeaponSpec {
   if (!affix) return weapon // no affix → the plain weapon (identity — a fresh run plays exactly as before).
-  const dMult = affix.damageMult ?? 1
-  const kMult = affix.knockbackMult ?? 1
-  const sMult = affix.comboSpeedMult ?? 1
+  // bump(m): scale a ×multiplier's EXCESS over 1 by powerMult — bump(m,1) === m EXACTLY (the identity pin),
+  // bump(m,p>1) >= m for m >= 1 (never weakens). A missing affix mult is 1 (bump returns 1 — no change).
+  const bump = (m: number) => 1 + (m - 1) * powerMult
+  const dMult = bump(affix.damageMult ?? 1)
+  const kMult = bump(affix.knockbackMult ?? 1)
+  const sMult = affix.comboSpeedMult ?? 1 // a SPEED mult (<1 → faster); NOT power-bumped (a tempo affix, KISS).
   // Deep-clone each swing row with the multipliers applied (active/recovery clamped > 0 so the lock never
   // collapses to 0 and re-fires the same frame — a real bug guard). damage rounds to a whole hp (resolveHit
   // re-rounds anyway, but keep the table clean).
@@ -434,7 +451,9 @@ export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | 
     swings,
     affixId: affix.id,
     affixName: affix.name,
-    affixLifestealFrac: affix.lifestealFrac ?? 0, // weapon lifesteal (read at the melee-hit site; 0 = none).
+    // weapon lifesteal (read at the melee-hit site; 0 = none). An ADDITIVE frac → scaled directly by powerMult
+    // (×1 = the identity), so a high-rarity Vampiric heals more (Decision 4) and a powerMult-1 fold is unchanged.
+    affixLifestealFrac: (affix.lifestealFrac ?? 0) * powerMult,
   }
   // Ranged: scale the projectile damage/knockback by the same mults (a fresh projectile object — no mutation).
   if (weapon.type === 'ranged' && weapon.projectile) {
@@ -444,7 +463,12 @@ export function foldWeaponAffix(weapon: WeaponSpec, affix: WeaponAffix | null | 
       knockback: Math.round(weapon.projectile.knockback * kMult),
     }
   }
-  // Status: an addStatus affix ADDS/OVERRIDES the weapon's status (one slot — KISS); else keep the base.
-  if (affix.addStatus) folded.status = { ...affix.addStatus }
+  // Status: an addStatus affix ADDS/OVERRIDES the weapon's status (one slot — KISS); else keep the base. A
+  // damaging DoT's tickDmg is power-bumped (a high-rarity Venomous/Searing ticks harder — Decision 4); a
+  // powerMult-1 fold keeps the affix's tickDmg unchanged (Math.round(tickDmg × 1) === tickDmg — the identity).
+  if (affix.addStatus) {
+    folded.status = { ...affix.addStatus }
+    if (folded.status.tickDmg !== undefined) folded.status.tickDmg = Math.round(folded.status.tickDmg * powerMult)
+  }
   return folded
 }

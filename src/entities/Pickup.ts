@@ -1,4 +1,6 @@
 import Phaser from 'phaser'
+import { RARITIES } from '../config/rarity.js'
+import type { RarityId } from '../config/rarity.js'
 
 type PickupKind = 'cell' | 'gold' | 'scroll' | 'weapon' | 'heal' | 'skill' | 'blueprint'
 
@@ -9,6 +11,7 @@ interface PickupState {
   kind: PickupKind | null
   weaponId: string | null
   weaponAffixId: string | null
+  rarityId: RarityId | null // item-rarity-forge §6 — the rarity tier rolled at placement (null = common/identity).
   scrollId: string | null
   skillId: string | null
   blueprintId: string | null // meta-progression §6.8 — the blueprint id a 'blueprint' pickup carries (null = not one).
@@ -23,6 +26,7 @@ type PickupRect = Phaser.GameObjects.Rectangle & { pk: PickupState; pickupRef: P
 interface PickupMeta {
   weaponId?: string | null
   weaponAffixId?: string | null
+  rarityId?: RarityId | null // item-rarity-forge §6 — the rarity tier for a 'weapon' pickup (null = common).
   scrollId?: string | null
   skillId?: string | null
   blueprintId?: string | null // meta-progression §6.8 — the blueprint id for a 'blueprint' pickup.
@@ -91,7 +95,7 @@ export class PickupPool {
       body.setSize(PICKUP_SIZE, PICKUP_SIZE, true)
       // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC). weaponAffixId is the
       // Enrichment round-2 weapon affix rolled at placement (null = a plain weapon — the identity).
-      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, scrollId: null, skillId: null, blueprintId: null, goldAmount: 0, healFrac: 0 }
+      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, rarityId: null, scrollId: null, skillId: null, blueprintId: null, goldAmount: 0, healFrac: 0 }
       rect.pickupRef = rect.pk // back-ref so the overlap callback resolves the pickup from its body.
       this._disable(rect)
       this._items.push(rect)
@@ -115,8 +119,19 @@ export class PickupPool {
     // Arc pop: a fixed upward velocity + a small random horizontal scatter so a multi-drop fans out.
     body.setVelocity((Math.random() - 0.5) * 2 * ARC_VELOCITY_X, ARC_VELOCITY_Y)
 
-    const color = PICKUP_COLORS[kind] ?? 0xffffff
+    // ── Fill + rarity tint/stroke (item-rarity-forge §6, Decision 7) ── a non-common WEAPON pickup tints by
+    // the tier's tint + draws a 2px stroke in the same tint so rarer loot POPS (programmer-art — no assets). A
+    // common/null rarity OR any non-weapon kind keeps the kind's base fill + NO stroke (the identity). The
+    // stroke MUST be reset on EVERY acquire (not only in _disable): a rect is recycled via acquire under
+    // pool-exhaustion (which bypasses a fresh _disable for the recycled member), so without clearing the stroke
+    // here a rect that previously held a legendary weapon would leak its gold border onto a common/Cell/gold
+    // pickup (reviewer must-fix). So: set the stroke for a non-common weapon, explicitly clear it otherwise.
+    const rarityId = (kind === 'weapon' ? meta.rarityId : null) ?? null
+    const rarityTint = rarityId && rarityId !== 'common' ? RARITIES[rarityId].tint : null
+    const color = rarityTint ?? PICKUP_COLORS[kind] ?? 0xffffff
     rect.setFillStyle(color)
+    if (rarityTint !== null) rect.setStrokeStyle(2, rarityTint) // rarer loot gets a thin coloured border.
+    else rect.setStrokeStyle() // clear any stale border (common/null/non-weapon — the identity look).
     rect.setPosition(x, y)
     rect.setVisible(true)
 
@@ -126,6 +141,7 @@ export class PickupPool {
     pk.kind = kind
     pk.weaponId = meta.weaponId ?? null
     pk.weaponAffixId = meta.weaponAffixId ?? null // round-2 — the weapon affix rolled at placement (null = plain).
+    pk.rarityId = rarityId // item-rarity-forge §6 — the weapon's rarity tier (null = common/non-weapon — identity).
     pk.scrollId = meta.scrollId ?? null
     pk.skillId = meta.skillId ?? null // skills slice — the skill id for a 'skill' pickup (null = not a skill).
     pk.blueprintId = meta.blueprintId ?? null // meta-progression §6.8 — the blueprint id for a 'blueprint' pickup.
@@ -180,10 +196,12 @@ export class PickupPool {
     rect.pk.kind = null
     rect.pk.weaponId = null
     rect.pk.weaponAffixId = null
+    rect.pk.rarityId = null
     rect.pk.scrollId = null
     rect.pk.skillId = null
     rect.pk.blueprintId = null
     rect.pk.healFrac = 0
+    rect.setStrokeStyle() // item-rarity-forge §6 (Decision 7) — clear a rarity border so a recycled rect is clean.
     const body = rect.body as Phaser.Physics.Arcade.Body
     body.setVelocity(0, 0)
     body.enable = false

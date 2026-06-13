@@ -30,8 +30,13 @@
 // at the shop" loop intact.
 
 // The KNOWN item kinds — the effect family GameScene._buyShopItem dispatches on (a small KNOWN set). The
-// skills slice adds 'skill' (buy a specific skill into the loadout — the same kind-dispatch the pickup uses).
-export type ShopItemKind = 'heal' | 'scroll' | 'weapon' | 'flask' | 'skill'
+// skills slice adds 'skill' (buy a specific skill into the loadout — the same kind-dispatch the pickup uses);
+// item-rarity-forge adds 'forge' (reroll/upgrade the ACTIVE weapon — a gold sink into the build, Decision 8).
+export type ShopItemKind = 'heal' | 'scroll' | 'weapon' | 'flask' | 'skill' | 'forge'
+
+// A forge action (item-rarity-forge §6, Decision 8) — kind-specific param for a 'forge' row, read ONLY by the
+// forge branch (undefined-safe). 'reroll' = roll a NEW affix at the current rarity; 'upgrade' = bump rarity +1.
+export type ForgeAction = 'reroll' | 'upgrade'
 
 // A self-contained shop catalog row (Decision 76). Kind-specific params are optional and read ONLY by
 // that kind's branch (undefined-safe), mirroring how Pickup reads weaponId/scrollId/healFrac.
@@ -44,6 +49,7 @@ export interface ShopItem {
   healFrac?: number
   weaponId?: string
   skillId?: string
+  forgeAction?: ForgeAction // item-rarity-forge §6 — present iff kind === 'forge' (the verifier asserts it).
 }
 
 export const SHOP_ITEMS: ShopItem[] = [
@@ -109,6 +115,28 @@ export const SHOP_ITEMS: ShopItem[] = [
     kind: 'skill',
     skillId: 'frostGrenade',
   },
+  // ── FORGE: REROLL AFFIX (item-rarity-forge §6, Decision 8) ── a gold-sink gamble — re-roll the ACTIVE
+  // weapon's affix at its CURRENT rarity (the new affix may equal the old by luck — that's the risk, KISS).
+  // Mid-priced (a deliberate spin). _buyShopItem rerolls + re-folds + re-equips the active slot directly.
+  {
+    id: 'forgeReroll',
+    name: 'Forge: Reroll Affix',
+    desc: 'Re-roll the active weapon affix',
+    price: 26,
+    kind: 'forge',
+    forgeAction: 'reroll',
+  },
+  // ── FORGE: UPGRADE RARITY (item-rarity-forge §6, Decision 8) ── bump the ACTIVE weapon's rarity ONE tier
+  // (common→rare→epic→legendary, clamped at legendary). Pricier than the reroll — it's a guaranteed power gain
+  // (more damage + a stronger affix on epic/legendary). Rejected (no charge) when already legendary (Decision 6).
+  {
+    id: 'forgeUpgrade',
+    name: 'Forge: Upgrade Rarity',
+    desc: 'Raise the active weapon rarity one tier',
+    price: 48,
+    kind: 'forge',
+    forgeAction: 'upgrade',
+  },
 ]
 
 // id → row lookup (handy for logging / a future targeted buy). DRY: one source. KISS — a flat map.
@@ -116,4 +144,4 @@ export const SHOP_ITEMS_BY_ID: Record<string, ShopItem> = Object.fromEntries(SHO
 
 // The KNOWN item kinds (the verifier asserts every item.kind is one of these — a malformed catalog fails
 // loudly under node, mirroring the boss-attack-kinds + upgrade-table well-formedness checks).
-export const SHOP_ITEM_KINDS: ShopItemKind[] = ['heal', 'scroll', 'weapon', 'flask', 'skill']
+export const SHOP_ITEM_KINDS: ShopItemKind[] = ['heal', 'scroll', 'weapon', 'flask', 'skill', 'forge']

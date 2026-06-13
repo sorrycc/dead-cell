@@ -23,6 +23,7 @@ import { BIOME_ORDER } from '../config/biomes.js'
 import type { BiomeConfig } from '../config/biomes.js'
 import { PLAYER_MAX_HP } from '../config/constants.js'
 import type { PlayerStats } from '../config/upgrades.js'
+import type { RarityId } from '../config/rarity.js'
 
 // ── Shared data shapes (FOUNDATION exports) — consumer modules (GameScene/GameOverScene) import these. ──
 // The run-start stats fold passed INTO createRunState (the §6.5/§6.9 META fold result). It is the SAME
@@ -102,10 +103,15 @@ export interface RunState {
   // ── Equipped weapon (primary) ──
   weaponId: string
   weaponAffixId: string | null
+  // ── Equipped weapon RARITY (item-rarity-forge §6, Decision 1/2) ── the primary slot's rarity tier id (null =
+  // common/identity). A SCALAR carried like weaponAffixId so the rarity sticks for the run (the live folded
+  // weapon persists on the Player across level rebuilds — the same way the affix does today). null = common.
+  weaponRarityId: RarityId | null
   // ── Second weapon slot ──
   weaponSlots: number
   weaponId2: string | null
   weaponAffixId2: string | null
+  weaponRarityId2: RarityId | null // the secondary slot's rarity tier id (null = common/empty — the identity).
   // ── Skill loadout (skills design §6.2/§6.7, Decision 7) ──
   skillId1: string | null
   skillId2: string | null
@@ -221,6 +227,10 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     // GameScene rebuild re-equips WEAPONS[weaponId] folded with WEAPON_AFFIXES_BY_ID[weaponAffixId]). A fresh
     // run starts with no affix (the starting weapon is unmodified — the identity).
     weaponAffixId: null,
+    // ── Equipped weapon RARITY (item-rarity-forge §6, Decision 1/2) ── seeded null (= common/identity) so a
+    // fresh run's starting weapon is common (byte-identical: foldRarity(w, null) === w). A found/forged weapon
+    // records its tier id here; the live folded weapon persists on the Player across rebuilds (the affix carry).
+    weaponRarityId: null,
 
     // ── SECOND weapon SLOT (Enrichment round-3, item 3 — the build-identity lever) ── how many slots the
     // run carries (1 = single-slot, the identity; a meta upgrade seeds 2) + the SECONDARY slot's weapon id +
@@ -230,6 +240,7 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     weaponSlots: startStats ? startStats.weaponSlots ?? 1 : 1,
     weaponId2: null, // the secondary slot's weapon id (null = the slot is empty / locked).
     weaponAffixId2: null, // the secondary slot's affix id (null = a plain weapon / empty slot).
+    weaponRarityId2: null, // the secondary slot's rarity tier id (null = common/empty — the identity).
 
     // ── SKILL loadout (skills design §6.2/§6.7, Decision 7, AC4) ── the two skill slots' ids carried as
     // SCALARS (mirroring the secondary weaponId2) so a level rebuild re-equips BOTH skills (GameScene

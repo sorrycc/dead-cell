@@ -24,6 +24,8 @@ import { ProjectilePool } from '../combat/ProjectilePool.js'
 import { PickupPool } from '../entities/Pickup.js'
 import { DeployablePool } from '../entities/DeployablePool.js'
 import { WEAPONS, WEAPON_AFFIXES, WEAPON_AFFIX_CHANCE, WEAPON_AFFIXES_BY_ID, foldWeaponAffix, runWeaponPool } from '../config/weapons.js'
+import { RARITIES, RARITY_IDS, EXTRA_AFFIX_POWER, rollRarityId, foldRarity } from '../config/rarity.js'
+import type { RarityId } from '../config/rarity.js'
 import { SKILLS, SKILLS_BY_ID, runSkillPool } from '../config/skills.js'
 import type { SkillSpec as SkillSpecType } from '../config/skills.js'
 import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
@@ -45,7 +47,7 @@ import type { MetaStateInstance } from '../core/MetaState.js'
 import type { EnemySpec, EliteAffixSpec } from '../config/enemies.js'
 import type { BiomeConfig } from '../config/biomes.js'
 import type { RoomType } from '../config/roomTypes.js'
-import type { ShopItem } from '../config/shop.js'
+import type { ShopItem, ForgeAction } from '../config/shop.js'
 import type { SkillSpec } from '../config/skills.js'
 import type { LevelDescription } from '../world/LevelGenerator.js'
 import type { HitResult } from '../combat/damage.js'
@@ -1292,11 +1294,18 @@ export class GameScene extends Phaser.Scene {
   // is UNLOCKED and EMPTY (so the first pickup ADDS a moveset rather than replacing the starter — carry
   // melee+ranged); otherwise it replaces the ACTIVE slot (the round-2 behaviour, and the only behaviour on a
   // single-slot run — the identity). Returns the folded weapon (for any caller use).
-  _equipWeaponWithAffix(weaponId: string, affixId: string | null) {
+  _equipWeaponWithAffix(weaponId: string, affixId: string | null, rarityId: RarityId | null = null) {
     const base = WEAPONS[weaponId]
     if (!base) return null
     const affix = affixId ? WEAPON_AFFIXES_BY_ID[affixId] : null
-    const folded = foldWeaponAffix(base, affix)
+    // item-rarity-forge §6 (Decision 4/5) — resolve the rarity tier, compute the affix POWER bump (an
+    // extraAffix tier strengthens the affix), fold affix-then-rarity: a stronger affix AND a flat rarity
+    // damage mult. rarityId null/common → tier identity → folded === foldWeaponAffix(base, affix) (the
+    // byte-identity path: powerMult 1 + foldRarity no-op, so every legacy caller is unchanged).
+    const tier = rarityId && rarityId !== 'common' ? RARITIES[rarityId] : null
+    const powerMult = tier && tier.extraAffix ? EXTRA_AFFIX_POWER : 1
+    const folded = foldRarity(foldWeaponAffix(base, affix, powerMult), tier)
+    const recordRarity = rarityId && rarityId !== 'common' ? rarityId : null // null = common on the wire (Decision 2).
     // Decide the slot: fill the empty SECONDARY when the 2nd slot is unlocked + empty (a build add); else
     // the active slot (replace — the single-slot identity path). secondSlotUnlocked is false on a fresh run.
     const fillSecondary = this.player.secondSlotUnlocked && !this.runState.weaponId2 && this.player.activeWeaponIndex === 0
@@ -1304,15 +1313,18 @@ export class GameScene extends Phaser.Scene {
       this.player.equipToSlot(folded, 1) // fill the empty secondary without disturbing the active weapon.
       this.runState.weaponId2 = weaponId
       this.runState.weaponAffixId2 = affix ? affix.id : null
+      this.runState.weaponRarityId2 = recordRarity
     } else {
       this.player.equipWeapon(folded) // replace the active slot (resets the combo — Decision 63).
       // Record onto whichever slot is active so a rebuild re-folds it (round-3 carry discipline).
       if (this.player.activeWeaponIndex === 1) {
         this.runState.weaponId2 = weaponId
         this.runState.weaponAffixId2 = affix ? affix.id : null
+        this.runState.weaponRarityId2 = recordRarity
       } else {
         this.runState.weaponId = weaponId
         this.runState.weaponAffixId = affix ? affix.id : null
+        this.runState.weaponRarityId = recordRarity
       }
     }
     return folded
@@ -1328,6 +1340,57 @@ export class GameScene extends Phaser.Scene {
       this.cameras.main.flash(120, 174, 214, 241) // a faint blue pulse marks the weapon swap.
       this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 })
       this.sfx.swap() // audio §6.3 (AC4) — the swap click-clack (only on a real swap).
+    }
+  }
+
+  // ── _activeWeaponSlot() (item-rarity-forge §6, Decision 9) ── the RunState ids backing the ACTIVE slot,
+  // read by activeWeaponIndex. The forge reads/writes THESE (the active slot is the single forge target — the
+  // player picks it with R before forging). KISS — one accessor so the guard + the apply agree on the slot.
+  _activeWeaponSlot(): { weaponId: string | null; affixId: string | null; rarityId: RarityId | null } {
+    if (this.player.activeWeaponIndex === 1) {
+      return { weaponId: this.runState.weaponId2, affixId: this.runState.weaponAffixId2, rarityId: this.runState.weaponRarityId2 }
+    }
+    return { weaponId: this.runState.weaponId, affixId: this.runState.weaponAffixId, rarityId: this.runState.weaponRarityId }
+  }
+
+  // ── _forgeActiveWeapon(action) (item-rarity-forge §6, Decision 8/9 — the reviewer must-fix) ── re-equip the
+  // ACTIVE slot DIRECTLY: read the active slot's recorded weaponId/affixId/rarityId, derive the new affix
+  // (reroll) or the next rarity tier (upgrade), re-fold (foldRarity(foldWeaponAffix(base, affix, powerMult))),
+  // equip into the ACTIVE slot via player.equipWeapon, then write the ids back to the SAME active slot. This
+  // does NOT go through _equipWeaponWithAffix — its fill-secondary branch would mis-route a forge of the active
+  // primary (on a 2-slot run with an empty secondary) into the secondary slot (the reviewer's blocking issue).
+  // The buy guards already ran (an eligible weapon exists; upgrade isn't at the top tier), so this just applies.
+  _forgeActiveWeapon(action: ForgeAction): void {
+    const slot = this._activeWeaponSlot()
+    const weaponId = slot.weaponId
+    const base = weaponId ? WEAPONS[weaponId] : null
+    if (!weaponId || !base) return // defensive (the guard already rejected this) — never throw.
+    // reroll → a NEW affix at the CURRENT rarity (off Math.random, like the shop weapon buy — off the seeded
+    // layout). upgrade → the NEXT tier in RARITY_IDS (clamped at legendary), keeping the current affix.
+    let affixId = slot.affixId
+    let rarityId = slot.rarityId
+    if (action === 'reroll') {
+      affixId = this._rollWeaponAffix(Math.random.bind(Math))
+    } else {
+      const cur = rarityId ?? 'common'
+      const i = RARITY_IDS.indexOf(cur)
+      const next = RARITY_IDS[Math.min(RARITY_IDS.length - 1, i + 1)]
+      rarityId = next === 'common' ? null : next
+    }
+    const affix = affixId ? WEAPON_AFFIXES_BY_ID[affixId] : null
+    const tier = rarityId && rarityId !== 'common' ? RARITIES[rarityId] : null
+    const powerMult = tier && tier.extraAffix ? EXTRA_AFFIX_POWER : 1
+    const folded = foldRarity(foldWeaponAffix(base, affix, powerMult), tier)
+    this.player.equipWeapon(folded) // re-equip the ACTIVE slot (resets the combo — same as a swap).
+    // Write the ids back to the SAME active slot (so a rebuild re-folds it identically).
+    if (this.player.activeWeaponIndex === 1) {
+      this.runState.weaponId2 = weaponId
+      this.runState.weaponAffixId2 = affix ? affix.id : null
+      this.runState.weaponRarityId2 = rarityId
+    } else {
+      this.runState.weaponId = weaponId
+      this.runState.weaponAffixId = affix ? affix.id : null
+      this.runState.weaponRarityId = rarityId
     }
   }
 
@@ -1689,9 +1752,21 @@ export class GameScene extends Phaser.Scene {
     // Enrichment round-2 — roll a weapon AFFIX off the SAME level RNG (deterministic; a run replays the same
     // affixed loot). Stamped on the pickup so collection folds + equips the modified weapon (the build engine).
     const weaponAffixId = this._rollWeaponAffix(rng)
+    // item-rarity-forge §6 (Decision 3) — roll the RARITY off the SAME off-the-pin level RNG (after the affix
+    // roll) biased by depth; map 'common' → null so the pickup/RunState "null = common" invariant holds.
+    const rarityId = this._rollRarityForPlacement(rng)
     // Place it at a spawn spot away from the entrance (the first pickup point, or the level midpoint).
     const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
-    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId, weaponAffixId })
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'weapon', { weaponId, weaponAffixId, rarityId })
+  }
+
+  // ── _rollRarityForPlacement(rng) (item-rarity-forge §6, Decision 2/3) ── roll a weapon RARITY off the passed
+  // off-the-pin level RNG, biased toward higher tiers at deeper depth (rollRarityId reads runState.depth). Maps
+  // 'common' → null so the pickup/RunState invariant "null = common/identity" holds (a common find reads as
+  // absent → byte-identical look). DRY — the pickup + branch-reward placement both roll through here.
+  _rollRarityForPlacement(rng: RNG): RarityId | null {
+    const id = rollRarityId(rng, this.runState.depth)
+    return id === 'common' ? null : id
   }
 
   // ── _maybePlaceBlueprintPickup(desc) (meta-progression §6.7, Decision 6/7, AC9) ── deterministically (off
@@ -1760,7 +1835,10 @@ export class GameScene extends Phaser.Scene {
       const pool = choices.length ? choices : this.weaponPool
       const weaponId = pool[Math.floor(rng() * pool.length)]
       const weaponAffixId = this._rollWeaponAffix(rng)
-      this.pickupPool.acquire(x, y, 'weapon', { weaponId, weaponAffixId })
+      // item-rarity-forge §6 (Decision 3) — the treasure-branch weapon also rolls a depth-biased RARITY off the
+      // SAME off-the-pin RNG (the prime spot for an exciting high-rarity find). 'common' → null (the identity).
+      const rarityId = this._rollRarityForPlacement(rng)
+      this.pickupPool.acquire(x, y, 'weapon', { weaponId, weaponAffixId, rarityId })
     } else if (roll < 0.58) {
       // A run-only scroll boost (build power) — picks a deterministic scroll id off the same RNG.
       const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
@@ -2080,11 +2158,12 @@ export class GameScene extends Phaser.Scene {
         break
       }
       case 'weapon': {
-        // Enrichment round-2 — fold the rolled affix (pk.weaponAffixId, null = plain) into a FRESH weapon and
-        // equip it (the build engine). _equipWeaponWithAffix records BOTH ids on RunState (carried/re-folded
-        // on rebuild) + resets the combo. The live affixed weapon persists across rebuilds (the Player object
-        // persists — only the world rebuilds), so the affix sticks for the rest of the run.
-        this._equipWeaponWithAffix(pk.weaponId, pk.weaponAffixId)
+        // Enrichment round-2 + item-rarity-forge §6 — fold the rolled affix (pk.weaponAffixId, null = plain) AND
+        // the rolled rarity (pk.rarityId, null = common) into a FRESH weapon and equip it (the build engine).
+        // _equipWeaponWithAffix records the affix + rarity ids on RunState (carried for the run) + resets the
+        // combo. The live folded weapon persists across rebuilds (the Player object persists — only the world
+        // rebuilds), so the affix AND rarity stick for the rest of the run.
+        this._equipWeaponWithAffix(pk.weaponId, pk.weaponAffixId, pk.rarityId)
         break
       }
       case 'heal': {
@@ -2270,6 +2349,14 @@ export class GameScene extends Phaser.Scene {
       if (healed <= 0) return false // already full → don't charge for nothing.
     }
     if (item.kind === 'flask' && this.runState.flasks >= FLASK_BUY_CAP) return false // already capped → no charge.
+    // ── FORGE no-op guards (item-rarity-forge §6, Decision 6) — check BEFORE the deduct so a no-op never charges. ──
+    if (item.kind === 'forge') {
+      const slot = this._activeWeaponSlot()
+      if (!slot.weaponId || !WEAPONS[slot.weaponId]) return false // defensive — no eligible active weapon to forge.
+      // upgrade at the top tier is a no-op (don't burn gold) — the same "no-op never charges" guard heal/flask use.
+      if (item.forgeAction === 'upgrade' && (slot.rarityId ?? 'common') === 'legendary') return false
+      // reroll ALWAYS charges (a deliberate gamble — the new affix may equal the old by luck; Decision 6, KISS).
+    }
     this.runState.gold -= item.price // deduct the run-only currency.
     switch (item.kind) {
       case 'heal':
@@ -2289,10 +2376,23 @@ export class GameScene extends Phaser.Scene {
         break
       }
       case 'weapon': {
-        // Enrichment round-2 — a shop weapon also rolls an affix (off Math.random — shop buys are off the
-        // seeded layout, like the scroll buy above; KISS) so a vendor weapon can be build-defining too.
+        // Enrichment round-2 + item-rarity-forge §6 — a shop weapon also rolls an affix AND a depth-biased
+        // rarity (off Math.random — shop buys are off the seeded layout, like the scroll buy above; KISS) so a
+        // vendor weapon can be build-defining too. 'common' → null (the identity). fold + equip + record (DRY).
         const affixId = this._rollWeaponAffix(Math.random.bind(Math))
-        this._equipWeaponWithAffix(item.weaponId as string, affixId) // fold + equip + record on RunState (DRY).
+        const rolled = rollRarityId(Math.random.bind(Math), this.runState.depth)
+        const rarityId = rolled === 'common' ? null : rolled
+        this._equipWeaponWithAffix(item.weaponId as string, affixId, rarityId)
+        break
+      }
+      case 'forge': {
+        // item-rarity-forge §6 (Decision 8/9) — the FORGE targets the ACTIVE slot DIRECTLY (the reviewer
+        // must-fix): read/write the active slot's weaponId/weaponAffixId/weaponRarityId by activeWeaponIndex,
+        // re-fold (foldRarity(foldWeaponAffix(...))), equip into the ACTIVE slot via equipWeapon, and write the
+        // ids back to the SAME active slot. This deliberately does NOT route through _equipWeaponWithAffix (whose
+        // fill-secondary branch would mis-route a forge of the active primary into an empty secondary). The guard
+        // checks happened BEFORE the deduct (see above) so a no-op never charged.
+        this._forgeActiveWeapon(item.forgeAction as ForgeAction)
         break
       }
       case 'skill': {
@@ -2572,10 +2672,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ── _weaponSlotLabel(w) ── one slot's label: the (translated) weapon name, plus the (translated) affix
-  // name when affixed (e.g. "剑 ✦ 锋利"). DRY — both slots resolve through here.
+  // name when affixed (e.g. "剑 ✦ 锋利"), plus the (translated) RARITY name when non-common (item-rarity-forge
+  // §6, Decision 8 — e.g. "Sword ✦ Keen · Epic"). A common/plain weapon shows EXACTLY its current label (the
+  // identity — w.rarityId is absent on a common/unfolded weapon). DRY — both slots resolve through here.
   _weaponSlotLabel(w: any): string {
     const name = tName('weapon', w.id, w.name)
-    return w.affixName ? `${name} ✦ ${tName('affix', w.affixId, w.affixName)}` : name
+    const withAffix = w.affixName ? `${name} ✦ ${tName('affix', w.affixId, w.affixName)}` : name
+    if (w.rarityId && w.rarityId !== 'common') {
+      return `${withAffix} · ${tName('rarity', w.rarityId, w.rarityName ?? RARITIES[w.rarityId as RarityId].name)}`
+    }
+    return withAffix
   }
 
   // ── _skillLabel(slot) (skills design §6.6, AC6) ── the HUD label for a skill slot: the equipped skill's

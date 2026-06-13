@@ -131,6 +131,14 @@ export const ZH_CN: Dict = {
     searing: { name: '灼烧' },
   },
 
+  // ── 武器稀有度 (config/rarity.ts) — common 不显示后缀，仅为完整性保留 ──
+  rarity: {
+    common: { name: '普通' },
+    rare: { name: '稀有' },
+    epic: { name: '史诗' },
+    legendary: { name: '传说' },
+  },
+
   // ── 突变 (config/mutations.ts) ──
   mutation: {
     berserker: { name: '狂战士', desc: '生命值低于 40% 时伤害 +30%' },
@@ -203,6 +211,8 @@ export const ZH_CN: Dict = {
     weaponSpear: { name: '商人长矛', desc: '换装为长矛' },
     skillKnives: { name: '飞刀', desc: '装备飞刀技能' },
     skillFrost: { name: '冰霜手雷', desc: '装备范围冰冻技能' },
+    forgeReroll: { name: '锻造：重铸词缀', desc: '重新随机当前武器词缀' },
+    forgeUpgrade: { name: '锻造：提升稀有度', desc: '将当前武器稀有度提升一级' },
   },
 
   // ── 首领细胞难度 (config/tiers.ts) — keyed by String(index) ──

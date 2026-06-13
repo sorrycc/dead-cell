@@ -93,6 +93,11 @@ import { SKILLS, SKILL_KINDS, SKILLS_BY_ID, SKILL_ORDER } from '../src/config/sk
 // sweep below asserts the colour space is well-formed + colorMult/survivalHpBonus are monotone with an EXACT
 // identity at level 0 (the byte-identity pin) — the same guardrail every config table gets.
 import { COLOR_IDS, COLORS, PER_LEVEL, SURVIVAL_HP_PER_LEVEL, colorMult, survivalHpBonus } from '../src/config/colors.js'
+// Item-rarity-forge PURE table: the RARITIES tier table + the rarity math (§15). Node-importable (config/rarity.js
+// imports only a TYPE from config/weapons.js — pure data + two pure functions) — a successful import re-proves its
+// purity, and the §15 sweep below asserts the tier space is well-formed, damageMult is monotone with an EXACT
+// identity at `common`, foldRarity never weakens, and the extended foldWeaponAffix(powerMult) is identity@1.
+import { RARITY_IDS, RARITIES, DEPTH_BIAS, EXTRA_AFFIX_POWER, rollRarityId, foldRarity } from '../src/config/rarity.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -1171,6 +1176,10 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
     // Kind-specific params (GameScene._buyShopItem reads these — assert the right one is present + sane).
     if (it.kind === 'weapon' && (typeof it.weaponId !== 'string' || !it.weaponId)) fail(`shop item ${it.id}: 'weapon' needs a weaponId`)
     if (it.kind === 'heal' && !(typeof it.healFrac === 'number' && it.healFrac > 0)) fail(`shop item ${it.id}: 'heal' needs a healFrac > 0`)
+    // item-rarity-forge §6 (Decision 8) — a 'forge' row needs a known forgeAction ('reroll' | 'upgrade').
+    if (it.kind === 'forge' && it.forgeAction !== 'reroll' && it.forgeAction !== 'upgrade') {
+      fail(`shop item ${it.id}: 'forge' needs forgeAction 'reroll' or 'upgrade' (got "${it.forgeAction}")`)
+    }
   }
 }
 
@@ -1858,6 +1867,133 @@ const totalLevels = BIOME_ORDER.reduce((sum, b) => sum + b.levels, 0)
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 15) RARITY table + the rarity/affix-power folds (item-rarity-forge §6/§7, Decision 1-5, AC1/AC3/AC4/AC11).
+//     An INDEPENDENT proof of the PURE rarity table + the composing folds: the tier space is well-formed
+//     (4 pinned ids, lockstep lookup, numeric tints/weights, boolean extraAffix), `common` is the EXACT
+//     identity (damageMult 1, no extra affix), damageMult is monotone non-decreasing + every >= 1 (never-
+//     weaken), foldRarity is identity@common/null + a schema-preserving never-weaken fold otherwise, and the
+//     extended foldWeaponAffix(w, affix, powerMult) is identity@powerMult=1 + never-weakens@powerMult>1.
+//     Mirrors the §10 affix-fold / §14 colour sweeps — a malformed rarity table fails loudly under node.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 15a) Rarity table well-formed: RARITY_IDS is EXACTLY the 4 tiers (length 4, pinned order); each id
+  // resolves in RARITIES with RARITIES[id].id === id, a non-empty name, a numeric tint, a numeric weight > 0,
+  // and a boolean extraAffix. DEPTH_BIAS / EXTRA_AFFIX_POWER are sane pinned constants. ──
+  const EXPECTED_RARITY_IDS = ['common', 'rare', 'epic', 'legendary']
+  if (!Array.isArray(RARITY_IDS) || RARITY_IDS.length !== 4) fail(`RARITY_IDS must have exactly 4 tiers, got ${RARITY_IDS?.length}`)
+  for (let i = 0; i < EXPECTED_RARITY_IDS.length; i++) {
+    if (RARITY_IDS[i] !== EXPECTED_RARITY_IDS[i]) fail(`RARITY_IDS[${i}] = "${RARITY_IDS[i]}", expected "${EXPECTED_RARITY_IDS[i]}" (the pinned order)`)
+  }
+  for (const id of RARITY_IDS) {
+    const r = RARITIES[id]
+    if (!r) fail(`rarity id "${id}" has no RARITIES entry (lookup drift)`)
+    if (r.id !== id) fail(`RARITIES["${id}"].id = "${r.id}" (lookup not in lockstep)`)
+    if (typeof r.name !== 'string' || !r.name) fail(`rarity ${id}: missing name`)
+    if (typeof r.tint !== 'number') fail(`rarity ${id}: tint must be a number (0xRRGGBB)`)
+    if (!(typeof r.weight === 'number' && r.weight > 0)) fail(`rarity ${id}: weight must be a number > 0`)
+    if (typeof r.extraAffix !== 'boolean') fail(`rarity ${id}: extraAffix must be a boolean`)
+    if (!(typeof r.damageMult === 'number')) fail(`rarity ${id}: damageMult must be a number`)
+  }
+  if (!(DEPTH_BIAS >= 0)) fail(`DEPTH_BIAS must be ≥ 0, got ${DEPTH_BIAS}`)
+  if (!(EXTRA_AFFIX_POWER >= 1)) fail(`EXTRA_AFFIX_POWER must be ≥ 1 (never weakens an affix), got ${EXTRA_AFFIX_POWER}`)
+
+  // ── 15b) common is the EXACT identity tier (the byte-identity pin): damageMult === 1 EXACTLY, extraAffix false. ──
+  if (RARITIES.common.damageMult !== 1) fail(`RARITIES.common.damageMult = ${RARITIES.common.damageMult}, expected EXACTLY 1 (the identity tier)`)
+  if (RARITIES.common.extraAffix !== false) fail(`RARITIES.common.extraAffix must be false (the identity tier)`)
+
+  // ── 15c) damageMult monotone non-decreasing along RARITY_IDS, every >= 1 (never-weaken). ──
+  let prevRarMult = -Infinity
+  for (const id of RARITY_IDS) {
+    const m = RARITIES[id].damageMult
+    if (!(m >= 1)) fail(`rarity ${id}: damageMult ${m} must be >= 1 (never-weaken)`)
+    if (m < prevRarMult) fail(`rarity damageMult dipped at "${id}" (${m} < ${prevRarMult})`)
+    prevRarMult = m
+  }
+
+  // ── 15d) foldRarity identity@common/null + a schema-preserving never-weaken fold otherwise. For every
+  // weapon: foldRarity(w, common) === w AND foldRarity(w, null) === w (same ref, no clone). For every
+  // weapon × every NON-common tier: a NEW object, the schema preserved (type, swings length, projectile iff
+  // ranged), no swing damage below the input, and the input weapon UNCHANGED (no mutation). ──
+  for (const w of WEAPON_ORDER) {
+    if (foldRarity(w, RARITIES.common) !== w) fail(`foldRarity(${w.id}, common) must return the SAME weapon ref (identity)`)
+    if (foldRarity(w, null) !== w) fail(`foldRarity(${w.id}, null) must return the SAME weapon ref (identity)`)
+    const baseDmgs = w.swings.map((s) => s.damage)
+    const baseProjDmg = w.projectile ? w.projectile.damage : null
+    for (const id of RARITY_IDS) {
+      if (id === 'common') continue
+      const tier = RARITIES[id]
+      const folded = foldRarity(w, tier)
+      if (folded === w) fail(`foldRarity(${w.id}, ${id}) must return a NEW object (no mutation)`)
+      if (folded.type !== w.type) fail(`foldRarity(${w.id}, ${id}): type changed`)
+      if (!Array.isArray(folded.swings) || folded.swings.length !== w.swings.length) fail(`foldRarity(${w.id}, ${id}): swings table malformed`)
+      if (w.type === 'ranged' && !folded.projectile) fail(`foldRarity(${w.id}, ${id}): ranged weapon lost its projectile`)
+      if (w.type !== 'ranged' && folded.projectile) fail(`foldRarity(${w.id}, ${id}): melee weapon gained a projectile`)
+      if (folded.rarityId !== id) fail(`foldRarity(${w.id}, ${id}): must stamp rarityId`)
+      folded.swings.forEach((s, i) => {
+        if (s.damage < baseDmgs[i]) fail(`foldRarity(${w.id}, ${id}): swing ${i} damage ${s.damage} < base ${baseDmgs[i]} (never-weaken)`)
+      })
+      if (baseProjDmg !== null && folded.projectile.damage < baseProjDmg) fail(`foldRarity(${w.id}, ${id}): projectile damage dropped below base`)
+    }
+    // Non-mutation: the base weapon's swing + projectile damages are UNCHANGED after all the folds.
+    w.swings.forEach((s, i) => {
+      if (s.damage !== baseDmgs[i]) fail(`foldRarity MUTATED ${w.id} base swing ${i} damage (aliasing bug)`)
+    })
+    if (baseProjDmg !== null && w.projectile.damage !== baseProjDmg) fail(`foldRarity MUTATED ${w.id} base projectile damage (aliasing bug)`)
+  }
+
+  // ── 15e) Extended foldWeaponAffix(w, affix, powerMult): identity@powerMult=1 (deep-equals the legacy two-arg
+  // fold — the additive-identity pin for the extended signature) AND never-weakens@powerMult>1 (each baked
+  // affix damage/lifesteal/tick contribution >= the powerMult=1 value). Swept over every weapon × every affix. ──
+  for (const w of WEAPON_ORDER) {
+    for (const affix of WEAPON_AFFIX_ORDER) {
+      const legacy = foldWeaponAffix(w, affix) // the two-arg fold (pre-change behaviour).
+      const ident = foldWeaponAffix(w, affix, 1) // the extended fold at the identity powerMult.
+      if (!deepEqual(legacy, ident)) fail(`foldWeaponAffix(${w.id}, ${affix.id}, 1) must deep-equal the legacy two-arg fold (the identity pin)`)
+      // powerMult > 1 never weakens: each swing damage, the projectile damage, lifesteal, and a DoT tickDmg
+      // must be >= the powerMult=1 value (a stronger affix only ever helps — the rarity power bump).
+      const strong = foldWeaponAffix(w, affix, EXTRA_AFFIX_POWER)
+      strong.swings.forEach((s, i) => {
+        if (s.damage < ident.swings[i].damage) fail(`foldWeaponAffix(${w.id}, ${affix.id}, ${EXTRA_AFFIX_POWER}): swing ${i} damage weakened (${s.damage} < ${ident.swings[i].damage})`)
+      })
+      if (ident.projectile && strong.projectile.damage < ident.projectile.damage) fail(`foldWeaponAffix(${w.id}, ${affix.id}): power-bumped projectile damage weakened`)
+      if (strong.affixLifestealFrac < ident.affixLifestealFrac) fail(`foldWeaponAffix(${w.id}, ${affix.id}): power-bumped lifesteal weakened`)
+      if (strong.status && ident.status && strong.status.tickDmg !== undefined && strong.status.tickDmg < (ident.status.tickDmg ?? 0)) {
+        fail(`foldWeaponAffix(${w.id}, ${affix.id}): power-bumped status tickDmg weakened`)
+      }
+    }
+  }
+
+  // ── 15f) rollRarityId is deterministic + in-range, and depth biases toward higher rarity (a property pin,
+  // not a tight numeric pin — KISS): over a fixed sample the legendary count at high depth >= at depth 0. ──
+  const sampleRarity = (depth, seed) => {
+    let s = seed >>> 0
+    const rng = () => {
+      s = (s * 1664525 + 1013904223) >>> 0
+      return s / 4294967296
+    }
+    let legendary = 0
+    for (let i = 0; i < 4000; i++) {
+      const id = rollRarityId(rng, depth)
+      if (!RARITY_IDS.includes(id)) fail(`rollRarityId returned an unknown id "${id}"`)
+      if (id === 'legendary') legendary++
+    }
+    return legendary
+  }
+  // Determinism: the SAME RNG seed + depth replays the same draw (a single draw equality check).
+  {
+    const mk = () => {
+      let s = 0xc0ffee >>> 0
+      return () => {
+        s = (s * 1664525 + 1013904223) >>> 0
+        return s / 4294967296
+      }
+    }
+    if (rollRarityId(mk(), 5) !== rollRarityId(mk(), 5)) fail('rollRarityId is not deterministic for the same RNG seed + depth')
+  }
+  if (sampleRarity(20, 0x1234) < sampleRarity(0, 0x1234)) fail('rollRarityId depth bias regressed (deeper depth must not yield FEWER legendaries)')
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${BIOME_ORDER.length} biomes → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -1877,6 +2013,7 @@ console.log(
     `${MUTATIONS.length} mutations well-formed + identity-safe/never-weaken (build-&-replay AC1/AC6); ` +
     `${BOSS_CELL_TIERS.length} boss-cell tiers (curve identity@t0 + whole-run monotonic ∀ tier, AC42/AC43) + ` +
     `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11); ` +
-    `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged`,
+    `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged; ` +
+    `${RARITY_IDS.length} rarity tiers (common identity + monotone damageMult, fold never-weaken + powerMult identity@1)`,
 )
 process.exit(0)

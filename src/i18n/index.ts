@@ -27,6 +27,7 @@ export type Locale = 'en' | 'zh-CN'
 export type Category =
   | 'weapon'
   | 'affix'
+  | 'rarity'
   | 'mutation'
   | 'skill'
   | 'boss'
