@@ -5,6 +5,7 @@ import type { MetaStateInstance } from '../core/MetaState.js'
 import { UPGRADES } from '../config/upgrades.js'
 import { MAX_TIER } from '../config/tiers.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
+import { RUNES } from '../config/runes.js'
 import { dailySeed } from '../util/rng.js'
 import { GameScene } from './GameScene.js'
 import { Sound } from '../audio/Sound.js'
@@ -48,6 +49,14 @@ const COL_MID = 430 // px — Lv X/Y · tier count · kind · EN locale label ·
 const COL_AUX = 580 // px — cost · status · ZH locale label · tier name—desc.
 const COL_DESC = 720 // px — the one-line effect / description / hint.
 const CURSOR_COLOR = 0x2c3e50 // the highlight bar behind the selected row.
+// ── Scroll band (hub-scroll fix) ── the list outgrew 720p (29 rows: LANGUAGE + TIER + 12 upgrades + 13
+// blueprints + SEEDED RUN + START RUN), pushing the default-selected START RUN row off-screen so the
+// keyboard "looked dead". The list now SCROLLS to keep the cursor row visible. LIST_BOTTOM clears the
+// footer (at DESIGN_HEIGHT-40). VISIBLE_ROWS counts slots 0..VISIBLE_ROWS-1; the last slot's highlight-bar
+// bottom must clear the footer top: LIST_TOP + (VISIBLE_ROWS-1)*ROW_H + (ROW_H-6)/2 ≤ DESIGN_HEIGHT-40-9.
+// At 720p: 164 + 15*30 + 12 = 626 ≤ 671 ✓ — a future ROW_H bump must re-check this.
+const LIST_BOTTOM = DESIGN_HEIGHT - 56 // px — bottom of the scroll band.
+const VISIBLE_ROWS = Math.floor((LIST_BOTTOM - LIST_TOP) / ROW_H) // ≈ 16 at 720p / ROW_H 30.
 
 export class HubScene extends Phaser.Scene {
   private meta!: MetaStateInstance
@@ -66,6 +75,7 @@ export class HubScene extends Phaser.Scene {
   private tierRowIndex!: number
   private upgradeRowStart!: number // index of the FIRST upgrade row.
   private blueprintRowStart!: number // index of the FIRST blueprint row.
+  private runeRowStart!: number // F8 traversal-runes — index of the FIRST rune row (after the blueprint rows).
   private seedRowIndex!: number
   private startRowIndex!: number
   private rowCount!: number
@@ -79,8 +89,20 @@ export class HubScene extends Phaser.Scene {
   private tierCells!: Phaser.GameObjects.Text[] // [name, count, name—desc] @ COL_NAME/MID/AUX.
   private rowTexts!: Phaser.GameObjects.Text[][] // per upgrade: [name, lv, cost, desc] @ NAME/MID/AUX/DESC.
   private blueprintTexts!: Phaser.GameObjects.Text[][] // per blueprint: [name, kind, status, desc].
+  private runeTexts!: Phaser.GameObjects.Text[][] // F8 traversal-runes — per rune: [name, kind, status, desc].
   private seedCells!: Phaser.GameObjects.Text[] // [name, value, hint] @ COL_NAME/MID/DESC (AUX unused).
   private startRowText!: Phaser.GameObjects.Text
+  // ── Scroll + mouse (hub-scroll fix) ──
+  private scrollTop!: number // index of the FIRST visible row (cursor-driven; recomputed in _render).
+  // A VIEW (aliases, not copies) over the per-row cell arrays above, indexed by row index — so fill() and the
+  // _render positioning pass mutate the SAME Text objects (no second array to drift). Drives scrolling + zones.
+  private rowObjects!: Phaser.GameObjects.Text[][]
+  private rowZones!: Phaser.GameObjects.Zone[] // one invisible full-width hit zone per row (hover/click).
+  private scrollUpHint!: Phaser.GameObjects.Text // ▲ shown when rows exist above the band.
+  private scrollDownHint!: Phaser.GameObjects.Text // ▼ shown when rows exist below the band.
+  // False until one frame after create() (time.delayedCall(0)); gates _clickRow so the pointerdown that ENTERED
+  // the Hub (Title/GameOver advance on pointerdown) can't be mis-read as a Hub click on the create-frame.
+  private inputArmed!: boolean
 
   static parseSeed: (raw: unknown) => number | null
   static todayKey: () => string
@@ -108,7 +130,9 @@ export class HubScene extends Phaser.Scene {
     this.tierRowIndex = 1
     this.upgradeRowStart = 2
     this.blueprintRowStart = 2 + UPGRADES.length
-    this.seedRowIndex = 2 + UPGRADES.length + BLUEPRINTS.length // the SEEDED RUN row.
+    // F8 traversal-runes — the RUNE rows sit AFTER the blueprint rows (read-only, generic — same row scheme).
+    this.runeRowStart = 2 + UPGRADES.length + BLUEPRINTS.length
+    this.seedRowIndex = 2 + UPGRADES.length + BLUEPRINTS.length + RUNES.length // the SEEDED RUN row (now after the rune rows).
     this.startRowIndex = this.seedRowIndex + 1 // the START RUN row (the last).
     this.rowCount = this.startRowIndex + 1
     this.cursor = this.startRowIndex // start on START RUN so a player who just wants to play hits one key.
@@ -161,18 +185,62 @@ export class HubScene extends Phaser.Scene {
       const y = LIST_TOP + (this.blueprintRowStart + i) * ROW_H
       this.blueprintTexts.push([COL_NAME, COL_MID, COL_AUX, COL_DESC].map((x) => makeCell(x, y, '#8b949e')))
     }
+    // ── One cell-set per RUNE row (F8 traversal-runes §7, AC5) ── read-only (banked in-run via a DROP, not bought
+    // here); colored violet (owned) / grey (locked) in _render. Rendered GENERICALLY off RUNES (no per-rune code —
+    // the same pattern as the blueprint rows; reuses the blueprint rows' pixel-anchored COL_* x-positions).
+    this.runeTexts = []
+    for (let i = 0; i < RUNES.length; i++) {
+      const y = LIST_TOP + (this.runeRowStart + i) * ROW_H
+      this.runeTexts.push([COL_NAME, COL_MID, COL_AUX, COL_DESC].map((x) => makeCell(x, y, '#8b949e')))
+    }
     // ── SEEDED RUN row (Decision 71) ── shows RANDOM or the pinned hex seed; Buy toggles/edits it.
     const seedY = LIST_TOP + this.seedRowIndex * ROW_H
     this.seedCells = [makeCell(COL_NAME, seedY, '#f4d03f'), makeCell(COL_MID, seedY, '#f4d03f'), makeCell(COL_DESC, seedY, '#f4d03f')]
 
+    // START RUN sits in its row slot like every other row (the old +12 nudge is dropped — _render now
+    // positions every row uniformly off scrollTop, and the highlight bar frames it at the same y).
     this.startRowText = this.add
-      .text(DESIGN_WIDTH / 2, LIST_TOP + this.startRowIndex * ROW_H + 12, t('hub.start'), {
+      .text(DESIGN_WIDTH / 2, LIST_TOP + this.startRowIndex * ROW_H, t('hub.start'), {
         fontFamily: UI_FONT,
         fontSize: '24px',
         color: '#58d68d',
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
+
+    // ── Unified row view (scroll/mouse) ── index→Text-cells, ALIASING the per-row arrays above (not copies).
+    this.rowObjects = []
+    this.rowObjects[this.languageRowIndex] = this.languageCells
+    this.rowObjects[this.tierRowIndex] = this.tierCells
+    for (let i = 0; i < UPGRADES.length; i++) this.rowObjects[this.upgradeRowStart + i] = this.rowTexts[i]
+    for (let i = 0; i < BLUEPRINTS.length; i++) this.rowObjects[this.blueprintRowStart + i] = this.blueprintTexts[i]
+    for (let i = 0; i < RUNES.length; i++) this.rowObjects[this.runeRowStart + i] = this.runeTexts[i] // F8 traversal-runes.
+    this.rowObjects[this.seedRowIndex] = this.seedCells
+    this.rowObjects[this.startRowIndex] = [this.startRowText]
+
+    // ── One invisible full-width hit zone per row (mouse) ── geometry matches cursorBar (centered, DESIGN_WIDTH-240
+    // wide); the y is set per-row in _render. A Zone's default origin is 0.5 and no-arg setInteractive() builds a
+    // centered hit area from width/height, so the clickable band lines up with the highlight bar (the drop-zone idiom).
+    this.rowZones = []
+    for (let r = 0; r < this.rowCount; r++) {
+      const zone = this.add.zone(DESIGN_WIDTH / 2, 0, DESIGN_WIDTH - 240, ROW_H).setInteractive()
+      zone.on('pointerover', () => this._hoverRow(r)) // hover → move highlight to this row.
+      zone.on('pointerdown', () => this._clickRow(r)) // click → select + confirm this row.
+      this.rowZones.push(zone)
+    }
+
+    // ── Scroll affordance ── ▲/▼ at the right edge (clear of the ~1120 desc edge), shown when more rows exist.
+    const hintStyle = { fontFamily: UI_FONT, fontSize: '16px', color: '#8b949e' }
+    this.scrollUpHint = this.add.text(DESIGN_WIDTH - 60, LIST_TOP, '▲', hintStyle).setOrigin(0.5).setVisible(false)
+    this.scrollDownHint = this.add.text(DESIGN_WIDTH - 60, LIST_BOTTOM, '▼', hintStyle).setOrigin(0.5).setVisible(false)
+
+    // Cursor-driven scroll starts at the top; _render nudges it so the (default START RUN) cursor is visible.
+    this.scrollTop = 0
+    // Arm clicks one frame late so the entering pointerdown can't fire a Hub click (see field doc).
+    this.inputArmed = false
+    this.time.delayedCall(0, () => {
+      this.inputArmed = true
+    })
 
     this._render()
 
@@ -185,6 +253,29 @@ export class HubScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-ENTER', () => this._confirm())
     // ESC → Title (main screen) — parity with GameScene (.once; Hub tears down).
     this.input.keyboard!.once('keydown-ESC', () => this.scene.start('Title'))
+
+    // ── Mouse wheel ── reduced to ONE step per event (Math.sign) so a high-res trackpad stream doesn't
+    // multi-jump; routes through _move so the cursor (the single selection source) scrolls with the wheel.
+    this.input.on('wheel', (_p: Phaser.Input.Pointer, _o: Phaser.GameObjects.GameObject[], _dx: number, dy: number) => {
+      if (dy !== 0) this._move(Math.sign(dy))
+    })
+  }
+
+  // Hover → move the highlight to this row (only on a real change, like _move). Pointer-driven; no confirm.
+  _hoverRow(i: number) {
+    if (i !== this.cursor) {
+      this.cursor = i
+      this.sfx.uiMove()
+      this._render()
+    }
+  }
+
+  // Click → select this row + confirm it (reuses _confirm verbatim). Gated until inputArmed so the press that
+  // entered the Hub can't fire a click on the create-frame.
+  _clickRow(i: number) {
+    if (!this.inputArmed) return
+    this.cursor = i
+    this._confirm()
   }
 
   // Move the cursor (clamped to the row range) + re-render so the highlight + affordability refresh.
@@ -238,6 +329,10 @@ export class HubScene extends Phaser.Scene {
     }
     // BLUEPRINT rows are read-only (banked in a run, not bought here — Decision 7): a confirm on one is a no-op.
     if (this.cursor >= this.blueprintRowStart && this.cursor < this.blueprintRowStart + BLUEPRINTS.length) {
+      return
+    }
+    // F8 traversal-runes — RUNE rows are read-only too (earned by an in-run DROP, banked at run end): no-op.
+    if (this.cursor >= this.runeRowStart && this.cursor < this.runeRowStart + RUNES.length) {
       return
     }
     const upg = UPGRADES[this.cursor - this.upgradeRowStart] // the upgrade rows are offset by the tier row above.
@@ -346,6 +441,18 @@ export class HubScene extends Phaser.Scene {
       fill(this.blueprintTexts[i], [bpName, t('kind.' + bp.kind), status, tDesc('blueprint', bp.id, bp.desc)], unlocked ? '#58d68d' : '#8b949e')
     }
 
+    // ── RUNE rows (F8 traversal-runes §7, AC5) ── rendered GENERICALLY off RUNES (no per-rune code): name · kind
+    // ('world') · OWNED/LOCKED. Violet when owned, grey when locked. Read-only (earned by an in-run DROP, banked
+    // at run end — NOT bought here). A default save shows all LOCKED (the identity readout). Columns reuse the
+    // blueprint rows' pixel-anchored COL_* x-positions (CJK fallback isn't monospaced — keep the math identical).
+    for (let i = 0; i < RUNES.length; i++) {
+      const r = RUNES[i]
+      const owned = this.meta.isRuneUnlocked(r.id)
+      const runeName = `${t('hub.runePrefix')} ${tName('rune', r.id, r.name)}`
+      const status = owned ? t('hub.unlocked') : t('hub.locked')
+      fill(this.runeTexts[i], [runeName, t('kind.world'), status, tDesc('rune', r.id, r.desc)], owned ? '#a569bd' : '#8b949e')
+    }
+
     // ── SEEDED RUN row (Decision 71; F7 §2b Decision 4) ── one of three states: DAILY (today's deterministic
     // date→seed, shown as a DAILY-tagged hex id so it can be typed back later to replay), a typed PINNED hex
     // run id, or RANDOM (a fresh entropy seed each run). The hint names the next cycle action for the state.
@@ -363,10 +470,25 @@ export class HubScene extends Phaser.Scene {
     }
     fill(this.seedCells, [t('hub.seededRun'), seedText, seedHint], '#f4d03f')
 
-    // Move the highlight bar behind the selected row. START RUN is the synthetic last (centered) row; the
-    // SEEDED RUN row + the upgrade rows are left-aligned at their list y.
-    const selY = this.cursor === this.startRowIndex ? this.startRowText.y : LIST_TOP + this.cursor * ROW_H
-    this.cursorBar.y = selY
+    // ── Scroll (hub-scroll fix) ── keep the cursor row in the visible band with a MINIMAL nudge, so the view
+    // is stable while moving inside the band and only scrolls at the edges. scrollTop = first visible row.
+    if (this.cursor < this.scrollTop) this.scrollTop = this.cursor
+    else if (this.cursor >= this.scrollTop + VISIBLE_ROWS) this.scrollTop = this.cursor - VISIBLE_ROWS + 1
+    this.scrollTop = Phaser.Math.Clamp(this.scrollTop, 0, Math.max(0, this.rowCount - VISIBLE_ROWS))
+
+    // Position every row from its index relative to scrollTop; hide + disable hit-testing on rows outside the band.
+    for (let r = 0; r < this.rowCount; r++) {
+      const screenY = LIST_TOP + (r - this.scrollTop) * ROW_H
+      const visible = r >= this.scrollTop && r < this.scrollTop + VISIBLE_ROWS
+      for (const cell of this.rowObjects[r]) cell.setY(screenY).setVisible(visible)
+      this.rowZones[r].setY(screenY)
+      if (this.rowZones[r].input) this.rowZones[r].input!.enabled = visible
+    }
+    // Highlight bar tracks the cursor (always within the band by construction, so always on-screen).
+    this.cursorBar.y = LIST_TOP + (this.cursor - this.scrollTop) * ROW_H
+    // Scroll affordance: ▲ when rows exist above, ▼ when rows exist below the band.
+    this.scrollUpHint.setVisible(this.scrollTop > 0)
+    this.scrollDownHint.setVisible(this.scrollTop + VISIBLE_ROWS < this.rowCount)
   }
 }
 

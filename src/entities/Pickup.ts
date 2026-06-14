@@ -2,7 +2,7 @@ import Phaser from 'phaser'
 import { RARITIES } from '../config/rarity.js'
 import type { RarityId } from '../config/rarity.js'
 
-type PickupKind = 'cell' | 'gold' | 'scroll' | 'weapon' | 'heal' | 'skill' | 'blueprint'
+type PickupKind = 'cell' | 'gold' | 'scroll' | 'weapon' | 'heal' | 'skill' | 'blueprint' | 'rune'
 
 // Per-pickup mutable state stored on the rect (mutated on acquire — never re-allocated).
 interface PickupState {
@@ -15,6 +15,7 @@ interface PickupState {
   scrollId: string | null
   skillId: string | null
   blueprintId: string | null // meta-progression §6.8 — the blueprint id a 'blueprint' pickup carries (null = not one).
+  runeId: string | null // F8 traversal-runes §6 — the rune id a 'rune' pickup carries (null = not one).
   goldAmount: number
   healFrac: number
 }
@@ -30,6 +31,7 @@ interface PickupMeta {
   scrollId?: string | null
   skillId?: string | null
   blueprintId?: string | null // meta-progression §6.8 — the blueprint id for a 'blueprint' pickup.
+  runeId?: string | null // F8 traversal-runes §6 — the rune id for a 'rune' pickup.
   amount?: number
   healFrac?: number
 }
@@ -62,6 +64,7 @@ const PICKUP_COLORS = {
   heal: 0x2ecc71, // green — §6.9 (Decision 72): a fountain/heart that restores HP on touch.
   skill: 0xff9f43, // orange — skills slice: a skill pickup (the loadout layer; distinct from weapon white).
   blueprint: 0x5dade2, // sky-blue — meta-progression §6.8: a blueprint drop (a special run-pool unlock find).
+  rune: 0x9b59b6, // violet — F8 traversal-runes §6: a rune drop (a permanent world-unlock find; distinct hue).
 }
 const PICKUP_SIZE = 16 // px — a small square pickup (programmer-art primitive).
 const ARC_VELOCITY_Y = -260 // px/s — the upward pop on spawn (gravity pulls it back to settle).
@@ -95,7 +98,7 @@ export class PickupPool {
       body.setSize(PICKUP_SIZE, PICKUP_SIZE, true)
       // Per-pickup state, mutated on acquire (never re-allocated → no per-pickup GC). weaponAffixId is the
       // Enrichment round-2 weapon affix rolled at placement (null = a plain weapon — the identity).
-      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, rarityId: null, scrollId: null, skillId: null, blueprintId: null, goldAmount: 0, healFrac: 0 }
+      rect.pk = { active: false, id: 0, kind: null, weaponId: null, weaponAffixId: null, rarityId: null, scrollId: null, skillId: null, blueprintId: null, runeId: null, goldAmount: 0, healFrac: 0 }
       rect.pickupRef = rect.pk // back-ref so the overlap callback resolves the pickup from its body.
       this._disable(rect)
       this._items.push(rect)
@@ -145,6 +148,7 @@ export class PickupPool {
     pk.scrollId = meta.scrollId ?? null
     pk.skillId = meta.skillId ?? null // skills slice — the skill id for a 'skill' pickup (null = not a skill).
     pk.blueprintId = meta.blueprintId ?? null // meta-progression §6.8 — the blueprint id for a 'blueprint' pickup.
+    pk.runeId = meta.runeId ?? null // F8 traversal-runes §6 — the rune id for a 'rune' pickup (null = not a rune).
     pk.goldAmount = kind === 'gold' ? (meta.amount ?? GOLD_AMOUNT) : 0
     pk.healFrac = kind === 'heal' ? (meta.healFrac ?? HEAL_PICKUP_FRAC) : 0 // §6.9 — fraction of max HP a heal restores.
     return rect
@@ -205,6 +209,7 @@ export class PickupPool {
     rect.pk.scrollId = null
     rect.pk.skillId = null
     rect.pk.blueprintId = null
+    rect.pk.runeId = null
     rect.pk.healFrac = 0
     rect.setStrokeStyle() // item-rarity-forge §6 (Decision 7) — clear a rarity border so a recycled rect is clean.
     const body = rect.body as Phaser.Physics.Arcade.Body

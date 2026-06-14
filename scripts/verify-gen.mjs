@@ -36,7 +36,12 @@ import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
 import { generateLevel, TILE, TILE_SIZE, canReachPlatform, canReachStep, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS, CORNER_OPEN_ROWS, MAX_GAP, bodyFits, bodyStandClear, CLEAR_COLS, CLEAR_ROWS, APEX_H } from '../src/world/LevelGenerator.js'
-import { PRISON, BIOME_ORDER, BIOMES, START_BIOME_ID, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
+import { PRISON, BIOME_ORDER, BIOMES, START_BIOME_ID, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX, runeOpenExits } from '../src/config/biomes.js'
+// F8 traversal-runes PURE config (§8): the rune catalog + the chance pins. Node-importable (no Phaser) — a
+// successful import RE-PROVES its purity (the convention every config table satisfies). The §14 sweep below
+// asserts the catalog is well-formed + DISJOINT from blueprints + the chance bounds, the requiresRune gates are
+// well-formed (default never gated, no orphans), and the RUNE-LESS graph stays fully traversable + monotone.
+import { RUNES, RUNES_BY_ID, RUNE_IDS, RUNE_PICKUP_CHANCE, TREASURE_DOOR_CHANCE } from '../src/config/runes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
 // modules satisfy. The Bosses phase (§6.6, Decision 64/68) HOISTED the canonical enemy specs to the
@@ -819,63 +824,94 @@ const MAXD = 60 // a generous run length the curve must stay monotone over (far 
 // AC1/AC4), the graph is ACYCLIC, every node is REACHABLE from START_BIOME_ID, and BIOME_ORDER is a valid
 // root→boss path (so the default-path walks below are real paths). An INDEPENDENT proof: re-derived from the
 // real config, so a dangling edge / mis-tiered sibling / unreachable biome fails LOUDLY here, not at runtime.
-{
+// ── checkGraphSoundness(exitsOf, label, { requireChoice }) (F4 §4b'; F8 Decision 10c — parameterised) ── the
+// graph soundness proof, factored to take an `exitsOf(biome) → string[]` accessor + a `label` for messages + a
+// `requireChoice` flag. The FULL graph re-uses it with exitsOf = b.exits + requireChoice TRUE (the ≥2-exits AC).
+// The RUNE-LESS view (F8 Decision 10c / §8.3) re-uses it with exitsOf = runeLessExits + requireChoice FALSE — the
+// CARVE-OUT the reviewer mandated: on the rune-less view Sewers collapses to ['catacombs'] and NO node has ≥2
+// exits, so the ≥2-exits check (step iii) MUST be EXCLUDED from the rune-less re-run (it stays ONLY on the FULL
+// graph). Every OTHER soundness step (edges resolve, one boss terminal, ≥1 exit per non-boss node, ACYCLIC, all
+// reachable, BIOME_ORDER a valid path) is re-run on BOTH views.
+function checkGraphSoundness(exitsOf, label, { requireChoice, requireAllReachable = true }) {
   const allIds = Object.keys(BIOMES)
   // (i) every exits array resolves to a known biome (no dangling edge).
   for (const b of Object.values(BIOMES)) {
-    if (!Array.isArray(b.exits)) fail(`graph: biome ${b.id} has no exits array`)
-    for (const eid of b.exits) {
-      if (!BIOMES[eid]) fail(`graph: biome ${b.id} exits to unknown biome "${eid}" (dangling edge)`)
+    const exits = exitsOf(b)
+    if (!Array.isArray(exits)) fail(`graph (${label}): biome ${b.id} has no exits array`)
+    for (const eid of exits) {
+      if (!BIOMES[eid]) fail(`graph (${label}): biome ${b.id} exits to unknown biome "${eid}" (dangling edge)`)
     }
   }
   // (ii) exactly ONE boss terminal, with EMPTY exits; every non-boss node has ≥1 exit (no dead end before boss).
   const terminals = Object.values(BIOMES).filter((b) => b.endsInBoss === true)
-  if (terminals.length !== 1) fail(`graph: expected exactly 1 boss terminal (endsInBoss), found ${terminals.length}`)
-  if (terminals[0].exits.length !== 0) fail(`graph: the boss terminal ${terminals[0].id} must have empty exits (got ${terminals[0].exits.length})`)
+  if (terminals.length !== 1) fail(`graph (${label}): expected exactly 1 boss terminal (endsInBoss), found ${terminals.length}`)
+  if (exitsOf(terminals[0]).length !== 0) fail(`graph (${label}): the boss terminal ${terminals[0].id} must have empty exits (got ${exitsOf(terminals[0]).length})`)
   for (const b of Object.values(BIOMES)) {
-    if (!b.endsInBoss && b.exits.length < 1) fail(`graph: non-boss biome ${b.id} has no exit (a dead end before the boss)`)
+    if (!b.endsInBoss && exitsOf(b).length < 1) fail(`graph (${label}): non-boss biome ${b.id} has no exit (a dead end before the boss)`)
   }
-  // (iii) at least one node offers a REAL choice (≥2 exits) — the 2-way-choice AC (AC1/AC4) would be dead otherwise.
-  if (!Object.values(BIOMES).some((b) => b.exits.length >= 2)) fail('graph: no biome has ≥2 exits (no real 2-way choice exists, AC1/AC4)')
+  // (iii) at least one node offers a REAL choice (≥2 exits) — ONLY on the FULL graph (F8 §8.3 carve-out: the
+  // rune-less view has no ≥2-exit node by construction, since every Sewers sibling beyond exits[0] is gated).
+  if (requireChoice && !Object.values(BIOMES).some((b) => exitsOf(b).length >= 2)) {
+    fail(`graph (${label}): no biome has ≥2 exits (no real 2-way choice exists, AC1/AC4)`)
+  }
   // (iv) ACYCLIC + every node REACHABLE from START_BIOME_ID (DFS; a back-edge to a node on the current stack = a cycle).
-  if (!BIOMES[START_BIOME_ID]) fail(`graph: START_BIOME_ID "${START_BIOME_ID}" is not a known biome`)
+  if (!BIOMES[START_BIOME_ID]) fail(`graph (${label}): START_BIOME_ID "${START_BIOME_ID}" is not a known biome`)
   const visited = new Set()
   const onStack = new Set()
   const dfs = (id) => {
-    if (onStack.has(id)) fail(`graph: cycle detected — back-edge revisits "${id}" on the current path (must be a DAG)`)
+    if (onStack.has(id)) fail(`graph (${label}): cycle detected — back-edge revisits "${id}" on the current path (must be a DAG)`)
     if (visited.has(id)) return
     visited.add(id)
     onStack.add(id)
-    for (const eid of BIOMES[id].exits) dfs(eid)
+    for (const eid of exitsOf(BIOMES[id])) dfs(eid)
     onStack.delete(id)
   }
   dfs(START_BIOME_ID)
-  for (const id of allIds) {
-    if (!visited.has(id)) fail(`graph: biome "${id}" is not reachable from START_BIOME_ID "${START_BIOME_ID}"`)
+  // requireAllReachable (F8 Decision 10c carve-out): the FULL graph asserts EVERY node is reachable (no dead
+  // config). The RUNE-LESS view does NOT — the gated nodes (ossuary/frostworks) are INTENTIONALLY unreachable
+  // rune-less (that IS the rune gate). Step (i)+(ii)+18c(i) already proved no rune-less-REACHABLE node is
+  // stranded (runeLessExits is never empty off the default); demanding ALL nodes be rune-less-reachable would
+  // contradict the gate. So this loop runs ONLY on the full graph.
+  if (requireAllReachable) {
+    for (const id of allIds) {
+      if (!visited.has(id)) fail(`graph (${label}): biome "${id}" is not reachable from START_BIOME_ID "${START_BIOME_ID}"`)
+    }
+  } else {
+    // The boss terminal MUST still be rune-less-reachable (the run must always be COMPLETABLE rune-less — the
+    // load-bearing rune-less traversability guarantee). The full all-reachable check above covers it for 'full'.
+    if (!visited.has(terminals[0].id)) fail(`graph (${label}): the boss terminal "${terminals[0].id}" is NOT reachable rune-less (a rune-less run can never finish)`)
   }
   // (v) BIOME_ORDER is a valid root→boss path through the graph (each consecutive pair an exit; root start; boss end).
-  if (BIOME_ORDER[0].id !== START_BIOME_ID) fail(`graph: BIOME_ORDER must start at START_BIOME_ID (${START_BIOME_ID}), got ${BIOME_ORDER[0].id}`)
-  if (!BIOME_ORDER[BIOME_ORDER.length - 1].endsInBoss) fail('graph: BIOME_ORDER must end on the boss biome')
+  if (BIOME_ORDER[0].id !== START_BIOME_ID) fail(`graph (${label}): BIOME_ORDER must start at START_BIOME_ID (${START_BIOME_ID}), got ${BIOME_ORDER[0].id}`)
+  if (!BIOME_ORDER[BIOME_ORDER.length - 1].endsInBoss) fail(`graph (${label}): BIOME_ORDER must end on the boss biome`)
   for (let i = 1; i < BIOME_ORDER.length; i++) {
-    if (!BIOME_ORDER[i - 1].exits.includes(BIOME_ORDER[i].id)) {
-      fail(`graph: BIOME_ORDER is not a valid path — ${BIOME_ORDER[i].id} ∉ ${BIOME_ORDER[i - 1].id}.exits`)
+    // BIOME_ORDER walks exits[0] at each fork (the default path) — exits[0] is NEVER gated (F8 invariant), so it
+    // is a valid path on BOTH the full AND the rune-less view (the additive-identity guarantee, re-proven here).
+    if (!exitsOf(BIOMES[BIOME_ORDER[i - 1].id]).includes(BIOME_ORDER[i].id)) {
+      fail(`graph (${label}): BIOME_ORDER is not a valid path — ${BIOME_ORDER[i].id} ∉ ${BIOME_ORDER[i - 1].id} exits`)
     }
   }
 }
 
+// The FULL graph (all runes owned — today's BIOMES exits) — the existing proof, UNCHANGED, with requireChoice ON.
+checkGraphSoundness((b) => b.exits, 'full', { requireChoice: true })
+
 // ── enumeratePaths() (F4 Decision 10.2) ── every SIMPLE path from START_BIOME_ID to the boss terminal (the DAG
 // is tiny — full enumeration is cheap). Returns a list of id-arrays, each a complete root→boss route. The
 // acyclicity proven above guarantees this terminates. Used by the per-path monotonicity walks below.
-function enumeratePaths() {
+// F8 (Decision 10c): `exitsOf(biome) → string[]` is parameterised so the same enumeration runs over the FULL
+// graph (b.exits) AND the rune-less filtered view (runeLessExits) — proving BOTH yield ≥1 root→boss path.
+function enumeratePaths(exitsOf = (b) => b.exits) {
   const out = []
   const walk = (id, acc) => {
     const node = BIOMES[id]
     const next = [...acc, id]
-    if (node.endsInBoss === true || node.exits.length === 0) {
+    const exits = exitsOf(node)
+    if (node.endsInBoss === true || exits.length === 0) {
       out.push(next)
       return
     }
-    for (const eid of node.exits) walk(eid, next)
+    for (const eid of exits) walk(eid, next)
   }
   walk(START_BIOME_ID, [])
   return out
@@ -2322,6 +2358,115 @@ const ALL_PATHS = enumeratePaths()
   if (explosive.status != null) fail(`BARREL_FLAVOURS.explosive.status must be undefined/null (pure damage), got ${JSON.stringify(explosive.status)}`)
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 18) TRAVERSAL RUNES — the rune catalog + the requiresRune gates + the RUNE-LESS graph proof (F8 traversal-
+//     runes §8, Decision 9/10, AC7/AC8). An INDEPENDENT proof of the PURE rune catalog (well-formed, DISJOINT
+//     from blueprints, chance bounds) + the biome-graph rune gates (keys ∈ exits, values ∈ RUNES, exits[0]
+//     never gated, no orphans) + the load-bearing STRENGTHENING: the RUNE-LESS (default) graph stays fully
+//     traversable to the boss + tier-monotone + difficulty-monotone (the existing soundness + enumeratePaths +
+//     walkPath re-run on the filtered view), with the §8.3 CARVE-OUT (the ≥2-exits check is EXCLUDED from the
+//     rune-less re-run — see checkGraphSoundness({ requireChoice:false })). The FULL-graph proof above is
+//     UNCHANGED + still passes. So both extremes — rune-less (the additive identity) and all-runes (today) — are
+//     proven traversable + monotone.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 18a) Rune catalog well-formedness + DISJOINTNESS from blueprints + chance bounds (Decision 10a) ──
+  if (!Array.isArray(RUNES) || RUNES.length === 0) fail('RUNES is empty (F8 — the unlock needs content)')
+  if (Object.keys(RUNES_BY_ID).length !== RUNES.length) fail('RUNES_BY_ID size != RUNES length (duplicate/missing id)')
+  if (!Array.isArray(RUNE_IDS) || RUNE_IDS.length !== RUNES.length) fail('RUNE_IDS length != RUNES length')
+  for (let i = 0; i < RUNES.length; i++) {
+    const r = RUNES[i]
+    if (typeof r.id !== 'string' || !r.id) fail(`rune catalog: entry ${i} missing id`)
+    if (typeof r.name !== 'string' || !r.name) fail(`rune ${r.id}: missing name`)
+    if (typeof r.desc !== 'string' || !r.desc) fail(`rune ${r.id}: missing desc`)
+    if (RUNE_IDS[i] !== r.id) fail(`rune catalog: RUNE_IDS[${i}] "${RUNE_IDS[i]}" != RUNES[${i}].id "${r.id}" (order mismatch)`)
+    if (RUNES_BY_ID[r.id] !== r) fail(`rune catalog: RUNES_BY_ID["${r.id}"] does not resolve to its entry`)
+  }
+  // Rune ids DISJOINT from blueprint ids (Decision 9 — runes + blueprints live in SEPARATE banked Sets; a
+  // collision would let one banked id mean two things). This is the line that keeps the §13 pool-pins byte-stable
+  // by construction: a rune feeds NO seeded run pool, so adding runes cannot perturb runWeaponPool(new Set()) etc.
+  for (const id of RUNE_IDS) {
+    if (BLUEPRINTS_BY_ID[id]) fail(`rune id "${id}" collides with a blueprint id (the banked Sets must be DISJOINT, F8 Decision 9)`)
+  }
+  // RARE chances ∈ (0, 1) (both well below 1, like the cursed chest — a carrot, not a guarantee).
+  if (!(RUNE_PICKUP_CHANCE > 0 && RUNE_PICKUP_CHANCE < 1)) fail(`RUNE_PICKUP_CHANCE ${RUNE_PICKUP_CHANCE} not in (0, 1)`)
+  if (!(TREASURE_DOOR_CHANCE > 0 && TREASURE_DOOR_CHANCE < 1)) fail(`TREASURE_DOOR_CHANCE ${TREASURE_DOOR_CHANCE} not in (0, 1)`)
+
+  // ── 18b) requiresRune gate well-formedness (Decision 10b) ── for every biome with requiresRune: every KEY is a
+  // member of that biome's exits; every VALUE is a real RUNES_BY_ID id; exits[0] is NEVER a key (the HARD
+  // invariant — the default path is never gated). Plus: every rune in RUNES is referenced by ≥1 gate value (no
+  // orphan catalog entry — a dead rune is a content bug).
+  const referencedRunes = new Set()
+  for (const b of Object.values(BIOMES)) {
+    if (!b.requiresRune) continue
+    for (const [exitId, runeId] of Object.entries(b.requiresRune)) {
+      if (!b.exits.includes(exitId)) fail(`requiresRune gate on ${b.id}: key "${exitId}" is not an exit of ${b.id} (exits: ${b.exits.join(',')})`)
+      if (!RUNES_BY_ID[runeId]) fail(`requiresRune gate on ${b.id}: value "${runeId}" is not a known rune (orphan tag)`)
+      if (b.exits[0] === exitId) fail(`requiresRune gate on ${b.id}: exits[0] "${exitId}" is GATED — the default path must NEVER be gated (F8 HARD invariant)`)
+      referencedRunes.add(runeId)
+    }
+  }
+  for (const id of RUNE_IDS) {
+    if (!referencedRunes.has(id)) fail(`rune "${id}" is referenced by NO requiresRune gate (orphan catalog entry — a dead rune)`)
+  }
+
+  // ── 18c) RUNE-LESS graph: traversable + monotone (Decision 10c / §8.3 — the load-bearing strengthening) ──
+  // Build the filtered view runeLessExits(b) = runeOpenExits(b, ∅) (= exits[0] + un-gated exits). Re-run the
+  // EXISTING soundness + path enumeration + per-path walk against THIS view, with the ≥2-exits check EXCLUDED
+  // (requireChoice FALSE — the §8.3 carve-out). The FULL-graph proof above (requireChoice TRUE) is unchanged.
+  const noRunes = new Set()
+  const runeLessExits = (b) => runeOpenExits(b, noRunes)
+  // (i) every non-boss node has a NON-EMPTY rune-less exit list (no node stranded off the default — the rune-less
+  // invariant: runeOpenExits always includes exits[0]).
+  for (const b of Object.values(BIOMES)) {
+    if (!b.endsInBoss && runeLessExits(b).length < 1) fail(`rune-less: non-boss biome ${b.id} has NO rune-less exit (stranded off the default)`)
+  }
+  // (ii) the full soundness re-run on the rune-less view (acyclic, 1 boss terminal, all reachable, BIOME_ORDER a
+  // valid path) — MINUS the ≥2-exits choice check (the carve-out — no rune-less node has ≥2 exits by construction).
+  checkGraphSoundness(runeLessExits, 'rune-less', { requireChoice: false, requireAllReachable: false })
+  // (iii) enumeratePaths over the rune-less view yields ≥1 path; EVERY rune-less path is walkPath-driven through
+  // the REAL advance() chain + proven effectiveDifficulty-non-decreasing + difficultyTier-non-decreasing + boss-
+  // terminating + correct length (the existing §4c walk, re-run on the filtered paths).
+  const RUNELESS_PATHS = enumeratePaths(runeLessExits)
+  if (RUNELESS_PATHS.length < 1) fail(`rune-less: enumeratePaths yielded ${RUNELESS_PATHS.length} paths (expected ≥1 — the default route)`)
+  for (const path of RUNELESS_PATHS) {
+    for (let i = 1; i < path.length; i++) {
+      if (BIOMES[path[i]].difficultyTier < BIOMES[path[i - 1]].difficultyTier) {
+        fail(`rune-less path ${path.join('→')}: difficultyTier dipped at ${path[i]} (${BIOMES[path[i]].difficultyTier} < prior)`)
+      }
+    }
+    const rs0 = createRunState(RUN_SEED)
+    let prevEff = effectiveDifficulty(rs0.depth, rs0.biome())
+    const finalRs = walkPath(RUN_SEED, path, 1, (rs) => {
+      const eff = effectiveDifficulty(rs.depth, rs.biome())
+      if (eff < prevEff) fail(`rune-less path ${path.join('→')}: whole-run difficulty dipped at depth ${rs.depth} (${rs.biome().id}): ${eff} < ${prevEff}`)
+      prevEff = eff
+    })
+    if (!finalRs.isLastBiome()) fail(`rune-less path ${path.join('→')}: completed but not on the boss biome`)
+    const pathLevels = path.reduce((sum, id) => sum + BIOMES[id].levels, 0)
+    if (finalRs.depth !== pathLevels - 1) fail(`rune-less path ${path.join('→')}: depth ${finalRs.depth} at completion, expected ${pathLevels - 1}`)
+  }
+  // (iv) the concrete additive-identity pin (Decision 10c / §8.4): a rune-less Sewers offers EXACTLY ['catacombs']
+  // ⇒ NO Sewers fork ⇒ the default path ⇒ today's run. AND a rune-less run has exactly ONE root→boss path === the
+  // DEFAULT path (BIOME_ORDER) — owning a rune is the ONLY way to see a fork (the byte-identity guarantee).
+  const sewersRuneLess = runeOpenExits(BIOMES.sewers, noRunes)
+  if (!(sewersRuneLess.length === 1 && sewersRuneLess[0] === 'catacombs')) {
+    fail(`rune-less: runeOpenExits(SEWERS, ∅) === [${sewersRuneLess.join(',')}], expected exactly ['catacombs'] (the additive-identity pin, F8 §8.4)`)
+  }
+  if (RUNELESS_PATHS.length !== 1) fail(`rune-less: expected EXACTLY 1 root→boss path (no fork without a rune), found ${RUNELESS_PATHS.length}`)
+  if (RUNELESS_PATHS[0].join('→') !== BIOME_ORDER.map((b) => b.id).join('→')) {
+    fail(`rune-less: the sole path ${RUNELESS_PATHS[0].join('→')} != BIOME_ORDER ${BIOME_ORDER.map((b) => b.id).join('→')} (the default-path identity)`)
+  }
+  // (v) owning a rune WIDENS the fork (a sanity pin the other direction — the gate actually opens content): with
+  // rune_vine the rune-open Sewers exits include 'ossuary'; with both runes it's the full 3-way fork.
+  if (!runeOpenExits(BIOMES.sewers, new Set(['rune_vine'])).includes('ossuary')) {
+    fail(`rune_vine must open the Ossuary branch (runeOpenExits(SEWERS, {rune_vine}) should include 'ossuary')`)
+  }
+  if (runeOpenExits(BIOMES.sewers, new Set(RUNE_IDS)).length !== BIOMES.sewers.exits.length) {
+    fail(`owning ALL runes must open EVERY Sewers exit (the full 3-way fork)`)
+  }
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; dailySeed (deterministic date→seed, unsigned-32, total, distinct/day); combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${Object.keys(BIOMES).length} biomes (full graph) → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -2345,6 +2490,8 @@ console.log(
     `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged; ` +
     `${RARITY_IDS.length} rarity tiers (common identity + monotone damageMult, fold never-weaken + powerMult identity@1); ` +
     `+ curse config (identity at 0 stacks + monotone damage mult, strong loot tier); ` +
-    `${BARREL_FLAVOUR_IDS.length} barrel flavours (well-formed; oil burns, explosive pure damage)`,
+    `${BARREL_FLAVOUR_IDS.length} barrel flavours (well-formed; oil burns, explosive pure damage); ` +
+    `${RUNES.length} traversal runes (catalog well-formed + DISJOINT from blueprints + chance bounds; requiresRune gates well-formed [default never gated, no orphans]; ` +
+    `RUNE-LESS graph fully traversable+monotone over ${enumeratePaths((b) => runeOpenExits(b, new Set())).length} path + additive-identity pin [Sewers→catacombs only], F8 AC7/AC8)`,
 )
 process.exit(0)

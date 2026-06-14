@@ -69,6 +69,11 @@ export interface RunState {
   // like Cells). A fresh run starts empty (the identity). Dropping them on death before run-end loses unbanked
   // ones — but bankRun on the death path banks what you carried (Decision 7).
   blueprints: string[]
+  // ── RUNES collected THIS run (F8 traversal-runes, Decision 8) ── the rune ids picked up this run (run-only —
+  // banked to MetaState.runes at run end via bankRun, on BOTH the death + clear paths, like blueprints/Cells). A
+  // fresh run starts empty (the identity). Dropping them on death before run-end loses unbanked ones — but
+  // bankRun on the death path banks what you carried (Decision 8).
+  runes: string[]
   // ── Carried player state ──
   hp: number
   maxHp: number
@@ -203,6 +208,7 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     // starts EMPTY (collected this run, banked at run end). A fresh run with no tier = 1 + [] = the identity.
     bossCellMult: bossCellMult >= 1 ? bossCellMult : 1, // defensive clamp (a tier never weakens the curve).
     blueprints: [],
+    runes: [], // F8 traversal-runes (Decision 8) — collected this run, banked at run end (the identity = empty).
 
     // ── Carried player state (Decision 46/60 — HP is CARRIED between levels, NOT refilled; seeded from
     // the META-folded maxHp so a +maxHP upgrade is reflected at run start — review MAJOR) ──

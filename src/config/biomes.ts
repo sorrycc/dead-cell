@@ -47,6 +47,13 @@ export interface BiomeConfig {
   // resolve to a known biome in BIOMES (verifier-asserted, no dangling edge). `exits[0]` is the DEFAULT next
   // (the canonical linear path), so order SEWERS.exits = ['catacombs', …] keeps the default run === today's.
   exits: string[]
+  // ── requiresRune (F8 traversal-runes, Decision 3) ── an OPTIONAL map of exit-biome-id → the rune id that
+  // GATES that EDGE. An exit NOT in the map is ALWAYS traversable (rune-less). HARD INVARIANT (verifier-
+  // asserted): exits[0] is NEVER a key here (the default path is never gated). A run filters its OFFERED exits
+  // to (un-gated ∪ gated-and-owned) via runeOpenExits(); advance()'s default path (exits[0] / pendingBiomeId)
+  // is UNTOUCHED, so the rune-less run always reaches the boss. Absent ⇒ all exits are open (the identity — the
+  // generator never reads it, like miniboss/layoutWeights, so generated levels are byte-identical).
+  requiresRune?: Record<string, string>
   levels: number
   enemyPool: WeightedChoice[]
   layoutWeights?: WeightedChoice[]
@@ -158,6 +165,12 @@ export const SEWERS: BiomeConfig = {
   // is APPENDED LAST so exits[0] === 'catacombs' is unchanged → the DEFAULT path (auto-pick / headless /
   // verifier) is Prison→Sewers→Catacombs→Ramparts === today's BIOME_ORDER (the additive-identity pin).
   exits: ['catacombs', 'ossuary', 'frostworks'],
+  // ── F8 traversal-runes (Decision 3) ── the EXTRA siblings are rune-gated. exits[0] === 'catacombs' is NEVER a
+  // key here (the default path is never gated), so a rune-less run sees ONLY ['catacombs'] ⇒ NO fork ⇒ the
+  // auto-pick default path === today's run (the additive identity). Owning rune_vine opens Ossuary; owning
+  // rune_frost opens Frostworks; both ⇒ the full 3-way fork (today's full picker). Each value is a real
+  // RUNES_BY_ID id (verifier-asserted); each key is a real `exits` entry.
+  requiresRune: { ossuary: 'rune_vine', frostworks: 'rune_frost' },
   levels: 3,
   // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure), plus a
   // LIGHT sprinkle of the CHARGER + FLYER (Enrichment round-3 front-loaded-variety fix). The old pool was
@@ -428,3 +441,16 @@ export const BIOMES: Record<string, BiomeConfig> = { prison: PRISON, sewers: SEW
 
 // ── START_BIOME_ID (F4 Decision 3.3) ── the graph ROOT, so RunState/verifier don't hard-code 'prison'.
 export const START_BIOME_ID = 'prison'
+
+// ── runeOpenExits(biome, runes) (F8 traversal-runes, Decision 3) ── the exit ids this biome OFFERS given the
+// owned runes: exits[0] (the default) is ALWAYS included; a gated exit (one keyed in `requiresRune`) is included
+// ONLY if its rune is owned. PURE (no Phaser) — the GameScene picker + the verifier BOTH call it, so "what a
+// rune-less run sees" is proven against the real source. With NO `requiresRune` (any other biome) it returns all
+// exits unchanged. runeOpenExits(b, new Set()) returns [exits[0], ...un-gated exits] (never empty for a non-boss
+// biome — the rune-less invariant): today every Sewers exit beyond 'catacombs' is gated, so a rune-less Sewers
+// returns exactly ['catacombs'] ⇒ no fork ⇒ the default path (the additive identity).
+export function runeOpenExits(biome: BiomeConfig, runes: Set<string>): string[] {
+  const gate = biome.requiresRune
+  if (!gate) return biome.exits // no gates on this biome → every exit is open (the identity).
+  return biome.exits.filter((id) => !gate[id] || runes.has(gate[id])) // un-gated, OR gated-and-owned.
+}

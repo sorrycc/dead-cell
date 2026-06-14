@@ -34,6 +34,7 @@ export type Category =
   | 'biome'
   | 'upgrade'
   | 'blueprint'
+  | 'rune'
   | 'shop'
   | 'tier'
   | 'roomType'

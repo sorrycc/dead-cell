@@ -87,7 +87,12 @@ export interface MetaStateInstance {
   startTier(): BossCellTier // the selected tier's row (clamped to unlocked) — the run launches at this.
   getBlueprints(): string[]
   isBlueprintUnlocked(id: string): boolean
-  bankRun(arg?: { cells?: number; depth?: number; blueprints?: string[]; completedAtTier?: number | null }): number
+  // ── Traversal RUNE API (F8 traversal-runes, Decision 2) ── the Hub lists runes; GameScene reads getRunes() at
+  // run start (the ownedRunes snapshot). bankRun is extended to ALSO merge banked rune ids (set-union, dedup),
+  // exactly like blueprints — modelled identically, but the EFFECT (world content) is independent.
+  getRunes(): string[]
+  isRuneUnlocked(id: string): boolean
+  bankRun(arg?: { cells?: number; depth?: number; blueprints?: string[]; runes?: string[]; completedAtTier?: number | null }): number
   startStats(): PlayerStats
   // ── Language preference (i18n) ── the persisted locale choice (undefined until the player picks one —
   // main.ts falls back to detectLocale() in that case). setLanguage saves it; the Hub's LANGUAGE row calls
@@ -150,6 +155,16 @@ export function createMetaState(): MetaStateInstance {
       return meta.blueprints.includes(id)
     },
 
+    // ── Rune reads (F8 traversal-runes, Decision 2) ── getRunes is the owned-id list (GameScene snapshots it at
+    // run start → this.ownedRunes); isRuneUnlocked is the Hub's per-row UNLOCKED/LOCKED test. Modelled on the
+    // blueprint reads (separate banked Set).
+    getRunes() {
+      return meta.runes
+    },
+    isRuneUnlocked(id: string) {
+      return meta.runes.includes(id)
+    },
+
     // ── buy(id) (Decision 56/57) ── buy the NEXT level of an upgrade if owned < maxLevel AND the
     // banked Cells cover costs[owned]. On success: deduct Cells, increment the owned level, SAVE.
     // Returns true on a successful purchase, false otherwise (can't afford / maxed / unknown id).
@@ -174,11 +189,15 @@ export function createMetaState(): MetaStateInstance {
     // (mirroring how it already takes cells/depth) so it stays decoupled + node-constructible. Both the death
     // and boss-clear paths bank blueprints (Decision 7); only the boss-clear path passes completedAtTier (a
     // death does NOT unlock a tier — the explicit spec).
-    bankRun({ cells = 0, depth = 0, blueprints = [], completedAtTier = null }: { cells?: number; depth?: number; blueprints?: string[]; completedAtTier?: number | null } = {}) {
+    bankRun({ cells = 0, depth = 0, blueprints = [], runes = [], completedAtTier = null }: { cells?: number; depth?: number; blueprints?: string[]; runes?: string[]; completedAtTier?: number | null } = {}) {
       meta.cells += cells
       meta.bestDepth = Math.max(meta.bestDepth || 0, depth)
       // Merge banked blueprints (set-union, dedup) — a banked id permanently joins the run pools.
       for (const id of blueprints) if (!meta.blueprints.includes(id)) meta.blueprints.push(id)
+      // F8 traversal-runes (Decision 2) — merge banked runes (set-union, dedup) EXACTLY like blueprints; a banked
+      // rune permanently opens its gated branch + treasure doors for FUTURE runs. Defaults to [] (a caller that
+      // passes no runes is a no-op — additive).
+      for (const id of runes) if (!meta.runes.includes(id)) meta.runes.push(id)
       // Unlock the NEXT tier ONLY on a completed run at the run's tier (clamped to MAX_TIER — never past the
       // table). A death passes completedAtTier null (no unlock). max() so an already-higher unlock holds.
       if (completedAtTier != null) {

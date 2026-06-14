@@ -7,6 +7,7 @@ import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
 import { CursedChest } from '../entities/CursedChest.js'
+import { TreasureDoor } from '../entities/TreasureDoor.js'
 import { Barrel } from '../entities/Prop.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
@@ -42,18 +43,20 @@ import type { MutationSpec } from '../config/mutations.js'
 import { colorMult, survivalHpBonus, COLORS } from '../config/colors.js'
 import type { ColorId } from '../config/colors.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
+import { RUNES, RUNES_BY_ID, RUNE_IDS, RUNE_PICKUP_CHANCE, TREASURE_DOOR_CHANCE } from '../config/runes.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { CURSE, LOOT_RARITY, LOOT_GOLD, CURSED_CHEST_CHANCE, effectiveCurseMult } from '../config/curses.js'
 import { BARREL_FLAVOURS, BARREL_FLAVOUR_IDS } from '../config/props.js'
 import { mulberry32 } from '../util/rng.js'
 import { t, tName } from '../i18n/index.js'
+// (tName resolves rune names at the treasure-door i18n boundary — F8 traversal-runes Decision 7.)
 import type { Input as InputType } from '../core/Input.js'
 import type { RunState, RunStartStats } from '../core/RunState.js'
 import type { MetaStateInstance } from '../core/MetaState.js'
 import type { EnemySpec, EliteAffixSpec } from '../config/enemies.js'
 import type { BiomeConfig } from '../config/biomes.js'
-import { BIOMES } from '../config/biomes.js'
+import { BIOMES, runeOpenExits } from '../config/biomes.js'
 import type { RoomType } from '../config/roomTypes.js'
 import type { ShopItem, ForgeAction } from '../config/shop.js'
 import type { SkillSpec } from '../config/skills.js'
@@ -224,6 +227,11 @@ export class GameScene extends Phaser.Scene {
   // three pools are the per-run draw pools resolved ONCE in create() from it (starters ∪ unlocked) — the
   // weapon/skill/mutation placement sites draw from these.
   private unlockedBlueprints!: Set<string>
+  // ── Owned RUNES (F8 traversal-runes, Decision 4) ── the meta's owned-rune set, snapshotted ONCE at run start
+  // (like unlockedBlueprints). Read by _offerBiomeChoice's rune-filter + the boundary predicate + the treasure
+  // door's locked/unlocked tell. A rune banked mid-run only matters NEXT run (the snapshot is run-start, like
+  // blueprints). With NO runes owned (a default save) it's empty ⇒ all gated exits filter out ⇒ today's routes.
+  private ownedRunes!: Set<string>
   private weaponPool!: string[]
   private skillPool!: SkillSpecType[]
   private mutationPool!: MutationSpec[]
@@ -253,6 +261,14 @@ export class GameScene extends Phaser.Scene {
   private chest!: CursedChest | null
   private _chestCollider!: Phaser.Physics.Arcade.Collider | null
   private _chestSeed!: number // the chest's placement seed (for the deterministic loot roll on open).
+  // ── Treasure-door state (F8 traversal-runes §6, Decision 5/6) — null until a NORMAL level rarely places a
+  // rune-gated treasure door (_maybePlaceTreasureDoor). this.treasureDoor is the live door for THIS level (torn
+  // down + nulled by teardown); _treasureDoorCollider is the player×door in-range overlap; _treasureDoorSeed is
+  // the placement seed (the deterministic open-time loot roll, like the chest). The door opens ONLY when the
+  // player owns its requiredRuneId (the run-start ownedRunes snapshot); otherwise E shows a denied banner. ──
+  private treasureDoor!: TreasureDoor | null
+  private _treasureDoorCollider!: Phaser.Physics.Arcade.Collider | null
+  private _treasureDoorSeed!: number // the door's placement seed (for the deterministic loot roll on open).
   // ── Destructible barrel state (F5 environmental-combat §5) — empty/null until a NORMAL level rarely places
   // barrels (_maybePlaceBarrels). `barrels` is the per-level list (torn down in _teardownLevel); barrelGroup
   // holds the bodies for the three break overlaps (player melee / projectile / enemy-knocked-in); _barrelColliders
@@ -373,6 +389,10 @@ export class GameScene extends Phaser.Scene {
     // perturbation). With NO blueprints unlocked each pool === the pre-slice tables (a default run draws from the
     // identical rows as today — the identity, AC11). A banked blueprint widens the matching pool for THIS run.
     this.unlockedBlueprints = new Set(this.meta.getBlueprints())
+    // ── Owned RUNES snapshot (F8 traversal-runes, Decision 4) ── the run-start owned-rune set (like the blueprint
+    // set above — a rune banked mid-run only matters NEXT run). Drives the rune-filtered biome picker + the
+    // treasure door's locked/unlocked tell. Empty for a default save ⇒ all gated exits filter out ⇒ today's routes.
+    this.ownedRunes = new Set(this.meta.getRunes())
     this.weaponPool = runWeaponPool(this.unlockedBlueprints)
     this.skillPool = runSkillPool(this.unlockedBlueprints)
     this.mutationPool = runMutationPool(this.unlockedBlueprints)
@@ -452,6 +472,11 @@ export class GameScene extends Phaser.Scene {
     this.chest = null // the live CursedChest entity for THIS level, or null (most levels + every boss/miniboss).
     this._chestCollider = null // the player×chest in-range overlap (removed on teardown).
     this._chestSeed = 0 // the chest's placement seed (set in _maybePlaceCursedChest; the deterministic loot roll).
+    // ── Treasure-door state (F8 traversal-runes §6) — null until a NORMAL level rarely places a rune-gated door
+    // (_maybePlaceTreasureDoor); torn down + nulled by _teardownLevel. ──
+    this.treasureDoor = null // the live TreasureDoor entity for THIS level, or null (most levels + every boss/miniboss).
+    this._treasureDoorCollider = null // the player×door in-range overlap (removed on teardown).
+    this._treasureDoorSeed = 0 // the door's placement seed (set in _maybePlaceTreasureDoor; the deterministic loot roll).
     // ── Destructible barrel state (F5 environmental-combat) — empty/null until a NORMAL level rarely places
     // barrels (_maybePlaceBarrels); torn down + cleared by _teardownLevel. The two-way enemy×hazard overlap +
     // the barrel break overlaps are all per-level (recreated in _buildLevel, removed in _teardownLevel). ──
@@ -831,6 +856,18 @@ export class GameScene extends Phaser.Scene {
     // bankRun merges it at run end. No-op when no blueprints remain locked (all unlocked / already carried).
     this._maybePlaceBlueprintPickup(desc)
 
+    // ── Sparse RUNE drop (F8 traversal-runes §6, Decision 8, AC4) ── a RARE per-NORMAL-level chance to drop ONE
+    // locked-rune pickup, sourced SCENE-SIDE off a distinct off-pin RNG mix (NOT the generator — the level pin
+    // stays intact, the blueprint-pickup discipline). Collecting it records the id on runState.runes (run-only);
+    // bankRun merges it at run end (BOTH paths). No-op when no runes remain locked (all owned / already carried).
+    this._maybePlaceRunePickup(desc)
+
+    // ── Sparse rune-gated TREASURE DOOR (F8 traversal-runes §6, Decision 5, AC3) ── a RARE per-NORMAL-level
+    // chance to place ONE locked treasure door, off a distinct off-pin RNG mix (NOT the generator — the level pin
+    // stays intact). It opens with E ONLY when the player owns its required rune (the run-start ownedRunes
+    // snapshot), granting GUARANTEED high-rarity loot. NEVER on a boss/miniboss level (guarded inside).
+    this._maybePlaceTreasureDoor(desc)
+
     // ── Door (the exit, Decision 40) ── overlap fires _onDoorOverlap → _nextLevel (guarded).
     this.door = new Door(this, desc.exit, biome.colors.exit, () => this._nextLevel())
     this.doorCollider = this.physics.add.overlap(
@@ -1195,6 +1232,7 @@ export class GameScene extends Phaser.Scene {
       cells: this.runState.cells,
       depth: this.runState.depth,
       blueprints: this.runState.blueprints,
+      runes: this.runState.runes, // F8 traversal-runes (Decision 8) — bank runes collected this run (a clear banks them).
       completedAtTier: this.meta.getSelectedTier(),
     })
     this._clearBossHud() // drop the boss HP bar so it never persists into the next run (review MINOR).
@@ -1256,7 +1294,10 @@ export class GameScene extends Phaser.Scene {
     // whichever branch is taken (no double-advance, no skipped flask/scroll, no modal over an un-rebuilt world).
     const rs = this.runState
     const atBoundary = rs.levelInBiome + 1 >= rs.biome().levels && !rs.isLastBiome()
-    if (atBoundary && rs.biome().exits.length >= 2) {
+    // F8 traversal-runes (Decision 4) — gate the overlay on the RUNE-FILTERED exit count, not the raw exits: a
+    // rune-less run sees Sewers collapse to ['catacombs'] (1 exit) ⇒ NO overlay ⇒ the inline auto-pick default
+    // path (today's run). Owning a rune widens the offered fork; only then is there a real ≥2 choice to show.
+    if (atBoundary && runeOpenExits(rs.biome(), this.ownedRunes).length >= 2) {
       this._offerBiomeChoice() // → onPick sets pendingBiomeId, then calls _continueTransition().
       return
     }
@@ -1315,7 +1356,11 @@ export class GameScene extends Phaser.Scene {
   // Defensive: if (somehow) already open, no-op (the transitioning guard + biomeChoiceOpen already gate re-entry).
   _offerBiomeChoice(): void {
     if (this.biomeChoiceOpen || this.biomeChoiceOverlay) return // already offering (defensive — should never re-enter).
-    const offers = this.runState.biome().exits.map((id) => BIOMES[id]).filter((b): b is BiomeConfig => !!b)
+    // F8 traversal-runes (Decision 4) — REPLACE the raw exits map with the RUNE-FILTERED open list: a rune-less
+    // run offers only un-gated exits (exits[0] + any non-gated) ⇒ Sewers → ['catacombs'] ⇒ the < 2 fallback below
+    // runs the inline auto-pick (today's run). Owning rune_vine ⇒ ['catacombs','ossuary']; both runes ⇒ all three.
+    const openIds = runeOpenExits(this.runState.biome(), this.ownedRunes)
+    const offers = openIds.map((id) => BIOMES[id]).filter((b): b is BiomeConfig => !!b)
     if (offers.length < 2) {
       // Defensive: a dangling/unknown exit collapsed the choice — fall back to the inline (auto-pick) path so the
       // run never stalls (advance()'s exits guard then rolls the default). Never strands the player at the door.
@@ -1362,6 +1407,7 @@ export class GameScene extends Phaser.Scene {
       cells: this.runState.cells,
       depth: this.runState.depth,
       blueprints: this.runState.blueprints,
+      runes: this.runState.runes, // F8 traversal-runes (Decision 8) — bank runes collected this run (a clear banks them).
       completedAtTier: this.meta.getSelectedTier(),
     })
     this.sfx.bossDefeat() // audio §6.3 (AC5) — a win flourish on a completed run (the gold "RUN COMPLETE" path).
@@ -1464,6 +1510,16 @@ export class GameScene extends Phaser.Scene {
     if (this.chest) {
       this.chest.destroy()
       this.chest = null
+    }
+    // Treasure-door teardown (F8 traversal-runes §6) — remove the in-range overlap + destroy the door so it never
+    // dangles into the next level (mirror the chest teardown). The door banks nothing (runes bank via the DROP).
+    if (this._treasureDoorCollider) {
+      this.physics.world.removeCollider(this._treasureDoorCollider)
+      this._treasureDoorCollider = null
+    }
+    if (this.treasureDoor) {
+      this.treasureDoor.destroy()
+      this.treasureDoor = null
     }
     // ── Two-way hazard + barrel teardown (F5 environmental-combat §3 AC9, Decision 5) ── remove the enemy×hazard
     // overlap (mirror the player _hazardCollider block above), remove the per-level barrel break overlaps, destroy
@@ -2193,6 +2249,63 @@ export class GameScene extends Phaser.Scene {
     )
   }
 
+  // ── _maybePlaceRunePickup(desc) (F8 traversal-runes §6, Decision 8, AC4) ── deterministically (off a DISTINCT
+  // off-pin RNG mix) maybe drop ONE locked-rune pickup. Off a fresh mulberry32 with a NEW mix constant (0xb1ce92aa
+  // — uncorrelated with the weapon/skill/shop/blueprint/chest/door rolls) — NOT on the generator's pinned draw, so
+  // the level pin stays intact (the SAME off-the-pin discipline as the blueprint pickup). Only LOCKED runes (not
+  // owned in the meta AND not already carried this run) are worth dropping — so a player never re-finds one they
+  // have. Placed at the level's first pickup spot (or the entrance) so it's reachable on the path. A run with all
+  // runes owned drops none (the no-op).
+  _maybePlaceRunePickup(desc: LevelDescription): void {
+    // The droppable set: runes neither already owned (meta) nor already collected this run (runState).
+    const locked = RUNES.filter((r) => !this.ownedRunes.has(r.id) && !this.runState.runes.includes(r.id))
+    if (locked.length === 0) return // nothing left to find → no drop (the all-owned no-op).
+    const rng = mulberry32((desc.seed ^ 0xb1ce92aa) >>> 0) // distinct mix from the blueprint/weapon/shop/chest RNGs.
+    if (rng() >= RUNE_PICKUP_CHANCE) return
+    const rune = locked[Math.floor(rng() * locked.length)]
+    const spot = desc.pickups[0] || { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    this.pickupPool.acquire(spot.x, spot.y - TILE_SIZE, 'rune', { runeId: rune.id })
+  }
+
+  // ── _maybePlaceTreasureDoor(desc) (F8 traversal-runes §6, Decision 5/6, AC3) ── deterministically (off a
+  // DISTINCT off-pin RNG mix) maybe place ONE rune-gated treasure door on a NORMAL level. Off a fresh mulberry32
+  // with a NEW mix constant (0x7ea5e1 — uncorrelated with the weapon/shop/blueprint/chest/barrel/rune rolls) —
+  // NOT on the generator's pinned draw, so the level pin + the determinism deep-equal stay intact (the cursed-
+  // chest discipline). A LOW chance (TREASURE_DOOR_CHANCE — rare). NEVER on a boss/miniboss level (a boss level
+  // never reaches here; a miniboss level guards). The gating rune is picked deterministically from RUNE_IDS off
+  // the SAME RNG; the door's locked/unlocked tell is computed against the run-start ownedRunes snapshot (Decision
+  // 6 — stable for the whole level). The placement seed is stashed on _treasureDoorSeed so the open-time loot
+  // roll is deterministic per seed (a replay grants the same loot).
+  _maybePlaceTreasureDoor(desc: LevelDescription): void {
+    // Defensive: never on a boss/miniboss level (a boss level never reaches here; a miniboss level guards here).
+    if (this.runState.isBossLevel() || this.runState.isMinibossLevel()) return
+    const seed = (desc.seed ^ 0x7ea5e1) >>> 0 // a distinct mix constant (uncorrelated with the other rolls).
+    const rng = mulberry32(seed)
+    if (rng() >= TREASURE_DOOR_CHANCE) return
+    // Pick the gating rune deterministically from RUNE_IDS off the SAME RNG (a replay gates the same rune).
+    const requiredRuneId = RUNE_IDS[Math.floor(rng() * RUNE_IDS.length)]
+    // Pick a standable spot off the critical-path ends (a generator spawn candidate — already away from the
+    // entrance + never the exit cell), else a pickup point, then the level midpoint, so it's always placeable.
+    const spot =
+      desc.spawnCandidates[Math.floor(rng() * desc.spawnCandidates.length)] ||
+      desc.pickups[0] ||
+      { x: (desc.entrance.x + desc.exit.x) / 2, y: desc.entrance.y }
+    // The locked/unlocked tell: locked when the run-start snapshot lacks the gating rune (Decision 6). The rune
+    // NAME is resolved to the active locale HERE (the i18n boundary — the entity stays text-agnostic).
+    const locked = !this.ownedRunes.has(requiredRuneId)
+    const runeName = tName('rune', requiredRuneId, RUNES_BY_ID[requiredRuneId]?.name ?? requiredRuneId)
+    this.treasureDoor = new TreasureDoor(this, spot, requiredRuneId, runeName, locked)
+    this._treasureDoorSeed = seed // the placement seed → the deterministic open-time loot roll.
+    this._treasureDoorCollider = this.physics.add.overlap(
+      this.player.collider,
+      this.treasureDoor.rect,
+      () => this.treasureDoor && this.treasureDoor.markInRange(), // flag the in-range frame (reset each tick).
+      // An OPENED door stops flagging in-range (it's inert); also skip while a modal / transition / death is up.
+      () => !!this.treasureDoor && !this.treasureDoor.opened && !this.shopOpen && !this.transitioning && !this.gameOver,
+      this,
+    )
+  }
+
   // ── _maybePlaceBarrels(desc) (F5 environmental-combat §3 AC3, Decision 4/8) ── deterministically (off the
   // level seed) maybe place blast barrels on a NORMAL level. Off a fresh mulberry32 with a DISTINCT mix constant
   // (uncorrelated with the weapon/shop/blueprint/room/chest/skill rolls) — NOT on the generator's pinned draw,
@@ -2763,6 +2876,15 @@ export class GameScene extends Phaser.Scene {
         }
         break
       }
+      case 'rune': {
+        // F8 traversal-runes §6 (Decision 8, AC4) — record the rune id on runState (RUN-ONLY — banked to the meta
+        // at run end via bankRun, on BOTH the death + clear paths, like a blueprint/Cell). Dedup so a re-touch
+        // (shouldn't happen — the drop is gated to LOCKED ids) is a no-op.
+        if (pk.runeId && !this.runState.runes.includes(pk.runeId)) {
+          this.runState.runes.push(pk.runeId)
+        }
+        break
+      }
     }
     // A small collect pop (reuse the spark pool — no new allocation).
     this.effects.hit(pickupRect.body.center.x, pickupRect.body.center.y, { damage: 0 })
@@ -2931,6 +3053,89 @@ export class GameScene extends Phaser.Scene {
 
     this.sfx.pickup('weapon') // audio §6.3 — reuse the pickup blip for the open (no new asset — no-op-safe façade).
     this._emitHud() // surface the new curse stack count immediately (don't wait for the next tick).
+  }
+
+  // ── _tryOpenTreasureDoor() (F8 traversal-runes §6, AC3, Decision 5) ── try to open the treasure door if the
+  // player is standing on it and it hasn't been opened. Called on the SAME E edge as _tryOpenChest, RIGHT AFTER
+  // it, so one E press opens at most one interactable (the !this.shopOpen guard: an E that just opened the shop
+  // this frame skips this). Opens ONLY if the player owns the door's requiredRuneId (the run-start snapshot); a
+  // locked door shows a brief "needs the rune" banner + a denied cue and stays shut (the carrot for next run).
+  // Guards mirror _tryOpenChest's set.
+  _tryOpenTreasureDoor(): void {
+    if (this.gameOver || this.transitioning || this.shopOpen) return
+    const door = this.treasureDoor
+    if (!door || !door.playerInRange || door.opened) return
+    if (this.ownedRunes.has(door.requiredRuneId)) {
+      this._openTreasureDoor()
+    } else {
+      // Locked — show the denied banner + a denied cue, leave the door shut (a rune-less run gets no loot, no
+      // penalty — pure additive content). A one-off scroll-fixed Text torn down on rebuild (_levelObjects).
+      const banner = this.add
+        .text(this.cameras.main.width / 2, 70, t('treasure.denied'), {
+          fontFamily: UI_FONT,
+          fontSize: '24px',
+          color: '#8b949e',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5, 0.5)
+        .setScrollFactor(0)
+        .setDepth(120)
+      this._levelObjects.push(banner)
+      this.tweens.add({ targets: banner, alpha: 0, delay: 1100, duration: 500 })
+      this.sfx.uiMove() // a soft denied blip (reuse the UI tick — no new asset).
+    }
+  }
+
+  // ── _openTreasureDoor() (F8 traversal-runes §6, AC3, Decision 5) ── the door-open edge (a rune-owner only):
+  // mark the door spent (so a held-overlap / re-enter can't re-fire), GRANT GUARANTEED high-rarity loot (one of
+  // two outcomes rolled DETERMINISTICALLY off the door's placement seed so a replay grants the same loot). NO
+  // curse — a treasure door is PURE UPSIDE (the rune was the cost). Reuses the EXACT _openCursedChest loot path
+  // (DRY): the weapon outcome via _equipWeaponWithAffix(..., LOOT_RARITY) (the F2 fold), the scroll outcome via
+  // SCROLLS_BY_ID[id].apply + _syncPlayerScrollStats + runState.gold. A gold flash + a brief banner read the win.
+  _openTreasureDoor(): void {
+    const door = this.treasureDoor
+    if (!door || door.opened) return
+    door.setOpened() // inert from here: no re-open, no prompt, no pulse.
+
+    // Deterministic loot RNG seeded from the door's placement seed (off-the-pin — a replay grants the same loot,
+    // the discipline the chest/weapon/branch placements follow). A distinct mix from the placement gate roll.
+    const rng = mulberry32((this._treasureDoorSeed ^ 0x10071d00) >>> 0)
+    if (rng() < 0.5) {
+      // (a) A GUARANTEED high-rarity affixed weapon — pick one NOT currently equipped (a real swap), roll an
+      // affix, equip at LOOT_RARITY (the F2 fold gives the guaranteed strong tier). The weaponPool filter idiom
+      // mirrors _openCursedChest / _maybePlaceWeaponPickup (DRY).
+      const choices = this.weaponPool.filter((id) => id !== this.runState.weaponId)
+      const pool = choices.length ? choices : this.weaponPool
+      const weaponId = pool[Math.floor(rng() * pool.length)]
+      const weaponAffixId = this._rollWeaponAffix(rng)
+      this._equipWeaponWithAffix(weaponId, weaponAffixId, LOOT_RARITY)
+    } else {
+      // (b) A colour scroll + gold — apply a deterministic scroll (the run-only build boost) + grant LOOT_GOLD.
+      const scrollId = SCROLL_IDS[Math.floor(rng() * SCROLL_IDS.length)]
+      const scroll = SCROLLS_BY_ID[scrollId]
+      if (scroll) scroll.apply(this.runState)
+      this._syncPlayerScrollStats() // reflect a vitality/colour scroll's bump on the live player NOW.
+      this.runState.gold += LOOT_GOLD
+    }
+
+    // FEEDBACK (Decision 6 — programmer-art) — a gold camera flash + a brief reward banner so the open reads.
+    // Reuses the camera flash + a one-off scroll-fixed Text torn down on rebuild (_levelObjects).
+    this.cameras.main.flash(280, 244, 208, 63) // a gold flash (matches the unlocked door's gold frame).
+    const banner = this.add
+      .text(this.cameras.main.width / 2, 70, t('treasure.opened'), {
+        fontFamily: UI_FONT,
+        fontSize: '26px',
+        color: '#f4d03f',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(120)
+    this._levelObjects.push(banner)
+    this.tweens.add({ targets: banner, alpha: 0, delay: 1300, duration: 600 })
+
+    this.sfx.pickup('weapon') // audio §6.3 — reuse the pickup blip for the open (no new asset — no-op-safe façade).
+    this._emitHud() // surface any gold/HP change immediately.
   }
 
   // ── _toggleQuitConfirm() (esc-quit-confirm) ── the persistent ESC handler's one entry point. ESC toggles the
@@ -3370,7 +3575,7 @@ export class GameScene extends Phaser.Scene {
     // meta-progression §6.7 (Decision 3/7, AC9): a death STILL banks blueprints collected this run (like
     // Cells — generous + consistent), but does NOT unlock a tier (completedAtTier omitted ⇒ null — the spec's
     // "clearing a run unlocks a higher tier", not dying).
-    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth, blueprints: this.runState.blueprints })
+    this.meta.bankRun({ cells: this.runState.cells, depth: this.runState.depth, blueprints: this.runState.blueprints, runes: this.runState.runes })
     this.hitstopTimer = 0.25
     this.cameras.main.flash(180, 200, 40, 40)
     this.cameras.main.shake(220, 0.01)
@@ -3523,6 +3728,9 @@ export class GameScene extends Phaser.Scene {
       // cursed-chests §6 (AC4, Decision 3) — open the cursed chest on the SAME E edge, RIGHT AFTER the shop so
       // one E press opens at most one interactable (_tryOpenChest guards !shopOpen — see Decision 3).
       if (inputState.interactPressed) this._tryOpenChest()
+      // F8 traversal-runes §6 (AC3, Decision 5) — try the rune-gated treasure door on the SAME E edge, RIGHT
+      // AFTER the chest so one E press opens at most one interactable (it guards !shopOpen, like the chest).
+      if (inputState.interactPressed) this._tryOpenTreasureDoor()
       if (inputState.swapPressed) this._swapWeapon() // round-3 (item 3) — toggle the active weapon slot.
       // skills slice (AC2/AC3) — USE SKILL slot 1 (F) / slot 2 (C): one-shot edges resolved BEFORE the player
       // tick so a skill fires this frame. An empty / on-cooldown slot is a no-op (Player.tryUseSkill → null),
@@ -3553,6 +3761,10 @@ export class GameScene extends Phaser.Scene {
     // overlap that SETS the flag fires before update(), so the read must precede the reset). Drives the
     // "[E] CURSED CHEST" prompt off the same-frame flag (an opened chest is inert → its prompt stays hidden).
     if (this.chest) this.chest.resetInRange()
+    // ── Treasure-door in-range RESET (F8 traversal-runes §6, Decision 5) ── clear the door's in-range flag for
+    // the NEXT frame, AFTER _tryOpenTreasureDoor (above) has read it — the SAME flag-reset-ordering fix. Drives
+    // the door's prompt off the same-frame flag (an opened door is inert → its prompt stays hidden).
+    if (this.treasureDoor) this.treasureDoor.resetInRange()
 
     this.playerHitboxes.tick(gdt)
     this.enemyHitboxes.tick(gdt)

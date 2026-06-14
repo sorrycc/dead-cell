@@ -50,6 +50,12 @@ export interface MetaState {
   unlockedTier: number // highest Boss-Cell tier ever unlocked (0 = base; raised on a completed run).
   selectedTier: number // the tier the next run launches at (clamped 0..unlockedTier on read).
   blueprints: string[] // permanently-unlocked blueprint ids (run pools draw from starters ∪ these).
+  // ── Traversal RUNES (F8 traversal-runes, Decision 2) ── the permanently-owned rune ids: a SECOND banked Set
+  // modelled identically on `blueprints` (set-union merge in bankRun, defensive clone on load), but its EFFECT
+  // is WORLD content (rune-gated map branches + treasure doors), not a run-POOL row. Defaults to [] (the IDENTITY
+  // — no runes ⇒ all gated exits filtered out ⇒ the offered routes collapse to today's). Banked at run end on
+  // BOTH the death + clear paths (like blueprints/Cells). A pre-slice save back-fills it via loadMeta's spread.
+  runes: string[] // permanently-owned traversal-rune ids (gate world content — branches + treasure doors).
   // ── Language preference (i18n) ── OPTIONAL + intentionally ABSENT from DEFAULT_META so a fresh / pre-
   // i18n save leaves it undefined. main.ts then does `meta.language ?? detectLocale()`, so a first-time
   // visitor auto-detects from the browser; a defaulted 'en' here would suppress that. Set + saved only on
@@ -73,6 +79,7 @@ export const DEFAULT_META: Readonly<MetaState> = Object.freeze({
   unlockedTier: 0,
   selectedTier: 0,
   blueprints: [],
+  runes: [], // F8 traversal-runes — the IDENTITY (no runes owned ⇒ all gated exits filtered ⇒ today's routes).
 })
 
 export function loadMeta(): MetaState {
@@ -84,6 +91,9 @@ export function loadMeta(): MetaState {
   // its own containers. Defensive against a corrupt `blueprints` that isn't an array (degrade to empty).
   merged.upgrades = { ...(merged.upgrades || {}) }
   merged.blueprints = Array.isArray(merged.blueprints) ? merged.blueprints.slice() : []
+  // F8 traversal-runes — clone the back-filled runes Set so it never ALIASES the frozen DEFAULT_META.[] (the same
+  // leak the blueprint clone fixes); a corrupt non-array degrades to empty (defensive, like blueprints).
+  merged.runes = Array.isArray(merged.runes) ? merged.runes.slice() : []
   return merged
 }
 

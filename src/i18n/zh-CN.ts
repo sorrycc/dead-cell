@@ -30,6 +30,7 @@ export const ZH_CN: Dict = {
     'hub.max': '已满',
     'hub.cellsCost': '{cost} 细胞',
     'hub.bpPrefix': '蓝图',
+    'hub.runePrefix': '符文', // F8 traversal-runes — Hub 符文行名称列前缀。
     'hub.unlocked': '已解锁',
     'hub.locked': '未解锁',
     'hub.seededRun': '种子局',
@@ -43,6 +44,7 @@ export const ZH_CN: Dict = {
     'kind.weapon': '武器',
     'kind.skill': '技能',
     'kind.mutation': '突变',
+    'kind.world': '世界', // F8 traversal-runes — Hub 符文行中列（符文解锁的是世界内容）。
 
     'locale.en': 'English',
     'locale.zh-CN': '中文',
@@ -116,6 +118,12 @@ export const ZH_CN: Dict = {
     // ── 诅咒宝箱 (cursed-chests design §6, AC9) —— 悬浮提示 + 开启时的警告横幅 ──
     'chest.prompt': '[E] 诅咒宝箱',
     'chest.cursed': '已被诅咒！击杀 {n} 个敌人以解除。',
+
+    // ── 宝藏之门 (F8 traversal-runes §7, AC3/AC6) — 符文封印门的悬浮提示（已解锁 / 已封印）+ 开启 / 拒绝横幅。 ──
+    'treasure.prompt': '[E] 宝藏',
+    'treasure.locked': '【{rune}】封印 —— 需要符文',
+    'treasure.opened': '获得宝藏！',
+    'treasure.denied': '已封印 —— 缺少符文。',
 
     // ── 退出到主菜单确认弹窗 (esc-quit-confirm) ──
     'quit.title': '退出到主菜单？',
@@ -283,6 +291,12 @@ export const ZH_CN: Dict = {
     bp_mutation_secondwind: { name: '第二风', desc: '每个生物群系免疫一次致命伤害。' },
     bp_mutation_momentum: { name: '势能', desc: '连续命中使伤害递增。' },
     bp_mutation_scavenger: { name: '拾荒者', desc: '提高金币与细胞掉落。' },
+  },
+
+  // ── 传送符文 (config/runes.ts) — F8 traversal-runes ──
+  rune: {
+    rune_vine: { name: '藤蔓符文', desc: '开启藏骸所分支 + 藤蔓宝藏之门。' },
+    rune_frost: { name: '寒霜符文', desc: '开启冰封工坊分支 + 寒霜宝藏之门。' },
   },
 
   // ── 商店物品 (config/shop.ts) ──

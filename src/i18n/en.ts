@@ -25,6 +25,7 @@ export const EN: Dict = {
     'hub.max': 'MAX',
     'hub.cellsCost': '{cost} cells',
     'hub.bpPrefix': 'BP',
+    'hub.runePrefix': 'RUNE', // F8 traversal-runes — the prefix on a Hub rune row's name column (parallels hub.bpPrefix).
     'hub.unlocked': 'UNLOCKED',
     'hub.locked': 'LOCKED',
     'hub.seededRun': 'SEEDED RUN',
@@ -39,6 +40,7 @@ export const EN: Dict = {
     'kind.weapon': 'weapon',
     'kind.skill': 'skill',
     'kind.mutation': 'mutation',
+    'kind.world': 'world', // F8 traversal-runes — the middle column of a Hub rune row (a rune unlocks WORLD content).
 
     // Locale display names (the LANGUAGE row marks the active one).
     'locale.en': 'English',
@@ -114,6 +116,13 @@ export const EN: Dict = {
     // ── Cursed chest (cursed-chests design §6, AC9) — the floating prompt + the on-open warning banner. ──
     'chest.prompt': '[E] CURSED CHEST',
     'chest.cursed': 'CURSED! Kill {n} enemies to break it.',
+
+    // ── Treasure door (F8 traversal-runes §7, AC3/AC6) — the rune-gated door's floating prompt (unlocked vs
+    // locked) + the on-open / on-denied banners. {rune} interpolates the localised rune name. ──
+    'treasure.prompt': '[E] TREASURE',
+    'treasure.locked': '[{rune}] SEALED — needs a rune',
+    'treasure.opened': 'TREASURE!',
+    'treasure.denied': 'Sealed — you lack the rune.',
 
     // ── Quit-to-Title confirm overlay (esc-quit-confirm) ──
     'quit.title': 'QUIT TO MAIN MENU?',
