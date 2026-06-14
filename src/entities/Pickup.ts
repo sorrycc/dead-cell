@@ -164,11 +164,16 @@ export class PickupPool {
   // room. We thread it in here: it scales BOTH the Cell count (round up the boosted count → more meta
   // currency) AND the gold drop (a richer gold pile when one drops), so a tagged room's CLEAR is materially
   // richer (the payout that justifies the harder fight). Default 1 → byte-identical to before for a normal room.
-  spawnDrop(x: number, y: number, depth = 0, cellCount = 3, lootMult = 1) {
-    const cells = Math.max(1, Math.round(cellCount * lootMult)) // scale the cell count by the room's lootMult.
+  // ── dropRateMult (F3 skills-mutations §3, Decision 6 — Scavenger) ── a SEPARATE run-only multiplier (1 = the
+  // neutral identity) kept DISTINCT from the room's `lootMult` so the room behaviour is byte-unchanged: lootMult
+  // scales the cell count + the gold AMOUNT exactly as before; dropRateMult scales the cell count AND raises the
+  // gold/scroll drop CHANCE (the Scavenger payoff — more drops, not just bigger piles). Both default 1 → a default
+  // save (no Scavenger, any room) drops byte-identically. The chance boost is capped at certainty (Math.min(1,…)).
+  spawnDrop(x: number, y: number, depth = 0, cellCount = 3, lootMult = 1, dropRateMult = 1) {
+    const cells = Math.max(1, Math.round(cellCount * lootMult * dropRateMult)) // room lootMult × Scavenger drop rate.
     for (let i = 0; i < cells; i++) this.acquire(x, y, 'cell') // the fan-out scatters them apart.
-    if (Math.random() < GOLD_DROP_CHANCE) this.acquire(x, y, 'gold', { amount: Math.round(GOLD_AMOUNT * lootMult) })
-    if (Math.random() < SCROLL_DROP_CHANCE) this.acquire(x, y, 'scroll', { scrollId: _pickScrollId() })
+    if (Math.random() < Math.min(1, GOLD_DROP_CHANCE * dropRateMult)) this.acquire(x, y, 'gold', { amount: Math.round(GOLD_AMOUNT * lootMult) })
+    if (Math.random() < Math.min(1, SCROLL_DROP_CHANCE * dropRateMult)) this.acquire(x, y, 'scroll', { scrollId: _pickScrollId() })
   }
 
   // Tick: keep the visible rect glued to its (gravity-settled) body, and clamp a settled pickup so it

@@ -1749,6 +1749,11 @@ const ALL_PATHS = enumeratePaths()
       vsAffl: run.vsAfflictedDamageMult,
       tickMult: run.statusTickMult,
       spread: run.spreadAffliction,
+      // ── F3 skills-mutations fields (F3 §10) ── momentumPerStack/dropRateMult are bigger-is-better; secondWind is
+      // a CAPABILITY flag a mutation may only turn ON (false → true), never off (the never-weaken sense for a flag).
+      secondWind: run.secondWind,
+      momentum: run.momentumPerStack,
+      dropRate: run.dropRateMult,
     }
     m.apply(run) // must not throw.
     // Bigger-is-better fields must not DECREASE; the smaller-is-better dodge-cooldown mult must not INCREASE.
@@ -1767,6 +1772,11 @@ const ALL_PATHS = enumeratePaths()
     if (run.vsAfflictedDamageMult < before.vsAffl) fail(`mutation ${m.id}: vsAfflictedDamageMult decreased`)
     if (run.statusTickMult < before.tickMult) fail(`mutation ${m.id}: statusTickMult decreased`)
     if (before.spread === true && run.spreadAffliction === false) fail(`mutation ${m.id}: spreadAffliction was turned OFF (a flag may only be armed)`)
+    // ── F3 skills-mutations never-weaken (F3 §10) ── momentumPerStack/dropRateMult are bigger-is-better; secondWind
+    // is a CAPABILITY flag a mutation may only turn ON (false → true), never off.
+    if (run.momentumPerStack < before.momentum) fail(`mutation ${m.id}: momentumPerStack decreased`)
+    if (run.dropRateMult < before.dropRate) fail(`mutation ${m.id}: dropRateMult decreased`)
+    if (before.secondWind === true && run.secondWind === false) fail(`mutation ${m.id}: secondWind was turned OFF (a flag may only be armed)`)
     // At least ONE field must have changed (a found mutation must DO something — a no-op perk is a content bug).
     const changed =
       run.scrollDamageMult !== before.dmg || run.scrollMaxHpBonus !== before.hp ||
@@ -1775,7 +1785,9 @@ const ALL_PATHS = enumeratePaths()
       run.maxFlasks !== before.flasksMax || run.onKillHealAmount !== before.kill ||
       run.lowHpDamageMult !== before.lowHp || run.firstHitBonusMult !== before.firstHit ||
       run.vsAfflictedDamageMult !== before.vsAffl || run.statusTickMult !== before.tickMult ||
-      run.spreadAffliction !== before.spread
+      run.spreadAffliction !== before.spread ||
+      run.secondWind !== before.secondWind || run.momentumPerStack !== before.momentum ||
+      run.dropRateMult !== before.dropRate
     if (!changed) fail(`mutation ${m.id}: apply() changed no run-only/perk field (a no-op mutation)`)
   }
 
@@ -1800,6 +1812,11 @@ const ALL_PATHS = enumeratePaths()
     if (run.vsAfflictedDamageMult < 1) fail('mutations aggregate: vsAfflictedDamageMult below the neutral identity')
     if (run.statusTickMult < 1) fail('mutations aggregate: statusTickMult below the neutral identity')
     if (typeof run.spreadAffliction !== 'boolean') fail('mutations aggregate: spreadAffliction must remain a boolean flag')
+    // ── F3 skills-mutations aggregate (F3 §10) ── momentumPerStack/dropRateMult stay ≥ their neutral identity
+    // (0 / 1); secondWind stays a boolean (may end UP armed or stay false — never an impossible non-boolean).
+    if (run.momentumPerStack < 0) fail('mutations aggregate: momentumPerStack below the neutral identity')
+    if (run.dropRateMult < 1) fail('mutations aggregate: dropRateMult below the neutral identity')
+    if (typeof run.secondWind !== 'boolean') fail('mutations aggregate: secondWind must remain a boolean flag')
   }
 }
 

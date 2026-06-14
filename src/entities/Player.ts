@@ -147,6 +147,7 @@ export class Player {
   firstHitBonusMult: number
   vsAfflictedDamageMult: number
   statusTickMult: number
+  momentumPerStack: number
   weapons: (WeaponSpec | null)[]
   activeWeaponIndex: number
   secondSlotUnlocked: boolean
@@ -241,6 +242,11 @@ export class Player {
     // read off RunState directly in the onDeath hook — no player mirror needed.)
     this.vsAfflictedDamageMult = 1 // ×damage vs an afflicted enemy (Hemorrhage).
     this.statusTickMult = 1 // ×applied DoT tickDmg (Virulent — "ticks harder").
+    // ── F3 skills-mutations live-read mirror (Momentum) ── mirrored from RunState by _syncPlayerScrollStats.
+    // Defaults to the neutral identity (0 = no ramp) so a fresh Player with no Momentum plays EXACTLY as before
+    // (the !== 0 guard in _mutationDamageMult skips the fold entirely). The live STACK count + window timer are
+    // SCENE-LOCAL transient state in GameScene (per-combat, like riposteTimer) — only the per-stack rate lives here.
+    this.momentumPerStack = 0 // ×damage per momentum stack — folded as 1 + stacks×this at the hit site (Momentum).
     // ── TWO weapon SLOTS (Enrichment round 3, item 3 — the build-identity lever) ── the run carries up to
     // TWO weapons (a primary + a secondary) and a SWAP key toggles which is active, so a run can hold
     // melee+ranged or two movesets — turning a loot pickup into a BUILD decision (carry the new weapon in

@@ -39,6 +39,14 @@ export const BLUEPRINTS: BlueprintEntry[] = [
   { id: 'bp_weapon_crossbow', name: 'Crossbow', kind: 'weapon', desc: 'A slow, heavy piercing bolt for the pool.' },
   { id: 'bp_weapon_frostwand', name: 'Frost Wand', kind: 'weapon', desc: 'A charged shot that freezes, for the pool.' },
   { id: 'bp_weapon_flail', name: 'Flail', kind: 'weapon', desc: 'An AoE-stun crowd-stagger melee for the pool.' },
+  // ── F3 skills-mutations (§2/§3) ── 3 new SKILL + 3 new MUTATION blueprints, one per new gated row. Each `id`
+  // matches its row's `blueprint` tag exactly (verifier §13c asserts the 1:1 catalog ↔ tag consistency, both ways).
+  { id: 'bp_skill_throwingaxe', name: 'Throwing Axe', kind: 'skill', desc: 'A heavy bleeding thrown axe for the pool.' },
+  { id: 'bp_skill_corrosivecloud', name: 'Corrosive Cloud', kind: 'skill', desc: 'A radial acid poison blast for the pool.' },
+  { id: 'bp_skill_lightning', name: 'Lightning', kind: 'skill', desc: 'A fast stunning bolt volley for the pool.' },
+  { id: 'bp_mutation_secondwind', name: 'Second Wind', kind: 'mutation', desc: 'Survive one lethal hit per biome.' },
+  { id: 'bp_mutation_momentum', name: 'Momentum', kind: 'mutation', desc: 'Damage ramps on consecutive hits.' },
+  { id: 'bp_mutation_scavenger', name: 'Scavenger', kind: 'mutation', desc: 'More gold & cell drops.' },
 ]
 
 // id → entry lookup (the Hub resolves an id, the drop resolves a picked id — DRY, one source).

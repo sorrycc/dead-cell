@@ -160,6 +160,59 @@ export const SKILLS: SkillSpec[] = [
     knockback: 520,
     blueprint: 'bp_skill_shockwave', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
   },
+  // ── THROWING AXE (volley — BLUEPRINT-GATED) (F3 skills-mutations §2/Decision 2) ── the brawler's ranged
+  // FINISHER: a SINGLE heavy thrown axe (count:1, spread:0 → fires straight along facing). Far higher per-shot
+  // damage than KNIVES on a much longer cooldown — the brute-force poke (brutality-scaling, vs KNIVES' tactics).
+  // A light BLEED tags the wound (the axe bites). Reuses the 'volley' dispatch verbatim (no new engine — a
+  // 1-shot fan fires straight, GameScene._useSkill). DEAD config until banked → a default save's pool is unchanged.
+  {
+    id: 'throwingaxe',
+    name: 'Throwing Axe',
+    desc: 'Hurl one heavy bleeding axe',
+    kind: 'volley',
+    scaling: 'brutality', // the heavy thrown finisher (brawler payoff) → red/Brutality (Decision 2).
+    cooldown: 3.5, // > KNIVES' 2.0 — a slow, committed throw (Decision 2).
+    count: 1, // a SINGLE heavy shot (vs the 3-knife fan).
+    spread: 0, // no fan — one straight throw.
+    projectile: { speed: 620, damage: 26, knockback: 280, lifetime: 1.0, w: 18, h: 8 }, // a heavy slow axe.
+    status: { kind: 'bleed', duration: 2.4, tickInterval: 0.4, tickDmg: 3 }, // the wound bleeds (light DoT).
+    blueprint: 'bp_skill_throwingaxe', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  },
+  // ── CORROSIVE CLOUD (blast — BLUEPRINT-GATED) (F3 skills-mutations §2/Decision 2/3) ── the acid-pool AoE: an
+  // instant radial blast + a POISON DoT to every enemy in range (the damage-over-time identity vs FROST GRENADE's
+  // stun / FIREBOMB's bleed). Drop it on a pack and let the acid finish them. Reuses the 'blast' dispatch verbatim
+  // (poison is a KNOWN status kind — zero new wiring). DEAD config until banked → a default save's pool is unchanged.
+  {
+    id: 'corrosivecloud',
+    name: 'Corrosive Cloud',
+    desc: 'Radial acid blast — poisons all in range',
+    kind: 'blast',
+    scaling: 'tactics', // thrown DoT utility → purple/Tactics (Decision 2).
+    cooldown: 6.0,
+    radius: 150,
+    damage: 12,
+    knockback: 120,
+    status: { kind: 'poison', duration: 4.0, tickInterval: 0.5, tickDmg: 4 }, // the acid DoT (the cloud's identity).
+    blueprint: 'bp_skill_corrosivecloud', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  },
+  // ── LIGHTNING (volley — BLUEPRINT-GATED) (F3 skills-mutations §2/Decision 2) ── the line-clear poke: a fast,
+  // tight bolt VOLLEY (count:3, narrow spread, high projectile speed) so the bolts thread a line of enemies (the
+  // ProjectilePool resolves each shot against every overlapping enemy along its flight — NO new pierce mechanic,
+  // KISS). The opposite of ICE SHARDS' wide freezing spray: a speed/line poke on a short cooldown, with a light
+  // STUN. Reuses the 'volley' dispatch verbatim. DEAD config until banked → a default save's pool is unchanged.
+  {
+    id: 'lightning',
+    name: 'Lightning',
+    desc: 'A fast tight bolt volley that stuns',
+    kind: 'volley',
+    scaling: 'tactics', // fast ranged poke → purple/Tactics (Decision 2).
+    cooldown: 3.0,
+    count: 3, // a tight multi-bolt line (>= 3 — the line-clear identity).
+    spread: 0.12, // rad — a very tight fan so the bolts overlap a line (NOT a spray).
+    projectile: { speed: 1100, damage: 8, knockback: 100, lifetime: 0.7, w: 16, h: 4 }, // FAST, thin bolts.
+    status: { kind: 'stun', duration: 0.4 }, // a light stun (non-damaging — no tick fields).
+    blueprint: 'bp_skill_lightning', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  },
 ]
 
 // id → row lookup (GameScene resolves a carried skillId back to the spec on a level rebuild; the HUD/pickup/

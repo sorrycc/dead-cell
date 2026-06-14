@@ -39,11 +39,30 @@ export interface MutationRunState extends ScrollRunState {
   vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
   statusTickMult: number // ×applied DoT tickDmg (Virulent — "afflictions tick harder"). 1 = neutral.
   spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
+  // ── F3 skills-mutations §3 (the 3 new blueprint-gated mutations' live-read fields) ── each defaults to the
+  // neutral identity in createRunState so a run with NO F3 mutation plays byte-identically. The GameScene read
+  // sites guard on the neutral value (a no-op at the identity). Bigger-is-better (momentumPerStack/dropRateMult);
+  // secondWind is a CAPABILITY flag a mutation may only turn ON (never off) — the never-weaken sweep asserts that.
+  secondWind: boolean // CAPABILITY: survive ONE otherwise-lethal hit per biome (Second Wind). false = off.
+  momentumPerStack: number // ×damage per momentum stack: 1 + stacks×this (Momentum). 0 = neutral (no ramp).
+  dropRateMult: number // ×gold/cell drop rate at the drop site (Scavenger). 1 = neutral.
 }
 
 // The low-HP threshold (fraction of max HP) below which a Berserker mutation's lowHpDamageMult applies.
 // Read at the resolveHit site in GameScene. A SHARED constant so the mutation desc + the live read agree.
 export const LOW_HP_THRESHOLD = 0.4 // below 40% HP → the "below 40% HP" damage bonus reads.
+
+// ── F3 skills-mutations SHARED constants (the desc + the live read agree — mirror LOW_HP_THRESHOLD) ──
+// MOMENTUM: per-stack damage bump, the consecutive-hit window (s), and the stack cap. The live STACK count +
+// window timer are SCENE-LOCAL transient state (per-combat, like riposteTimer); the per-hit fold is
+// 1 + stacks × MOMENTUM_PER_STACK, capped at MOMENTUM_MAX_STACKS (so the ramp is bounded — never-weaken-safe).
+export const MOMENTUM_PER_STACK = 0.08 // +8% damage per momentum stack (Momentum mutation arms momentumPerStack).
+export const MOMENTUM_WINDOW = 2.0 // s — a connecting hit within this window of the last bumps a stack; else reset.
+export const MOMENTUM_MAX_STACKS = 5 // the stack cap → up to +40% damage at full ramp (bounded).
+// SCAVENGER: the drop-rate multiplier a Scavenger pick arms (threaded into the spawnDrop lootMult seam).
+export const SCAVENGER_DROP_MULT = 1.5 // +50% gold/cell drop rate (Scavenger mutation arms dropRateMult via Math.max).
+// SECOND WIND: the HP floor the player snaps to when surviving an otherwise-lethal hit (the once-per-biome save).
+export const SECOND_WIND_FLOOR = 15 // HP the player is clamped to instead of dying (consumes the per-biome charge).
 
 // One mutation row: a pure-data { id, name, desc, apply(run) } that arms a run-only perk on the RunState
 // for THIS run. `desc` is the player-facing one-line shown in the MutationOverlay choice.
@@ -180,6 +199,46 @@ export const MUTATIONS: MutationSpec[] = [
     blueprint: 'bp_mutation_glasscannon', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
     apply: (run) => {
       run.scrollDamageMult *= 1.5
+    },
+  },
+  // ── Second Wind (BLUEPRINT-GATED) (F3 skills-mutations §3, Decision 4) ── survive ONE otherwise-lethal hit per
+  // biome (snap to a small HP floor instead of dying), then disarm until the next biome re-arms the charge. ONE
+  // CAPABILITY flag: apply() sets secondWind = true (the per-biome charge `secondWindAvailable` is a RunState field
+  // GameScene re-arms each biome + on pick). DEAD config until banked → a default save plays byte-identically.
+  {
+    id: 'secondwind',
+    name: 'Second Wind',
+    desc: 'Survive one lethal hit per biome',
+    blueprint: 'bp_mutation_secondwind', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+    apply: (run) => {
+      run.secondWind = true // arm the capability (false → true; the never-weaken sweep asserts it only arms).
+    },
+  },
+  // ── Momentum (BLUEPRINT-GATED) (F3 skills-mutations §3, Decision 5) ── damage RAMPS with consecutive hits: each
+  // connecting player hit within MOMENTUM_WINDOW bumps a stack (capped at MOMENTUM_MAX_STACKS), and the per-hit
+  // damage scales by 1 + stacks × momentumPerStack. ONE field (momentumPerStack); the live stack count + window
+  // timer are SCENE-LOCAL transient state (per-combat, NOT run-only). Math.max so a re-pick never weakens it.
+  // DEAD config until banked → a default save plays byte-identically (the !== 0 guard skips the fold).
+  {
+    id: 'momentum',
+    name: 'Momentum',
+    desc: `+${Math.round(MOMENTUM_PER_STACK * 100)}% damage per consecutive hit (max ${MOMENTUM_MAX_STACKS})`,
+    blueprint: 'bp_mutation_momentum', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+    apply: (run) => {
+      run.momentumPerStack = Math.max(run.momentumPerStack, MOMENTUM_PER_STACK)
+    },
+  },
+  // ── Scavenger (BLUEPRINT-GATED) (F3 skills-mutations §3, Decision 6) ── +gold/cell drop rate. ONE field
+  // (dropRateMult); the single read site threads it into the EXISTING spawnDrop(lootMult) seam (composes
+  // multiplicatively with the room/curse richness). Math.max so a re-pick never weakens it. DEAD config until
+  // banked → a default save drops byte-identically (dropRateMult === 1 → no-op).
+  {
+    id: 'scavenger',
+    name: 'Scavenger',
+    desc: `+${Math.round((SCAVENGER_DROP_MULT - 1) * 100)}% gold & cell drop rate`,
+    blueprint: 'bp_mutation_scavenger', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+    apply: (run) => {
+      run.dropRateMult = Math.max(run.dropRateMult, SCAVENGER_DROP_MULT)
     },
   },
 ]

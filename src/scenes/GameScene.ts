@@ -36,7 +36,7 @@ import { ENEMY_SPECS, ELITE_AFFIXES, ELITE_CHANCE } from '../config/enemies.js'
 import { BOSSES } from '../config/bosses.js'
 import type { BossAttackSpec } from '../config/bosses.js'
 import { SCROLLS, SCROLLS_BY_ID, SCROLL_IDS } from '../config/scrolls.js'
-import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD, runMutationPool } from '../config/mutations.js'
+import { MUTATION_ORDER, MUTATIONS_BY_ID, LOW_HP_THRESHOLD, runMutationPool, MOMENTUM_WINDOW, MOMENTUM_MAX_STACKS, SECOND_WIND_FLOOR } from '../config/mutations.js'
 import type { MutationSpec } from '../config/mutations.js'
 import { colorMult, survivalHpBonus, COLORS } from '../config/colors.js'
 import type { ColorId } from '../config/colors.js'
@@ -217,6 +217,13 @@ export class GameScene extends Phaser.Scene {
   private mutationPool!: MutationSpec[]
   private eliteChanceMult!: number // ×elite-affix roll chance from the tier (Decision 8; 1 on MVP tiers = identity).
   private hitstopTimer!: number
+  // ── Momentum scene-local transient state (F3 skills-mutations §3, Decision 5) ── the live STACK count + window
+  // timer are per-combat ephemeral (NOT run-only — they reset constantly, like player.riposteTimer), so they live
+  // as scene fields: the two player-hit sites bump _momentumStacks (capped) + reset _momentumTimer; update() decays
+  // the timer and zeroes the stacks when it lapses; _mutationDamageMult folds (1 + stacks×momentumPerStack). Both
+  // seeded 0 (the neutral identity — no ramp when no Momentum is armed, so the fold is a no-op → byte-identical).
+  private _momentumStacks!: number // current consecutive-hit stacks (0..MOMENTUM_MAX_STACKS); 0 = no ramp.
+  private _momentumTimer!: number // s remaining in the consecutive-hit window; 0 = lapsed (stacks reset).
   private gameOver!: boolean
   private transitioning!: boolean
   private boss!: Boss | null
@@ -405,6 +412,10 @@ export class GameScene extends Phaser.Scene {
     // gameplay dt the whole world reads). Effects only REQUESTS a freeze via the callback (capped,
     // de-duped — no stacking). These PERSIST across level rebuilds (only the world rebuilds).
     this.hitstopTimer = 0
+    // F3 skills-mutations §3 (Decision 5) — Momentum's live ramp seeded to the neutral identity (no stacks, lapsed
+    // window). Per-combat transient (the two hit sites bump it; update() decays it), so it resets every run/level.
+    this._momentumStacks = 0
+    this._momentumTimer = 0
     this.gameOver = false
     this.transitioning = false // Decision 40 one-shot guard (see _nextLevel).
     // ── Boss-room state (§6.6.3) — null/false until _buildBossLevel runs (the last level of RAMPARTS). ──
@@ -1162,6 +1173,9 @@ export class GameScene extends Phaser.Scene {
     // spend. This makes a damaged run survivable across biomes without trivialising the within-biome slide.
     if (rolled) {
       this.runState.flasks = this.runState.maxFlasks
+      // ── Second Wind per-biome re-arm (F3 skills-mutations §3, Decision 4) ── entering a NEW biome re-arms the
+      // charge to the CAPABILITY flag (secondWind). No-op within a biome / for an unarmed run (false → false).
+      this.runState.secondWindAvailable = this.runState.secondWind
       // §6.5 (round-3) — entering a NEW biome arms a guaranteed POWER scroll so the run's own power curve
       // keeps pace with the rising difficulty (a "scroll of power" per biome — the in-run power-arc fix).
       this._grantBiomePowerScroll()
@@ -1862,8 +1876,13 @@ export class GameScene extends Phaser.Scene {
     // room is actually RICHER to clear, not just on entry: lootMult boosts the cell count + the gold drop
     // (Pickup.spawnDrop). roomType is null on a miniboss level / before _applyRoomType → default 1 (identity,
     // a normal room drops exactly as before). Read at fire time so a level's tag applies to every kill in it.
+    // ── Scavenger thread (F3 skills-mutations §3, Decision 6) ── pass the run's dropRateMult (1 = neutral) as a
+    // DISTINCT spawnDrop arg, kept SEPARATE from the room's lootMult so the room drop behaviour is byte-unchanged:
+    // lootMult scales the cell count + gold amount (as before); dropRateMult scales the cell count + raises the
+    // gold/scroll CHANCE (the Scavenger payoff). dropRateMult === 1 → byte-identical drops (the identity). The drop
+    // site uses Math.random (off the seeded generator draw) so this never touches the level pin.
     enemy.onDrop = (dropX, dropY, count) =>
-      this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count, this.roomType ? this.roomType.lootMult ?? 1 : 1)
+      this.pickupPool.spawnDrop(dropX, dropY, this.runState.depth, count, this.roomType ? this.roomType.lootMult ?? 1 : 1, this.runState.dropRateMult)
     this.enemyHurtboxes.add(enemy.collider)
     // FLYER: exclude its body from the solids/oneWay colliders so it isn't stopped by / standing on the
     // floor (it hovers). The collider was added to enemyHurtboxes above (so player hits still land); the
@@ -2084,6 +2103,18 @@ export class GameScene extends Phaser.Scene {
     // BEFORE player.onHit (which consumes the parry window) — so dodge i-frames + parry STILL negate hits.
     const mult = (this.roomDamageTakenMult ?? 1) * effectiveCurseMult(this.runState.curseStacks)
     if (mult !== 1) result.damage = Math.round(result.damage * mult)
+    // ── Second Wind intercept (F3 skills-mutations §3, Decision 4 — the ONE new live hook) ── if THIS hit would
+    // be lethal AND the per-biome charge is armed, consume the charge + clamp the damage so the player survives at
+    // SECOND_WIND_FLOOR HP (intercepting BEFORE the lethal onHit — the player never enters the death edge, KISS).
+    // Guarded by secondWindAvailable so it is a no-op (byte-identical) when no Second Wind is armed (the identity).
+    // The parry window still negates the hit below (a parried hit never reaches lethality), so this composes safely.
+    if (this.runState.secondWindAvailable && this.player.parryTimer <= 0 && this.player.hp - result.damage <= 0) {
+      this.runState.secondWindAvailable = false // spend the charge (re-armed next biome / on a fresh pick).
+      result.damage = Math.max(0, this.player.hp - SECOND_WIND_FLOOR) // survive at the small HP floor.
+      this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: 0 }) // a survive pop (reuse FX).
+      this.cameras.main.flash(220, 255, 230, 120) // a bright golden flash marks the clutch save (primitives only).
+      this.sfx.flask() // reuse the heal/refresh cue for the "saved" beat (no new SFX — KISS).
+    }
     // ── Parry cue (per-weapon-movesets §6.6, Decision 5, AC8) ── the parry window is still LIVE at this instant
     // (onHit consumes it). ALL four player-hit sites funnel through here (DRY — one place), so checking the live
     // window here pops the "PARRY!" cue + a bright flash for ANY parried hit (enemy melee / contact / projectile
@@ -2109,6 +2140,9 @@ export class GameScene extends Phaser.Scene {
     const enemy = enemyRect.enemyRef
     if (!hb.active || !enemy || !enemy.isHittable() || hb.hitSet.has(enemy.id)) return
     hb.hitSet.add(enemy.id)
+    // F3 skills-mutations §3 (Momentum) — bump the consecutive-hit stack BEFORE resolveHit so THIS hit reads the
+    // ramped value in _mutationDamageMult. No-op when no Momentum is armed (the identity).
+    this._bumpMomentum()
     // PLAYER melee damage = swing × backstab × (meta meleeDamageMult × run scrollDamageMult × MUTATION folds),
     // composed + rounded ONCE in resolveHit (§6.5, Decision 60 — the mult is PASSED IN, damage.js stays pure).
     // _mutationDamageMult folds the Berserker (low-HP) + Assassin (full-HP target) perks (1× when no mutation).
@@ -2220,12 +2254,33 @@ export class GameScene extends Phaser.Scene {
     ) {
       mult *= this.player.vsAfflictedDamageMult
     }
+    // ── Momentum fold (F3 skills-mutations §3, Decision 5) ── ×(1 + stacks × momentumPerStack) — damage ramps with
+    // CONSECUTIVE hits inside the window. The stacks live as SCENE-LOCAL transient state (_momentumStacks, bumped at
+    // the two player-hit sites + decayed in update()). Guarded by momentumPerStack !== 0 so it's a no-op when no
+    // Momentum is armed → byte-identical (identity). Composes multiplicatively with the perks above. The stack is
+    // already capped (MOMENTUM_MAX_STACKS) at the bump sites, so the ramp is bounded (never-weaken-safe, ≥ 1×).
+    if (this.player.momentumPerStack !== 0 && this._momentumStacks > 0) {
+      mult *= 1 + this._momentumStacks * this.player.momentumPerStack
+    }
     // ── Riposte fold (per-weapon-movesets §6.6, Decision 5, AC8) ── ×damage on the next connecting hit after a
     // SUCCESSFUL parry (player.riposteDamageMult is RIPOSTE_DAMAGE_MULT while the riposte buff is live, else 1).
     // The CALLER (_onPlayerHitEnemy / _onProjectileHitEnemy) zeroes player.riposteTimer after a connecting hit
     // so the buff is SPENT once (a one-shot bump, not a decaying aura). 1× when no parry is live → identity (AC10).
     mult *= this.player.riposteDamageMult
     return mult
+  }
+
+  // ── _bumpMomentum() (F3 skills-mutations §3, Decision 5) ── called at the TWO player-hit sites on a connecting
+  // hit BEFORE resolveHit computes the damage (so this hit reads the bumped stack). If a hit lands within the
+  // window of the last, the chain grows by one stack (capped at MOMENTUM_MAX_STACKS); else the chain restarts at
+  // 1 (a fresh window). The window timer is re-stamped on every connecting hit; update() decays it + zeroes the
+  // stacks when it lapses. Guarded by momentumPerStack === 0 → a no-op (no transient churn) when no Momentum is
+  // armed (the identity). The live ramp is per-combat ephemeral (NOT run-only — KISS, like riposteTimer).
+  _bumpMomentum(): void {
+    if (this.player.momentumPerStack === 0) return // no Momentum armed → no ramp (identity, no churn).
+    // A hit inside the live window extends the chain; a lapsed window (timer 0) restarts it at 1.
+    this._momentumStacks = this._momentumTimer > 0 ? Math.min(MOMENTUM_MAX_STACKS, this._momentumStacks + 1) : 1
+    this._momentumTimer = MOMENTUM_WINDOW // re-stamp the consecutive-hit window on every connecting hit.
   }
 
   // ── _applyHitStatus(target, spec) (affliction-synergy §6.6, Decision 4, AC8) ── apply an already-scaled
@@ -2296,6 +2351,9 @@ export class GameScene extends Phaser.Scene {
     const enemy = enemyRect.enemyRef
     if (!pj.active || !enemy || !enemy.isHittable() || pj.hitSet.has(enemy.id)) return
     pj.hitSet.add(enemy.id)
+    // F3 skills-mutations §3 (Momentum) — bump the consecutive-hit stack BEFORE resolveHit so THIS shot reads the
+    // ramped value in _mutationDamageMult. No-op when no Momentum is armed (the identity).
+    this._bumpMomentum()
     // The projectile's spec carries damage/knockback (read like a swing row by resolveHit).
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
     const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
@@ -2430,6 +2488,10 @@ export class GameScene extends Phaser.Scene {
     // Both default to the neutral identity on RunState, so a run with no synergy leaves the player as before.
     this.player.vsAfflictedDamageMult = this.runState.vsAfflictedDamageMult
     this.player.statusTickMult = this.runState.statusTickMult
+    // ── F3 skills-mutations (Momentum, Decision 5/7) ── mirror the per-stack rate so _mutationDamageMult's fold
+    // reads it off the player (like the other hit-site mirrors). 0 = neutral (the !== 0 guard skips the fold). The
+    // live STACK count + window timer stay SCENE-LOCAL (_momentumStacks/_momentumTimer) — only the rate mirrors.
+    this.player.momentumPerStack = this.runState.momentumPerStack
     // color-scaling-stats §6 (Decision 6) — fold the Survival flat +max HP into the SAME scrollMaxHpBonus
     // derivation (zero new max-HP wiring; the heal-on-grow comes free). survivalHpBonus(0) === 0 → at level 0
     // this adds nothing (the identity). When a Survival level is gained, the next sync grows max HP + heals by
@@ -2852,6 +2914,10 @@ export class GameScene extends Phaser.Scene {
     if (spec) {
       spec.apply(this.runState) // arm the run-only perk (Decision 5) — mutates RunState's fields in place.
       this.runState.mutations.push(id) // record the pick (for the HUD list + the run summary).
+      // ── Second Wind initial arm (F3 skills-mutations §3, Decision 4) ── a FRESH Second Wind pick is usable in
+      // the CURRENT biome immediately (not only next biome), so arm the per-biome charge now. No-op for any other
+      // mutation (secondWind stays false → secondWindAvailable stays false — the identity).
+      if (this.runState.secondWind) this.runState.secondWindAvailable = true
       this._syncPlayerScrollStats() // push the reused + new perk fields to the live Player (DRY — one sync site).
       this.sfx.uiSelect() // a confirm cue for the pick (reuses the UI-select blip — no new SFX).
     }
@@ -3156,6 +3222,13 @@ export class GameScene extends Phaser.Scene {
       if (inputState.skill1Pressed) this._useSkill(0)
       if (inputState.skill2Pressed) this._useSkill(1)
       this.player.update(gdt, inputState)
+      // ── Momentum window decay (F3 skills-mutations §3, Decision 5) ── decay the consecutive-hit window on the
+      // GAMEPLAY dt (so it FREEZES with the world during a hit-stop / modal pause, like every other gameplay timer);
+      // when it lapses, zero the stacks (the chain resets). No churn when no stacks are live (the identity).
+      if (this._momentumTimer > 0) {
+        this._momentumTimer = Math.max(0, this._momentumTimer - gdt)
+        if (this._momentumTimer === 0) this._momentumStacks = 0
+      }
       for (const enemy of this.enemies) enemy.update(gdt, { player: this.player, effects: this.effects })
       // Boss tick (§6.6.3) — same (gdt, ctx) contract as Enemy so the hit-stop boundary is identical.
       if (this.boss && !this.boss.removed) this.boss.update(gdt, { player: this.player, effects: this.effects })

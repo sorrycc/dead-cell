@@ -213,6 +213,9 @@ export const ZH_CN: Dict = {
     hemorrhage: { name: '出血', desc: '对中异常的敌人伤害 +25%；击杀传播异常' },
     virulent: { name: '恶性', desc: '异常每跳伤害 +50%' },
     glasscannon: { name: '玻璃大炮', desc: '所有伤害 +50%' },
+    secondwind: { name: '第二风', desc: '每个生物群系免疫一次致命伤害' },
+    momentum: { name: '势能', desc: '每次连续命中伤害 +8%（最多 5 层）' },
+    scavenger: { name: '拾荒者', desc: '金币与细胞掉落率 +50%' },
   },
 
   // ── 技能 (config/skills.ts) ──
@@ -223,6 +226,9 @@ export const ZH_CN: Dict = {
     firebomb: { name: '火焰弹', desc: '范围灼烧爆炸' },
     turret: { name: '炮塔', desc: '部署一座自动开火的炮塔' },
     shockwave: { name: '冲击波', desc: '高威力范围击退爆炸' },
+    throwingaxe: { name: '投掷斧', desc: '投出一把沉重的流血巨斧' },
+    corrosivecloud: { name: '腐蚀云', desc: '范围酸液爆炸——使范围内全体中毒' },
+    lightning: { name: '闪电', desc: '一道快速密集的眩晕弹幕' },
   },
 
   // ── 首领 / 精英首领 (config/bosses.ts) ──
@@ -267,6 +273,12 @@ export const ZH_CN: Dict = {
     bp_weapon_crossbow: { name: '弩', desc: '为武器池加入一把缓慢沉重的穿透弩。' },
     bp_weapon_frostwand: { name: '冰霜法杖', desc: '为武器池加入一把蓄力冰冻的法杖。' },
     bp_weapon_flail: { name: '连枷', desc: '为武器池加入一把范围眩晕的群控连枷。' },
+    bp_skill_throwingaxe: { name: '投掷斧', desc: '为技能池加入一把沉重流血的投掷斧。' },
+    bp_skill_corrosivecloud: { name: '腐蚀云', desc: '为技能池加入一记范围酸液中毒爆炸。' },
+    bp_skill_lightning: { name: '闪电', desc: '为技能池加入一道快速眩晕的弹幕。' },
+    bp_mutation_secondwind: { name: '第二风', desc: '每个生物群系免疫一次致命伤害。' },
+    bp_mutation_momentum: { name: '势能', desc: '连续命中使伤害递增。' },
+    bp_mutation_scavenger: { name: '拾荒者', desc: '提高金币与细胞掉落。' },
   },
 
   // ── 商店物品 (config/shop.ts) ──

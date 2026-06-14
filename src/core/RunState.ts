@@ -100,6 +100,16 @@ export interface RunState {
   vsAfflictedDamageMult: number // ×player damage vs an AFFLICTED enemy (Hemorrhage). 1 = neutral.
   statusTickMult: number // ×applied DoT tickDmg (Virulent — "ticks harder"). 1 = neutral.
   spreadAffliction: boolean // killing an afflicted enemy spreads it (Hemorrhage). false = off.
+  // ── F3 skills-mutations perks (the 3 new blueprint-gated mutations' run-only fields) ── each seeded to the
+  // neutral identity so a run with NO F3 mutation plays byte-identically; carried across level rebuilds (the
+  // persisted RunState object). secondWind is the CAPABILITY a Second Wind pick arms; secondWindAvailable is the
+  // per-biome CHARGE GameScene re-arms each biome transition (reset to secondWind in _continueTransition) and on
+  // the pick itself (_applyMutation). momentumPerStack is mirrored onto the Player (the hit-site fold reads it);
+  // dropRateMult is read off RunState at the drop site. The GameScene reads guard on the neutral value (no-op).
+  secondWind: boolean // CAPABILITY: a Second Wind pick is armed (Second Wind). false = off/neutral.
+  secondWindAvailable: boolean // the per-biome CHARGE (re-armed each biome to `secondWind`). false = spent/neutral.
+  momentumPerStack: number // ×damage per momentum stack — 1 + stacks×this (Momentum). 0 = neutral (no ramp).
+  dropRateMult: number // ×gold/cell drop rate at the drop site (Scavenger). 1 = neutral.
   // ── Cursed-chest CURSE stacks (cursed-chests design §6, AC7, Decision 5) ── the remaining curse stacks: 0 =
   // NO curse (the neutral identity → effectiveCurseMult(0) === 1 → _hurtPlayer byte-unchanged). Opening a
   // cursed chest sets it to CURSE.killsToClear (greatly amplified damage taken); each enemy kill peels one
@@ -240,6 +250,16 @@ export function createRunState(startSeed: number, startedAt = 0, startStats: Run
     vsAfflictedDamageMult: 1, // ×player damage vs an afflicted enemy (Hemorrhage); folded at both hit sites.
     statusTickMult: 1, // ×applied DoT tickDmg when arming a damaging status (Virulent); applied in _scaleStatus.
     spreadAffliction: false, // killing an afflicted enemy spreads its dominant DoT (Hemorrhage); read in onDeath.
+
+    // ── F3 skills-mutations perks (the 3 new blueprint-gated mutations) ── all seeded to the NEUTRAL identity so a
+    // run with NO F3 mutation plays byte-identically: secondWind/secondWindAvailable false (the _hurtPlayer lethal-
+    // hit intercept is skipped), momentumPerStack 0 (_mutationDamageMult skips the ramp fold), dropRateMult 1 (the
+    // drop site is byte-identical). Carried across level rebuilds; secondWindAvailable is RE-ARMED on each biome
+    // transition by GameScene (reset to secondWind in _continueTransition) — not here (where the other resets live).
+    secondWind: false, // CAPABILITY: a Second Wind pick is armed (read in _hurtPlayer/_continueTransition).
+    secondWindAvailable: false, // the per-biome CHARGE (re-armed each biome to secondWind; consumed on a lethal save).
+    momentumPerStack: 0, // ×damage per momentum stack (Momentum); mirrored onto the Player, folded at the hit site.
+    dropRateMult: 1, // ×gold/cell drop rate (Scavenger); read off runState at the enemy.onDrop site.
 
     // ── Cursed-chest CURSE stacks (cursed-chests design §6, AC7, Decision 5) ── seeded 0 (the neutral
     // identity: effectiveCurseMult(0) === 1 → a fresh run is byte-identical; the verifier's determinism walk
