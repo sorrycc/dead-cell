@@ -170,6 +170,7 @@ export const SEWERS: BiomeConfig = {
     { id: 'shooter', w: 2 },
     { id: 'charger', w: 1 }, // round-3 — a rare dasher debuts in the Sewers (was Ramparts-only before).
     { id: 'flyer', w: 1 }, // round-3 — an occasional swooper (front-loads the aerial threat).
+    { id: 'kamikaze', w: 1 }, // F4 enemy-roster (Decision 7) — a RARE suicide-rusher debut (a sharp but cheap threat that fits the kiting chaos).
   ],
   // Layout mix (Enrichment round-2) — the Sewers tilt toward floating ISLANDS over open water/sludge (a
   // bouncier traverse that pairs with the kiting shooters), with the stair + shaft as the alternates.
@@ -222,6 +223,8 @@ export const CATACOMBS: BiomeConfig = {
     { id: 'spitter', w: 3 }, // the round-3 5th archetype debuts here (its signature biome).
     { id: 'flyer', w: 2 },
     { id: 'charger', w: 1 }, // round-3 — a rare dasher in the crypt (collective full-roster coverage mid-run).
+    { id: 'bomber', w: 2 }, // F4 enemy-roster (Decision 7) — the lobbed-splash zoner fits the vertical crypt (moderate).
+    { id: 'shielder', w: 1 }, // F4 enemy-roster (Decision 7) — a light frontal tank (a low-weight crypt debut).
   ],
   // Layout mix (Enrichment round-2) — the Catacombs lean into the vertical SHAFT (a switchback descent into
   // the crypt — its signature spatial feel), with the stair + islands as the alternates.
@@ -273,6 +276,8 @@ export const OSSUARY: BiomeConfig = {
     { id: 'shooter', w: 3 }, // the signature ranged-ambush tilt (vs. Catacombs' spitter spread).
     { id: 'charger', w: 2 }, // dashers down the galleries (a distinct pressure from the crypt's flyers).
     { id: 'flyer', w: 1 }, // a light aerial sprinkle so the roster still varies.
+    { id: 'shielder', w: 2 }, // F4 enemy-roster (Decision 7) — a frontal tank pairs with the shooters (the ranged-ambush galleries feel; moderate).
+    { id: 'bomber', w: 1 }, // F4 enemy-roster (Decision 7) — a light lobbed-splash zoner (kept DISTINCT from Catacombs' mix).
   ],
   // Layout mix (Decision 2) — ISLANDS-heavy (broken bone-bridges over the void) so it reads spatially distinct
   // from Catacombs' vertical SHAFT, with the stair + shaft as alternates (≥2 templates across the sweep — verified).
@@ -322,6 +327,9 @@ export const RAMPARTS: BiomeConfig = {
     { id: 'charger', w: 2 },
     { id: 'flyer', w: 2 },
     { id: 'spitter', w: 2 },
+    { id: 'bomber', w: 2 }, // F4 enemy-roster (Decision 7) — the deepest biome throws the FULL bestiary at you (moderate).
+    { id: 'kamikaze', w: 2 }, // F4 enemy-roster (Decision 7).
+    { id: 'shielder', w: 2 }, // F4 enemy-roster (Decision 7).
   ],
   // Layout mix (Enrichment round-2) — the deepest biome throws the FULL shape variety at you in roughly even
   // measure (every room a fresh spatial puzzle), tilted a touch toward the sprawling ISLANDS read (a fortress

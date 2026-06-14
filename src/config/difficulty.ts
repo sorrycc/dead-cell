@@ -95,8 +95,18 @@ export function scaleSpec(baseSpec: EnemySpec, scale: DepthScale): EnemySpec {
     attacks: baseSpec.attacks.map((a) => ({
       ...a,
       swing: a.swing ? { ...a.swing, damage: Math.round(a.swing.damage * scale.enemyDamageMult) } : a.swing,
+      // Deep-clone the projectile + fold its damage; the BOMBER's `impactAoe` (F4 enemy-roster, Decision 6)
+      // rides INSIDE this clone (so the base table is never mutated) and its `damage` folds by the SAME
+      // enemyDamageMult as projectile.damage — a deeper Bomber's splash hits harder (never-weaken, monotone).
+      // Absent impactAoe ⇒ left absent (the additive identity for every non-Bomber bolt).
       projectile: a.projectile
-        ? { ...a.projectile, damage: Math.round(a.projectile.damage * scale.enemyDamageMult) }
+        ? {
+            ...a.projectile,
+            damage: Math.round(a.projectile.damage * scale.enemyDamageMult),
+            impactAoe: a.projectile.impactAoe
+              ? { ...a.projectile.impactAoe, damage: Math.round(a.projectile.impactAoe.damage * scale.enemyDamageMult) }
+              : a.projectile.impactAoe,
+          }
         : a.projectile,
     })),
   }

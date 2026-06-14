@@ -474,6 +474,15 @@ export class GameScene extends Phaser.Scene {
     // in-flight shots and remove the silent-drop edge (cheap — the rects are parked+disabled until acquired).
     this.projectilePool = new ProjectilePool(this, 'player', 16)
     this.enemyProjectilePool = new ProjectilePool(this, 'enemy') // §6.6.3 (Decision 65) — enemy/boss shots.
+    // ── BOMBER impact-AoE seam (F4 enemy-roster, Decision 4) ── pop a radial splash where a shot carrying
+    // `impactAoe` RELEASES (lands / lifetime / out-of-world via tick, OR a direct player hit via release). The
+    // pool gates this to NATURAL releases only — releaseAll() (level teardown) does NOT fire it (review BLOCKER:
+    // a teardown is not a 'land', so it never applies damage at a level boundary). Undefined for the player pool
+    // and every non-Bomber enemy shot (no impactAoe) ⇒ no-op (the additive identity).
+    this.enemyProjectilePool.onRelease = (x, y, spec) => {
+      const aoe = (spec as any)?.impactAoe
+      if (aoe) this._enemyRadialDamage(x, y, aoe)
+    }
 
     // ── Pickup pool (§6.5, Decision 54) ── pooled Cells/gold/scroll/weapon pickups; persists across
     // rebuilds (live pickups are released on teardown). Enemy drops + generator pickups acquire from it.
@@ -1663,6 +1672,20 @@ export class GameScene extends Phaser.Scene {
     this.sfx.skill(spec.kind) // skills slice (AC3) — the skill-use cue, timbre per kind.
   }
 
+  // ── _applyFrontalDR(enemy, result) (F4 enemy-roster, Decision 3 — the SHIELDER frontal damage reduction) ──
+  // a Shielder reduces a player melee/projectile hit that came from the FRONT/flank-facing (NOT a backstab);
+  // a backstab/flank (result.isBackstab — the EXISTING facing math from resolveHit) lands FULL ("get behind
+  // the shield"). Applied at the SCENE hit sites (damage.ts stays PURE — never imports config, Decision 60).
+  // Math.max(1,…) keeps a front hit always ≥ 1 (a shield blunts, never fully negates — the player is never
+  // soft-locked vs. a Shielder with no flanking room). frontalDR 0/undefined ⇒ result returned UNCHANGED (the
+  // identity — every non-Shielder archetype takes full damage). Returns a NEW result when reduced (never
+  // mutating the resolveHit output in place); the same `result` reference otherwise (zero-cost identity).
+  _applyFrontalDR(enemy: Enemy, result: HitResult): HitResult {
+    const dr = enemy.spec.frontalDR ?? 0
+    if (dr <= 0 || result.isBackstab || result.damage <= 0) return result
+    return { ...result, damage: Math.max(1, Math.round(result.damage * (1 - dr))) }
+  }
+
   // ── _radialDamage(x, y, radius, damage, knockback, status) (skills design §6.3, Decision 1, AC3) ── the
   // 'blast' skill's instant radial AoE: damage every LIVE, hittable enemy AND the boss within `radius` px of
   // (x, y), shoving each AWAY from the blast center. REUSES resolveHit (a synthetic swing from the blast
@@ -1693,6 +1716,26 @@ export class GameScene extends Phaser.Scene {
     }
     for (const enemy of this.enemies) hitTarget(enemy)
     if (this.boss && !this.boss.removed) hitTarget(this.boss)
+  }
+
+  // ── _enemyRadialDamage(x, y, aoe) (F4 enemy-roster, Decision 4 — the BOMBER impact splash) ── the
+  // enemy/boss analogue of _radialDamage: an instant radial that hits the PLAYER if within radius (the
+  // _radialDamage primitive hits the player's TARGETS — wrong direction for a Bomber splash). Mirrors
+  // _onEnemyProjectileHitPlayer EXACTLY — SAME resolveHit opts (allowBackstab:false, NO damageMult — enemies
+  // never get the player's mults, the review-pinned rule), SAME _hurtPlayer (so the cursed-room damage-taken
+  // mult + parry/Second-Wind apply), SAME effects.hit. A no-op when the player is un-hittable (dodge i-frames)
+  // or out of range. `aoe` is { radius, damage, knockback } (the bolt's impactAoe, depth-folded by scaleSpec).
+  _enemyRadialDamage(x: number, y: number, aoe: { radius: number; damage: number; knockback: number }): void {
+    if (!aoe || aoe.radius <= 0 || aoe.damage <= 0 || !this.player.isHittable()) return
+    const p = this.player.body.center
+    if (Math.hypot(p.x - x, p.y - y) > aoe.radius) return
+    const swing = { damage: aoe.damage, knockback: aoe.knockback }
+    // The blast origin is the attacker (facing toward the player so resolveHit shoves them AWAY from it).
+    const result = resolveHit({ cx: x, facing: p.x >= x ? 1 : -1 }, this.player.attackerShape, swing, {
+      allowBackstab: false,
+    })
+    this._hurtPlayer(result) // the cursed-room damage-taken mult + parry/Second-Wind apply (DRY — one place).
+    this.effects.hit(p.x, p.y, { damage: result.damage })
   }
 
   // ── _blastRingFx(x, y, radius) (skills design §6.3) ── a particle ring marking the blast edge (the visual
@@ -2146,11 +2189,12 @@ export class GameScene extends Phaser.Scene {
     // PLAYER melee damage = swing × backstab × (meta meleeDamageMult × run scrollDamageMult × MUTATION folds),
     // composed + rounded ONCE in resolveHit (§6.5, Decision 60 — the mult is PASSED IN, damage.js stays pure).
     // _mutationDamageMult folds the Berserker (low-HP) + Assassin (full-HP target) perks (1× when no mutation).
-    const result = resolveHit(this.player.attackerShape, enemy.attackerShape, hb.swing, {
+    let result = resolveHit(this.player.attackerShape, enemy.attackerShape, hb.swing, {
       allowBackstab: true,
       // color-scaling-stats §6 (Decision 8) — × the equipped weapon's colour mult (×1 at level 0 → identity).
       damageMult: this.player.meleeDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy) * this._weaponColorMult(),
     })
+    result = this._applyFrontalDR(enemy, result) // SHIELDER (F4) — a front hit is reduced; a backstab/flank lands full.
     // ── Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) ── _mutationDamageMult folded the riposte
     // bump into `result` above; zero the buff now so it's SPENT on THIS connecting hit (one-shot). 0 by default
     // → no-op (identity, AC10).
@@ -2356,11 +2400,12 @@ export class GameScene extends Phaser.Scene {
     this._bumpMomentum()
     // The projectile's spec carries damage/knockback (read like a swing row by resolveHit).
     const swing = { damage: pj.spec.damage, knockback: pj.spec.knockback }
-    const result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
+    let result = resolveHit(pj.attackerShape, enemy.attackerShape, swing, {
       allowBackstab: true,
       // color-scaling-stats §6 (Decision 8) — × the equipped weapon's colour mult (×1 at level 0 → identity).
       damageMult: this.player.rangedDamageMult * this.player.scrollDamageMult * this._mutationDamageMult(enemy) * this._weaponColorMult(),
     })
+    result = this._applyFrontalDR(enemy, result) // SHIELDER (F4) — a front hit is reduced; a backstab/flank lands full.
     // Riposte spend (per-weapon-movesets §6.6, Decision 5, AC8) — _mutationDamageMult folded the bump into
     // `result`; zero it so the buff is SPENT on this connecting shot (one-shot). 0 by default → no-op (AC10).
     this.player.riposteTimer = 0

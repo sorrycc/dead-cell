@@ -50,6 +50,11 @@ export interface EnemyProjectileSpec {
   lifetime: number
   w: number
   h: number
+  // ── BOMBER impact splash (F4 enemy-roster, Decision 2/4) ── an OPTIONAL radial AoE popped where this shot
+  // RELEASES (land/lifetime/out-of-world OR a direct player hit). Read by GameScene via the enemy projectile
+  // pool's onRelease seam (Decision 4). Absent / null ⇒ no splash (every existing bolt is byte-identical — the
+  // additive identity). `damage` is folded by scaleSpec alongside projectile.damage (a deeper splash hits harder).
+  impactAoe?: { radius: number; damage: number; knockback: number } | null
 }
 
 // ── The enemy ATTACK vocabulary (enemy-ai-telegraphs §6.1, Decision 1/7) ──────────────────────────────
@@ -134,6 +139,15 @@ export interface EnemySpec {
   hoverHeight?: number // 'fly' — preferred height above the player.
   swoopSpeed?: number // 'fly' — the 2-D lunge speed.
   noGravity?: boolean // 'fly' — GameScene disables body gravity + skips the solids collider.
+  // ── F4 enemy-roster base-spec hooks (each read ONLY by the matching code path, undefined-safe — Decision 5/3) ──
+  // deathBurst: KAMIKAZE — a TRUE-radial volley fired on death from the enemy ProjectilePool (SAME shape as
+  // EliteAffixSpec.deathBurst — DRY). Enemy._fireDeathBurst reads `this.spec.deathBurst ?? this.elite?.deathBurst`.
+  // Absent / null ⇒ no burst (every existing archetype unchanged — only an elite roll bursts today).
+  deathBurst?: { count: number; projectile: EnemyProjectileSpec } | null
+  // frontalDR: SHIELDER — fraction (0..1) of incoming PLAYER damage REMOVED on a NON-backstab (front/flank-
+  // facing) hit; a backstab/flank lands full. Applied at the SCENE hit site (damage.ts stays pure — Decision 3).
+  // Absent / 0 ⇒ no reduction (the identity).
+  frontalDR?: number
 }
 
 // An elite affix — a small bundle of MODIFIERS folded onto a normal archetype (Decision 77). All fields
@@ -433,18 +447,174 @@ export const SPITTER: EnemySpec = {
   cellDrop: 5, // a priority kill (a richer drop than the Shooter — it's tankier + more dangerous up close).
 }
 
+// ── BOMBER — a lobbed-splash zoner (behavior:'ranged' + an impact AoE, F4 enemy-roster, Decision 1/2). ──
+// Reuses the SHOOTER kiting / fire-on-the-beat path VERBATIM (behavior:'ranged') — ZERO new FSM branch. Its
+// distinctiveness is ONE slow, heavily-telegraphed `shoot` whose bolt carries `impactAoe`: when the shot
+// releases (lands / lifetime / out-of-world OR a direct player hit) GameScene pops a small radial splash at
+// the impact point (Decision 4 — the onRelease seam). The "slow heavy lob" reads through the LOW speed + the
+// long telegraph + the splash, NOT parabolic physics (YAGNI — the pool integrates a constant 2-D velocity).
+// A direct hit deals the bolt AND the splash (the Bomber's payoff — both tuned modest so the combined hit is
+// fair for a slow, very-readable shot). The verifier asserts impactAoe is well-formed (Decision 7).
+const BOMBER_BOLT: EnemyProjectileSpec = {
+  ...BOW.projectile!,
+  speed: 220, // px/s — SLOW + heavy (a lob you read on reaction, not a snap shot).
+  damage: 6, // hp — a modest direct bolt (the splash is the real threat).
+  knockback: 160,
+  lifetime: 1.4, // s — the "it landed" timer: a slow shot expires roughly where it falls, popping the splash.
+  w: 16,
+  h: 16, // a chunky "live grenade" read.
+  impactAoe: { radius: 64, damage: 10, knockback: 240 }, // the splash popped on release (Decision 4).
+}
+export const BOMBER: EnemySpec = {
+  id: 'bomber',
+  behavior: 'ranged', // REUSES the shooter FSM path (kite + fire on the beat) — only the impact splash is new.
+  maxHp: 46,
+  bodyW: 40,
+  bodyH: 48,
+  color: 0xe67e22, // resting fill (dark amber — a "live grenade" read, distinct from Shooter purple / Spitter teal).
+  colorTelegraph: 0xf1c40f,
+  colorActive: 0xffc97a, // bright flash on the lob (the bomb is away — AC1).
+  colorRecovery: 0x7e4708, // dim amber during the reload recovery (the punish window — AC1).
+  colorHurt: 0xffffff,
+  patrolSpeed: 56,
+  chaseSpeed: 120,
+  chaseAccel: 760,
+  detectRange: 460,
+  detectHeight: 160,
+  loseRange: 560,
+  loseGrace: 1.4,
+  attackRange: 360, // px — lobs from well outside melee range (the zoner beat).
+  preferredRange: 280, // px — backs off if the player gets closer (kiting, like the Shooter).
+  attackCooldown: 1.9, // s — a slow cadence (a heavy lob is a big commitment).
+  telegraph: 0.7, // s — a LONG, very readable wind-up (you can step out of the splash, AC56).
+  attackActive: 0.1,
+  attackRecovery: 0.5,
+  contactDamage: 5,
+  contactCooldown: 0.7,
+  // Well-formed (never swung — its hit is the lob); the swing row sizes the cosmetic marker.
+  swing: { reach: 30, halfHeight: 20, forward: 12, damage: 0, knockback: 0 },
+  projectile: BOMBER_BOLT, // back-compat top-level bolt (the enemy ProjectilePool reads attacks[].projectile).
+  // ── attacks[] (AC3/AC8) ── a single slow lobbed bolt carrying impactAoe. KISS: one attack (the Bomber's
+  // whole identity is the splash — no second strike needed; a 1-entry table is the simplest well-formed shape).
+  attacks: [
+    { kind: 'shoot', weight: 1, telegraph: 0.7, active: 0.1, recovery: 0.5, projectile: BOMBER_BOLT, projectileCount: 1 },
+  ],
+  hitstun: 0.28,
+  hurtIframe: 0.12,
+  knockbackTakeMult: 1.0,
+  cellDrop: 5, // a priority kill (its splash zones an area — you want it dead).
+}
+
+// ── KAMIKAZE — a suicide rusher (behavior:'charge' + a death burst, F4 enemy-roster, Decision 1/5). ──
+// Reuses the CHARGER dash path VERBATIM (behavior:'charge') — ZERO new FSM branch. LOW HP + a fast dash: it
+// commits at you, and on death fires a radial burst (a "dodge the corpse" tell) via the EXISTING
+// _fireDeathBurst path, widened to read `spec.deathBurst` (Decision 5) — the SAME enemy ProjectilePool + the
+// enemy-shot→player overlap the elite burst uses, ZERO new wiring. Its threat is the rush + the posthumous
+// pop, not durability — it dies fast if you read the dash. The verifier asserts deathBurst is well-formed.
+export const KAMIKAZE: EnemySpec = {
+  id: 'kamikaze',
+  behavior: 'charge', // REUSES the charger dash path (telegraph → fast lunge) — only the death burst is new.
+  maxHp: 22, // a glass rusher — dies fast (its threat is the commit + the corpse pop, not soak).
+  bodyW: 34,
+  bodyH: 40,
+  color: 0xe84393, // resting fill (hot crimson/pink — a "this one rushes + pops" read).
+  colorTelegraph: 0xf1c40f,
+  colorActive: 0xff9ec9, // bright flash while the dash is live (the "dodge NOW" cue, AC1).
+  colorRecovery: 0x7a1450, // dim crimson during the short recovery (the punish window, AC1).
+  colorHurt: 0xffffff,
+  patrolSpeed: 80, // quick — it harasses.
+  chaseSpeed: 180,
+  chaseAccel: 900,
+  detectRange: 420,
+  detectHeight: 150,
+  loseRange: 540,
+  loseGrace: 1.3,
+  attackRange: 280, // px — commits the rush from a good range.
+  attackCooldown: 1.4, // s — a quicker re-wind than the tanky Charger (it's a glass rusher).
+  telegraph: 0.5, // s — a readable wind-up before the lunge (still dodgeable, AC56).
+  attackActive: 0.4, // s — the dash duration (the body-contact hitbox is live during it).
+  attackRecovery: 0.55,
+  chargeSpeed: 680, // px/s — a FAST committed lunge (faster than the Charger — it's the suicide rush).
+  contactDamage: 10, // hp — a solid slam on contact during the rush.
+  contactCooldown: 0.7,
+  swing: { reach: 40, halfHeight: 26, forward: 12, damage: 12, knockback: 360 },
+  // ── attacks[] (AC3/AC8) ── a single fast dash (the kamikaze rush). KISS: one attack — its variety lives in
+  // the death burst, not a second strike.
+  attacks: [
+    { kind: 'dash', weight: 1, telegraph: 0.5, active: 0.4, recovery: 0.55, chargeSpeed: 680 },
+  ],
+  // ── deathBurst (Decision 5) ── on death, fire a 6-shot radial ring of WEAK 'enemy' projectiles (a "dodge
+  // the corpse" tell, low per-shot damage). Rides the EXISTING enemy ProjectilePool + the enemy-shot→player
+  // overlap with ZERO new wiring (it is the elite-burst path, sourced from the base spec — Decision 5).
+  deathBurst: {
+    count: 6,
+    projectile: { speed: 280, damage: 7, knockback: 180, lifetime: 0.9, w: 12, h: 12 },
+  },
+  hitstun: 0.22,
+  hurtIframe: 0.12,
+  knockbackTakeMult: 1.1, // light — it's the glass one, gets nudged.
+  cellDrop: 4,
+}
+
+// ── SHIELDER — a frontal damage-reduction tank (behavior:'melee' + frontalDR, F4 enemy-roster, Decision 1/3). ──
+// Reuses the GRUNT melee path VERBATIM (behavior:'melee') — ZERO new FSM branch. It is TANKY (high HP) and
+// carries `frontalDR ~0.6`: a player melee/projectile hit from the FRONT is reduced (the shield blunts it),
+// but a backstab/flank (result.isBackstab — the EXISTING facing math) lands FULL ("get behind the shield").
+// The reduction is applied at the SCENE hit sites (Decision 3 — damage.ts stays pure). Math.max(1,…) keeps a
+// front hit always ≥ 1 (never soft-locks). The verifier asserts frontalDR ∈ [0,1).
+export const SHIELDER: EnemySpec = {
+  id: 'shielder',
+  behavior: 'melee', // REUSES the grunt melee path (patrol → chase → telegraph → swing) — only frontalDR is new.
+  maxHp: 85, // tanky — its whole point is durability from the front (flank it to break the tempo).
+  bodyW: 42,
+  bodyH: 56,
+  color: 0x5d6d7e, // resting fill (steel grey-blue — a "tanky front" read).
+  colorTelegraph: 0xf1c40f,
+  colorActive: 0xc7d2da, // bright flash on the strike's live window (the "dodge NOW" cue, AC1).
+  colorRecovery: 0x34414c, // dim steel during the punish window (the "punish NOW" cue, AC1).
+  colorHurt: 0xffffff,
+  patrolSpeed: 56, // a slow, deliberate advance (it holds the line).
+  chaseSpeed: 130,
+  chaseAccel: 700,
+  detectRange: 360,
+  detectHeight: 140,
+  loseRange: 480,
+  loseGrace: 1.2,
+  attackRange: 72,
+  attackCooldown: 1.1,
+  telegraph: 0.46, // s — a readable shield-bash wind-up (AC56).
+  attackActive: 0.14,
+  attackRecovery: 0.5,
+  contactDamage: 7,
+  contactCooldown: 0.6,
+  swing: { reach: 58, halfHeight: 32, forward: 16, damage: 14, knockback: 340 },
+  frontalDR: 0.6, // SHIELDER (Decision 3) — front hits reduced 60%; a backstab/flank lands full. 0 = identity.
+  // ── attacks[] (AC3/AC8) ── a shield-bash swing. KISS: one swing attack — its identity is the frontal DR,
+  // not a varied moveset.
+  attacks: [
+    { kind: 'swing', weight: 1, telegraph: 0.46, active: 0.14, recovery: 0.5, swing: { reach: 58, halfHeight: 32, forward: 16, damage: 14, knockback: 340 } },
+  ],
+  hitstun: 0.24,
+  hurtIframe: 0.12,
+  knockbackTakeMult: 0.6, // heavy — barely juggled (it holds its footing behind the shield).
+  cellDrop: 5,
+}
+
 // ── ENEMY_SPECS (id → spec) ── the lookup GameScene + the verifier use to resolve an archetype id to
-// its spec. FIVE archetypes now (≥4, AC59; round-3 added the Spitter). KISS: a flat map, mirroring WEAPONS.
+// its spec. EIGHT archetypes now (≥4, AC59; F4 added Bomber/Kamikaze/Shielder). KISS: a flat map, mirroring WEAPONS.
 export const ENEMY_SPECS: Record<string, EnemySpec> = {
   grunt: GRUNT,
   shooter: SHOOTER,
   charger: CHARGER,
   flyer: FLYER,
   spitter: SPITTER,
+  bomber: BOMBER,
+  kamikaze: KAMIKAZE,
+  shielder: SHIELDER,
 }
 
 // The ordered list (for the verifier sweep + any list rendering).
-export const ENEMY_ARCHETYPES: EnemySpec[] = [GRUNT, SHOOTER, CHARGER, FLYER, SPITTER]
+export const ENEMY_ARCHETYPES: EnemySpec[] = [GRUNT, SHOOTER, CHARGER, FLYER, SPITTER, BOMBER, KAMIKAZE, SHIELDER]
 
 // ── ELITE affixes (design §6.11, Decision 77, AC64; Enrichment round 3 — the weighted set) ──
 // An elite is a NORMAL archetype with a small bundle of MODIFIERS rolled at spawn — NOT a new archetype

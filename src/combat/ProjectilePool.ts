@@ -86,6 +86,16 @@ export class ProjectilePool {
   group: Phaser.Physics.Arcade.Group
   private _items: ProjectileRect[]
 
+  // ── onRelease(x, y, spec) (F4 enemy-roster, Decision 4 — the BOMBER impact-AoE seam) ── an OPTIONAL hook
+  // fired ONCE per shot on a NATURAL release (lifetime / out-of-world in tick(), and the direct-hit release()
+  // path), carrying the shot's last body center + its projectile spec. GameScene wires it for the ENEMY pool
+  // to pop a Bomber's splash where its lob lands. UNDEFINED by default ⇒ ZERO behaviour change for the player
+  // pool and every non-Bomber enemy shot (the additive identity). IMPORTANT (review BLOCKER): it is NOT fired
+  // by releaseAll() — a level-rebuild teardown is not a 'land', and firing it there would apply damage at a
+  // level boundary against the player mid-teardown (breaking the additive-identity claim). _disable takes a
+  // `fireRelease` flag (default true for tick/release; false from releaseAll) that gates this exactly.
+  onRelease?: (x: number, y: number, spec: ProjectileSpec | null) => void
+
   // scene: the GameScene. ownerTag: stamped on every shot ('player') so the overlap knows who fired.
   // size: pool high-water — a handful is plenty (the bow's recovery gates the fire rate well below it).
   constructor(scene: Phaser.Scene, ownerTag = 'player', size = 8) {
@@ -242,13 +252,23 @@ export class ProjectilePool {
   }
 
   // Force-release ALL live projectiles (used on a level rebuild so a frozen/in-flight shot doesn't
-  // dangle across the teardown — mirrors HitboxPool.releaseAll).
+  // dangle across the teardown — mirrors HitboxPool.releaseAll). F4 (Decision 4, review BLOCKER): pass
+  // fireRelease=false so onRelease does NOT fire on a teardown — a level-boundary rebuild is not a 'land',
+  // and firing a Bomber splash here would apply damage to the player mid-teardown (the additive-identity break).
   releaseAll() {
-    for (const rect of this._items) if (rect.pj.active) this._disable(rect)
+    for (const rect of this._items) if (rect.pj.active) this._disable(rect, false)
   }
 
-  // Disable a projectile back into the pool: kill its body, mark inactive, park it off-room.
-  _disable(rect: ProjectileRect) {
+  // Disable a projectile back into the pool: kill its body, mark inactive, park it off-room. `fireRelease`
+  // (default true — the NATURAL release path from tick()/release()) fires the onRelease hook BEFORE the spec
+  // is nulled; releaseAll() passes false (a teardown is not a 'land' — review BLOCKER, Decision 4).
+  _disable(rect: ProjectileRect, fireRelease = true) {
+    // F4 enemy-roster (Decision 4) — fire the optional release hook ONCE, BEFORE we null pj.spec/park the body,
+    // so a Bomber's lob pops its impact splash at the point it landed. Undefined hook ⇒ no-op (the identity).
+    if (fireRelease && this.onRelease) {
+      const body = rect.body as Phaser.Physics.Arcade.Body
+      this.onRelease(body.center.x, body.center.y, rect.pj.spec)
+    }
     rect.pj.active = false
     rect.pj.spec = null
     rect.pj.status = null // §6.13 — drop the stamped status so a recycled shot never carries a stale one.

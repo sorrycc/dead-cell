@@ -1146,6 +1146,33 @@ const ALL_PATHS = enumeratePaths()
       if (a.kind === 'shoot' && (!a.projectile || typeof a.projectile.damage !== 'number')) {
         fail(`archetype ${spec.id}: 'shoot' attack missing projectile.damage`)
       }
+      // F4 enemy-roster (Decision 7) — a BOMBER's `shoot` may carry `projectile.impactAoe` (the impact splash).
+      // When present it MUST be well-formed: numeric radius/damage/knockback, with a positive radius + damage
+      // (a degenerate splash is a silent no-op). Absent ⇒ no splash (every existing bolt — the additive identity).
+      if (a.projectile && a.projectile.impactAoe != null) {
+        const ia = a.projectile.impactAoe
+        if (typeof ia.radius !== 'number' || typeof ia.damage !== 'number' || typeof ia.knockback !== 'number') {
+          fail(`archetype ${spec.id}: attack ${a.kind} impactAoe needs numeric radius/damage/knockback`)
+        }
+        if (!(ia.radius > 0) || !(ia.damage > 0)) fail(`archetype ${spec.id}: attack ${a.kind} impactAoe radius/damage must be > 0`)
+      }
+    }
+    // F4 enemy-roster (Decision 7) — frontalDR (SHIELDER), when present, is a fraction in [0, 1): a shield
+    // REDUCES damage but never fully negates it (Math.max(1,…) at the hit site keeps a front hit ≥ 1, but the
+    // CONTRACT is the fraction never reaches 1 — "flank it", not "immune"). Absent/0 ⇒ the identity.
+    if (spec.frontalDR != null) {
+      if (typeof spec.frontalDR !== 'number' || spec.frontalDR < 0 || spec.frontalDR >= 1) {
+        fail(`archetype ${spec.id}: frontalDR must be in [0, 1) (a fraction that never fully negates)`)
+      }
+    }
+    // F4 enemy-roster (Decision 7) — spec.deathBurst (KAMIKAZE base-spec radial burst), when present, mirrors
+    // the elite-burst shape: count ≥ 1 + a projectile with numeric damage + positive speed (so the ring arcs).
+    // Absent/null ⇒ no burst (every existing archetype unchanged — only an elite roll bursts today).
+    if (spec.deathBurst != null) {
+      if (!(spec.deathBurst.count >= 1)) fail(`archetype ${spec.id}: deathBurst.count must be ≥ 1`)
+      if (!spec.deathBurst.projectile || typeof spec.deathBurst.projectile.damage !== 'number' || !(spec.deathBurst.projectile.speed > 0)) {
+        fail(`archetype ${spec.id}: deathBurst needs a projectile with numeric damage + speed > 0`)
+      }
     }
     // scaleSpec rises with depth on THIS archetype (the scaling is real per-archetype).
     const s0 = scaleSpec(spec, scaleAtDepth(0)).maxHp
@@ -1163,6 +1190,18 @@ const ALL_PATHS = enumeratePaths()
       }
       if (base.projectile && !(sc.projectile.damage >= base.projectile.damage)) {
         fail(`archetype ${spec.id}: scaled attack[${i}] projectile.damage dipped (${sc.projectile.damage} < ${base.projectile.damage})`)
+      }
+      // F4 enemy-roster (Decision 6) — the BOMBER's impactAoe.damage folds by the SAME enemyDamageMult as
+      // projectile.damage (a deeper splash hits harder, never-weaker), and the deep-clone never mutates the
+      // base (the aliasing discipline). Assert it rode through the clone (present iff base had it) + is ≥ base.
+      if (base.projectile && base.projectile.impactAoe != null) {
+        if (sc.projectile.impactAoe == null) fail(`archetype ${spec.id}: scaled attack[${i}] dropped impactAoe (must ride the clone)`)
+        if (!(sc.projectile.impactAoe.damage >= base.projectile.impactAoe.damage)) {
+          fail(`archetype ${spec.id}: scaled attack[${i}] impactAoe.damage dipped (${sc.projectile.impactAoe.damage} < ${base.projectile.impactAoe.damage})`)
+        }
+        if (sc.projectile.impactAoe === base.projectile.impactAoe) {
+          fail(`archetype ${spec.id}: scaleSpec aliased attack[${i}] impactAoe (must deep-clone, Decision 45)`)
+        }
       }
     }
     // scaleSpec must NOT mutate the base attacks[] (the aliasing discipline — Decision 45).

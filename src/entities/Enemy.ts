@@ -915,7 +915,11 @@ export class Enemy {
   // 2-D velocity (cos/sin·speed) — the ring now actually ARCS in every direction (the old code collapsed
   // each shot to ±facing horizontal, flattening the "360° fan" into a flat left/right line — the bug).
   _fireDeathBurst(cx: number, cy: number) {
-    const burst = this.elite && this.elite.deathBurst
+    // F4 enemy-roster (Decision 5) — read a BASE-spec death burst (the KAMIKAZE's signature) OR the rolled
+    // elite affix burst, base FIRST. A normal non-Kamikaze enemy with no explosive elite has neither ⇒ no-op
+    // (the additive identity — only an elite roll bursts today, that path preserved). A Kamikaze that ALSO
+    // rolls explosive fires ONLY its base burst (base wins via ?? — one burst, not two; KISS, intentional).
+    const burst = this.spec.deathBurst ?? (this.elite && this.elite.deathBurst)
     if (!burst || !this.projectilePool || !burst.projectile) return
     const count = Math.max(1, burst.count || 1)
     const attacker = { cx, cy, facing: this.facing }
