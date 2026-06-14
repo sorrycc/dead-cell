@@ -293,11 +293,152 @@ export const GLAIVE: WeaponSpec = {
   ],
 }
 
+// ── TWIN DAGGERS — a BLUEPRINT-GATED fast assassin melee (F2 weapon-arsenal §3, Decision 1/2/4) ── the
+// fastest, lowest-commit melee in the arsenal: the SHORTEST reach, the snappiest actives/recovery, a
+// generous chain window, and the LOWEST per-hit damage of any melee. Its payoff is volume + the existing
+// backstab (resolveHit doubles a finisher's damage from behind — no new code). DISTINCT FEEL vs the
+// Sword: shorter reach, faster, lower per-hit, PLUS a hold-to-`flurry` rapid stab string (Sword has none)
+// and a light BLEED chip (Sword has none). NO charge (a weapon picks one of charge/flurry — follow SPEAR:
+// flurry only). DEAD config until `bp_weapon_daggers` is banked (the identity — never in a default pool).
+export const TWIN_DAGGERS: WeaponSpec = {
+  id: 'daggers',
+  name: 'Twin Daggers',
+  type: 'melee',
+  scaling: 'brutality', // fast aggressive melee → red/Brutality (Decision 4).
+  blueprint: 'bp_weapon_daggers', // the gating blueprint id (matches config/blueprints.js BLUEPRINTS).
+  // ── STATUS (F2 §3, Decision 4) ── a LIGHT bleed (the assassin chip): low per-hit DoT that rewards the
+  // dagger's high attack volume. Lighter than the Spear's bleed (the daggers lean on raw hit-count + backstab).
+  status: { kind: 'bleed', duration: 1.6, tickInterval: 0.4, tickDmg: 2 },
+  swings: [
+    // Stab 1 — a snappy short jab. Tiny reach, low damage/shove, the fastest active + a generous chain.
+    { reach: 34, halfHeight: 22, forward: 14, damage: 5, knockback: 140, active: 0.06, recovery: 0.08, comboWindow: 0.38, lunge: 70 },
+    // Stab 2 — a second quick jab, a hair more reach + damage, still the snappiest in the arsenal.
+    { reach: 38, halfHeight: 22, forward: 16, damage: 6, knockback: 170, active: 0.06, recovery: 0.09, comboWindow: 0.38, lunge: 90 },
+    // Stab 3 — FINISHER cross-slash: still short, a slightly harder hit + shove, a low committed recovery
+    // (the assassin stays mobile). The backstab finisher (resolveHit) is where the big damage comes from.
+    { reach: 44, halfHeight: 24, forward: 18, damage: 9, knockback: 280, active: 0.08, recovery: 0.14, comboWindow: 0.0, lunge: 150 },
+  ],
+  // ── MOVESET (F2 §3, Decision 2) ── HOLD-to-flurry a rapid stab STRING (the assassin's signature). A TAP
+  // does the 3-hit combo (the snappy poke); HOLDING chains `hits` fast stabs spaced `interval` apart — even
+  // faster + more hits than the Spear's drill (the dagger's identity is overwhelming attack speed). No charge.
+  moveset: { flurry: { hits: 5, interval: 0.09 } },
+}
+
+// ── CROSSBOW — a BLUEPRINT-GATED heavy ranged weapon (F2 weapon-arsenal §3, Decision 1/2/4) ── the
+// deliberate sniper to the Bow's poke-and-poison: a SLOW cadence (a long recovery, much longer than the
+// Bow's), a BIG-damage bolt, and charge + pierce to thread a charged line through a crowd. NO poison —
+// raw single-volley punch IS its identity (vs the Bow's tag-and-kite DoT). type:'ranged' → it fires a
+// pooled projectile; the one "draw" swing row gates the cadence (its reach/damage/etc. are cosmetic-marker
+// placeholders, kept well-formed). DEAD config until `bp_weapon_crossbow` is banked.
+export const CROSSBOW: WeaponSpec = {
+  id: 'crossbow',
+  name: 'Crossbow',
+  type: 'ranged',
+  scaling: 'tactics', // ranged weapon → purple/Tactics (Decision 4).
+  blueprint: 'bp_weapon_crossbow',
+  swings: [
+    // The single "draw" row: a brief active (the loose) then a LONG committed recovery (the wind/reload) —
+    // a much slower cadence than the Bow (recovery 0.46 vs 0.26). damage/knockback unused (the bolt hits);
+    // kept > 0 so the marker/lunge code stays well-formed. comboWindow 0 = each bolt is self-contained.
+    { reach: 26, halfHeight: 20, forward: 16, damage: 0, knockback: 0, active: 0.08, recovery: 0.46, comboWindow: 0.0, lunge: 0 },
+  ],
+  // The fired bolt's spec — a HEAVY, high-damage projectile (read by ProjectilePool.acquire).
+  projectile: {
+    speed: 820, // px/s — a fast, flat bolt.
+    damage: 30, // hp — a big single-hit punch (vs the Bow's 14 poke).
+    knockback: 360, // px/s — a strong shove.
+    lifetime: 1.2, // s — released after this if it never hits / leaves the world.
+    w: 22, // px — a chunkier bolt body.
+    h: 6, // px — a thin bolt.
+  },
+  // ── MOVESET (F2 §3, Decision 2) ── HOLD-to-charge a heavier piercing bolt (like the Bow's charge+pierce,
+  // but slower + harder). A TAP fires the single heavy bolt (pierceLeft=1, the identity); HOLDING past
+  // chargeTime fires a charged bolt: ×damageMult AND pierce up to `maxTargets` (threads a line of enemies).
+  // NO melee-only aoeRadius/chargeStunDuration (the verifier rejects them on a ranged weapon).
+  moveset: { charge: { chargeTime: 0.55, damageMult: 2.0 }, pierce: { maxTargets: 3 } },
+}
+
+// ── FROST WAND — a BLUEPRINT-GATED freeze/lockdown ranged weapon (F2 weapon-arsenal §3, Decision 1/2/3/4)
+// ── a CONTROL tool, not a damage tool: LOWER damage than the Crossbow, but its charged shot STUNS (the
+// "freeze" — `kind:'stun'`, no new status kind; Decision 3). A moderate cadence, charge for ×damage, and a
+// stun stamped on the projectile (the same stamped-status path the Bow's poison rides — zero new wiring).
+// DISTINCT vs the Bow: charge applies STUN (lockdown) instead of poison (DoT), at lower raw damage. DEAD
+// config until `bp_weapon_frostwand` is banked.
+export const FROST_WAND: WeaponSpec = {
+  id: 'frostwand',
+  name: 'Frost Wand',
+  type: 'ranged',
+  scaling: 'tactics', // ranged control → purple/Tactics (Decision 4).
+  blueprint: 'bp_weapon_frostwand',
+  // ── STATUS (F2 §3, Decision 3) ── the freeze: a STUN stamped on the projectile (reuses the known `stun`
+  // kind — no new status kind, no pin bump). A stun is NON-DAMAGING (no tick fields — the verifier asserts a
+  // stun has neither). Its VALUE is the lockdown window (the enemy can't act), not damage. Stamped on the
+  // shot at acquire (Player._startSwing) → applied by GameScene's projectile-hit handler (status.js).
+  status: { kind: 'stun', duration: 1.0 },
+  swings: [
+    // The single "draw" row: a moderate cadence (between the Bow and the Crossbow). damage/knockback unused
+    // (the bolt hits); kept > 0 so the marker/lunge code stays well-formed. comboWindow 0 = self-contained.
+    { reach: 24, halfHeight: 20, forward: 14, damage: 0, knockback: 0, active: 0.07, recovery: 0.32, comboWindow: 0.0, lunge: 0 },
+  ],
+  // The fired frost bolt — LOWER damage than the Crossbow (its value is the freeze, not the hit).
+  projectile: {
+    speed: 680, // px/s — a slightly slower shard.
+    damage: 10, // hp — low (control weapon, not damage).
+    knockback: 160, // px/s — a light shove.
+    lifetime: 1.1, // s.
+    w: 16, // px — a small shard.
+    h: 8, // px.
+  },
+  // ── MOVESET (F2 §3, Decision 2/3) ── HOLD-to-charge for ×damage AND the freeze (the stun status rides the
+  // projectile). A TAP fires the single chilling shard; HOLDING past chargeTime fires a charged shard for
+  // ×damageMult. NO melee-only charge fields (ranged). NO pierce (KISS — a single lockdown shot, YAGNI).
+  moveset: { charge: { chargeTime: 0.45, damageMult: 1.6 } },
+}
+
+// ── FLAIL — a BLUEPRINT-GATED AoE-stun crowd-stagger melee (F2 weapon-arsenal §3, Decision 1/2/4) ── the
+// crowd-control bruiser: heavy 2-row combo (like the Hammer), a base STUN on EVERY hit, PLUS a charged AoE
+// smash with a WIDE aoeRadius + a long armor-break (chargeStunDuration). DISTINCT vs the Hammer: the Hammer
+// is single-target stagger; the Flail is the CROWD stagger (a wider radial stun smash). Reuses the Hammer's
+// charge-smash modes (aoeRadius via GameScene._radialDamage, chargeStunDuration via _pendingAoe → the
+// existing armor-break path) — NO new combat math. DEAD config until `bp_weapon_flail` is banked.
+export const FLAIL: WeaponSpec = {
+  id: 'flail',
+  name: 'Flail',
+  type: 'melee',
+  scaling: 'brutality', // heavy crowd melee → red/Brutality (Decision 4).
+  blueprint: 'bp_weapon_flail',
+  // ── STATUS (F2 §3, Decision 4) ── a base STUN on EVERY hit (the crowd-stagger): a brief freeze on each
+  // struck enemy, slightly longer than the Hammer's 0.6s (the Flail's identity is reliable lockdown). The
+  // charged smash OVERRIDES this with the longer `chargeStunDuration` armor-break (the existing path).
+  status: { kind: 'stun', duration: 0.8 },
+  swings: [
+    // Swing 1 — a heavy spinning wind-up. Moderate reach, big hit + shove, a slow active, a brief chain.
+    { reach: 56, halfHeight: 32, forward: 18, damage: 20, knockback: 480, active: 0.16, recovery: 0.30, comboWindow: 0.40, lunge: 70 },
+    // Swing 2 — FINISHER crush: a bigger box, crushing damage + knockback, a long committed recovery.
+    { reach: 64, halfHeight: 36, forward: 20, damage: 30, knockback: 700, active: 0.18, recovery: 0.42, comboWindow: 0.0, lunge: 100 },
+  ],
+  // ── MOVESET (F2 §3, Decision 2/4) ── HOLD-to-charge a WIDE AoE smash. HOLDING past chargeTime + releasing
+  // fires a charged finisher: ×damageMult, a WIDE radial AoE (aoeRadius — wider than the Hammer's 120, the
+  // crowd-stagger identity, via GameScene._radialDamage) and a long armor-break stun (chargeStunDuration
+  // OVERRIDES the base 0.8s — the existing _pendingAoe path). A TAP does the 2-row combo (the identity tap).
+  moveset: { charge: { chargeTime: 0.45, damageMult: 1.8, aoeRadius: 150, chargeStunDuration: 1.4 } },
+}
+
 // ── WEAPONS (id → config) ── the lookup the Player/Pickup/GameScene use to equip by id. The
 // STARTING weapon id comes from the meta fold (config/upgrades.js START_WEAPON → startStats.
 // startWeaponId, Decision 60/63); the default is 'sword' so a fresh run plays exactly like Phase 4.
 // The GLAIVE is in the lookup (so a banked blueprint can equip it) but only the run-pool RESOLVER gates it.
-export const WEAPONS: Record<string, WeaponSpec> = { sword: SWORD, hammer: HAMMER, bow: BOW, spear: SPEAR, glaive: GLAIVE }
+export const WEAPONS: Record<string, WeaponSpec> = {
+  sword: SWORD,
+  hammer: HAMMER,
+  bow: BOW,
+  spear: SPEAR,
+  glaive: GLAIVE,
+  daggers: TWIN_DAGGERS,
+  crossbow: CROSSBOW,
+  frostwand: FROST_WAND,
+  flail: FLAIL,
+}
 
 // The ordered list (for the verifier sweep + any list rendering). FOUR starters + ONE blueprint-gated row.
 // ── IDENTITY-CRITICAL ORDER (meta-progression review, AC7/AC11) ── the STARTER rows are ordered
@@ -308,7 +449,10 @@ export const WEAPONS: Record<string, WeaponSpec> = { sword: SWORD, hammer: HAMME
 // must match the historical const, or a shared/replayed seed silently draws a DIFFERENT weapon (an AC7/AC11
 // break + seed-replay determinism break). runWeaponPool(new Set()) === ['hammer','bow','sword','spear'] is
 // PINNED by the verifier (§13d). GLAIVE (blueprint-gated) is appended last (it's never in a default pool).
-export const WEAPON_ORDER: WeaponSpec[] = [HAMMER, BOW, SWORD, SPEAR, GLAIVE]
+// ── F2 weapon-arsenal (§3, Decision 5) ── the 4 new blueprint-gated rows append AFTER GLAIVE. The empty-set
+// resolver filters out every `blueprint`-tagged row, returning the STARTER PREFIX [HAMMER, BOW, SWORD, SPEAR]
+// in its pinned order — so the gated rows' trailing position (after GLAIVE) cannot affect the identity pin.
+export const WEAPON_ORDER: WeaponSpec[] = [HAMMER, BOW, SWORD, SPEAR, GLAIVE, TWIN_DAGGERS, CROSSBOW, FROST_WAND, FLAIL]
 
 // ── runWeaponPool(unlocked) → the weapon IDS available given the unlocked-blueprint set (meta-progression
 // §6.5, Decision 6, AC6) ── PURE (node-importable, verifier-swept). ALWAYS the STARTERS (untagged rows), PLUS

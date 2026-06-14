@@ -176,6 +176,10 @@ export const ZH_CN: Dict = {
     bow: { name: '弓' },
     spear: { name: '长矛' },
     glaive: { name: '长柄刀' },
+    daggers: { name: '双匕首' },
+    crossbow: { name: '弩' },
+    frostwand: { name: '冰霜法杖' },
+    flail: { name: '连枷' },
   },
 
   // ── 武器词缀 (config/weapons.ts) ──
@@ -259,6 +263,10 @@ export const ZH_CN: Dict = {
     bp_weapon_glaive: { name: '长柄刀', desc: '为武器池加入一把横扫长柄刀。' },
     bp_skill_shockwave: { name: '冲击波', desc: '一记高威力范围击退爆炸。' },
     bp_mutation_glasscannon: { name: '玻璃大炮', desc: '一个高伤害的玻璃大炮强化。' },
+    bp_weapon_daggers: { name: '双匕首', desc: '为武器池加入一对快速连刺的刺客匕首。' },
+    bp_weapon_crossbow: { name: '弩', desc: '为武器池加入一把缓慢沉重的穿透弩。' },
+    bp_weapon_frostwand: { name: '冰霜法杖', desc: '为武器池加入一把蓄力冰冻的法杖。' },
+    bp_weapon_flail: { name: '连枷', desc: '为武器池加入一把范围眩晕的群控连枷。' },
   },
 
   // ── 商店物品 (config/shop.ts) ──

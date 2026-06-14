@@ -33,6 +33,12 @@ export const BLUEPRINTS: BlueprintEntry[] = [
   { id: 'bp_weapon_glaive', name: 'Glaive', kind: 'weapon', desc: 'A spinning reach weapon for the pool.' },
   { id: 'bp_skill_shockwave', name: 'Shockwave', kind: 'skill', desc: 'A heavy radial knockback blast.' },
   { id: 'bp_mutation_glasscannon', name: 'Glass Cannon', kind: 'mutation', desc: 'A high-damage glass-cannon perk.' },
+  // ── F2 weapon-arsenal (§3 AC2) ── 4 new weapon blueprints, one per new gated WeaponSpec row. Each `id`
+  // matches its weapon's `blueprint` tag exactly (verifier §13c asserts the 1:1 catalog ↔ tag consistency).
+  { id: 'bp_weapon_daggers', name: 'Twin Daggers', kind: 'weapon', desc: 'A fast flurry assassin melee for the pool.' },
+  { id: 'bp_weapon_crossbow', name: 'Crossbow', kind: 'weapon', desc: 'A slow, heavy piercing bolt for the pool.' },
+  { id: 'bp_weapon_frostwand', name: 'Frost Wand', kind: 'weapon', desc: 'A charged shot that freezes, for the pool.' },
+  { id: 'bp_weapon_flail', name: 'Flail', kind: 'weapon', desc: 'An AoE-stun crowd-stagger melee for the pool.' },
 ]
 
 // id → entry lookup (the Hub resolves an id, the drop resolves a picked id — DRY, one source).
