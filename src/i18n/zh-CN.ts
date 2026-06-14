@@ -47,7 +47,7 @@ export const ZH_CN: Dict = {
 
     // ── 游戏内 ──
     'game.hint':
-      '移动 方向键/WASD  跳跃 Space  攻击 J/点击  闪避 Shift/K  切换 R  [ESC] 标题   |   ' +
+      '移动 方向键/WASD  跳跃 Space（空中再按=二段跳 · 贴墙=墙跳）  攻击 J/点击  闪避 Shift/K  切换 R  [ESC] 标题   |   ' +
       '深度 {depth} · {biome} {level}/{levels}  run 0x{runSeed}  level 0x{levelSeed}  →前往黄色的门',
     'game.fastClear': '快速通关  +{gold}金 +{cells} 细胞',
 

@@ -228,7 +228,7 @@ function rawReachPx(dyPx: number): number {
 const MAX_STEP_UP = 3 // tiles — max upward platform-to-platform climb (96px < 128px apex).
 const MAX_STEP_DOWN = 6 // tiles — max downward step (falling is cheap; bounded so platforms stay on-screen).
 const MIN_GAP = 1 // tiles — min horizontal clear gap (so platforms don't fuse into one run).
-const MAX_GAP = 4 // tiles — max horizontal clear gap (128px). MUST be ≤ canReach at MAX_STEP_UP.
+export const MAX_GAP = 4 // tiles — max horizontal clear gap (128px). MUST be ≤ canReach at MAX_STEP_UP. Exported for the verifier's wall-corner exit-keepout mirror.
 
 // ── Body-clearance budget (body-aware-clearance design §6.1) — MIRRORED from Player.js so the generator
 // + verifier can prove the REAL 36×52 collision body FITS the spaces it must traverse, not just that a
@@ -251,6 +251,15 @@ export const CLEAR_ROWS = Math.ceil(BODY_H / TILE_SIZE) // = 2 — empty rows of
 export const RECOVERY_MIN_COLS = 50 // skip recovery on narrow grids (the pin is 40 → unaffected); shared with the verifier.
 const RECOVERY_REMOUNT_UP = MAX_STEP_UP // tiles — a SOLID top ≤ this above the floor is re-mountable from it.
 const MAX_FLOOR_RECOVERY_GAP = 10 // tiles — max consecutive interior floor columns with no re-mount near.
+
+// ── Wall-corner escape (wall-corner-escape fix) — kill the "knocked into the bottom corner, jump bonks a low
+// overhang, feel trapped" pocket. The floor-recovery proof above is POINT-MASS — it can call a re-mount usable
+// even when a platform's edge overhangs the wall-corner floor slot, so the real 36×52 body bonks the overhang on
+// a straight-up jump and the only escape is a non-obvious duck-walk + double-jump. openWallCorners (a deterministic
+// post-pass, below) clears a CLEAR_COLS-wide clear-sky channel in the two interior columns beside EACH side wall
+// across this low band — a full single-jump rise — so jumping straight out of either bottom corner always rises
+// into open space. = the base-jump apex in tiles so the channel is exactly as tall as a floor jump can climb.
+export const CORNER_OPEN_ROWS = Math.ceil(APEX_H / TILE_SIZE) // = 4 — wall-corner clear-sky band height (rows above the floor). Exported for the verifier's wall-corner-open assertion.
 
 // ── Floor-recovery shared metric (Decision 8/13 — the ONE coverage definition both the generator's
 // placement AND the verifier's locality proof call, so they cannot disagree; the platformStep DRY pattern). ──
@@ -745,6 +754,15 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   const branchRng = mulberry32((seed ^ 0xb2a4c11) >>> 0) // off-the-main-thread (pin-safe) branch RNG.
   const branchTreasure = placeBranch(tiles, cols, rows, critical, branchRng, lenMin, lenMax, entrance, exit)
 
+  // ── 4.55) Wall-corner escape (wall-corner-escape fix) ── carve a clear-sky channel beside each side wall in the
+  // low band so a player knocked/fallen into either bottom corner can jump STRAIGHT out (no overhang bonk). Runs
+  // HERE — AFTER critical + branch are stamped, but BEFORE the floor-recovery pass — so recovery re-derives its
+  // gaps from the CLEARED grid (its reconnection proof stays valid) and its stones + the later decoration both
+  // STAY OUT of the corner columns (reserved below), leaving the corner provably clear. Trimming a platform's
+  // wall-end never breaks the critical path: the staircase travels RIGHTWARD, so a near-wall left-edge trim leaves
+  // every downstream near-edge gap (and the reach BFS) unchanged (the verifier re-proves it from the emitted tiles).
+  openWallCorners(tiles, cols, rows, entrance, exit)
+
   // ── 4.6) Floor-recovery BRIDGES (floor-recovery-ledges design, AC1/AC2) ── stamp SOLID stepping-stones
   // across any floor stretch that lacks a nearby re-mount, so a player who falls to the floor can always
   // climb back to the exit LOCALLY (the verifier proves the locality bound). Off a SEPARATE seeded sub-RNG
@@ -773,6 +791,18 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
   for (const s of recovery) {
     const topRow = s.row - 1
     if (topRow >= 0) for (let c = s.col; c < s.col + s.len; c++) occupied[topRow][c] = true
+  }
+
+  // Wall-corner escape (wall-corner-escape fix): RESERVE the cleared corner channel (the two interior columns beside
+  // each side wall, across the low band) from decoration, so a scattered ONEWAY/HAZARD never re-fills the clear-sky
+  // jump-out openWallCorners just carved. Gated on grid width like the pass (the cols:40 pin emits no corner clear).
+  if (cols >= RECOVERY_MIN_COLS) {
+    const floorRow = rows - 1
+    const top = Math.max(1, floorRow - CORNER_OPEN_ROWS)
+    for (const c of [1, 2, cols - 3, cols - 2]) {
+      if (c < 1 || c > cols - 2) continue
+      for (let r = top; r < floorRow; r++) occupied[r][c] = true
+    }
   }
 
   scatterOneWayLedges(tiles, cols, rows, rng, biomeConfig.oneWayLedges, occupied, corridor, lenMin, lenMax)
@@ -1102,6 +1132,12 @@ function placeRecoveryBridges(
       for (let c = g.col - CLEAR_COLS + 1; c <= g.col + CLEAR_COLS - 1; c++) if (c >= 0 && c < cols) reservedCol[c] = true
     }
   }
+  // Wall-corner escape (wall-corner-escape fix): the two interior columns beside each side wall are kept as a clear-sky
+  // escape channel (openWallCorners clears them just above). The stone row sits IN that band, so a stone here would
+  // re-introduce the corner overhang we just removed — reserve those columns so no stone lands in them. The corner is
+  // covered for the floor-recovery LOCALITY proof by the clear-sky jump-out, not a stone (a ≤CLEAR_COLS leading/trailing
+  // gap is within the recovery bound), so skipping them never strands the floor.
+  for (const c of [1, 2, cols - 3, cols - 2]) if (c >= 0 && c < cols) reservedCol[c] = true
 
   // Re-derive the SOLID in-band re-mounts from the EMITTED grid (critical + branch + stones placed so far) so
   // the generator's gap view matches the verifier's, which reads the merged emitted tiles (DRY — same metric).
@@ -1139,6 +1175,37 @@ function placeRecoveryBridges(
     if (!progressed) break // safety: nothing placeable (cannot happen by Decision 9) → never spin.
   }
   return stones
+}
+
+// ── openWallCorners(tiles, cols, rows, entrance, exit) (wall-corner-escape fix) ── carve a CLEAR_COLS-wide
+// clear-sky channel in the two interior columns beside EACH side wall (cols 1..2 and cols-3..cols-2) across the
+// low band [floorRow-CORNER_OPEN_ROWS, floorRow-1], so a player knocked/fallen into either bottom corner can jump
+// STRAIGHT out (the obvious move) instead of bonking a platform edge that overhangs the corner. Clears SOLID/ONEWAY
+// there EXCEPT the one cell directly supporting the entrance/exit (never strand a Door/spawn). PURE + deterministic
+// (no RNG draw → the main rng sequence + the regression pin are untouched) and gated on grid width like the
+// recovery/branch passes so the cols:40 pin emits nothing. Trimming a platform's wall-end never breaks the critical
+// path: the staircase travels RIGHTWARD, so a near-wall left-edge trim leaves every downstream near-edge gap (and
+// thus the reach BFS) unchanged — the headless verifier re-proves traversability + standability from the emitted tiles.
+function openWallCorners(tiles: number[][], cols: number, rows: number, entrance: LevelPoint, exit: LevelPoint): void {
+  if (cols < RECOVERY_MIN_COLS) return // narrow grid (the pin) → leave the corners as-is (pin tiles unchanged).
+  const floorRow = rows - 1
+  const top = Math.max(1, floorRow - CORNER_OPEN_ROWS) // never touch the ceiling row 0 / outside the band.
+  // The EXIT is the reach-graph SINK: every entrance→exit and remount→exit climb funnels through the platforms in
+  // its immediate neighbourhood (its approach within ~MAX_GAP). Trimming there can sever that final hop (and the
+  // exit can itself sit in a corner — exit.col ∈ the cleared columns). So keep the clear ≥ EXIT_KEEPOUT columns from
+  // the exit. The ENTRANCE is the SOURCE — trimming its platform's wall-end never disconnects a downstream node — so
+  // the entrance corner (the reported bonk) IS cleared; its standable footing is preserved by the goal-support guard.
+  const EXIT_KEEPOUT = MAX_GAP + 2
+  const isGoalSupport = (c: number, r: number): boolean =>
+    (c === entrance.col && r === entrance.row + 1) || (c === exit.col && r === exit.row + 1)
+  for (const c of [1, 2, cols - 3, cols - 2]) {
+    if (c < 1 || c > cols - 2) continue // clamp inside the interior (defensive — tiny grids are gated out above).
+    if (Math.abs(c - exit.col) <= EXIT_KEEPOUT) continue // never trim the exit's approach (would break a climb to it).
+    for (let r = top; r < floorRow; r++) {
+      if (isGoalSupport(c, r)) continue // keep the tile a Door/spawn stands on (never strand the entrance/exit).
+      if (tiles[r][c] === TILE.SOLID || tiles[r][c] === TILE.ONEWAY) tiles[r][c] = TILE.EMPTY
+    }
+  }
 }
 
 // Build a SOLID platform run clamped to the interior band [1, interiorMax] so its emitted {col,len}

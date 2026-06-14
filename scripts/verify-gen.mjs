@@ -35,7 +35,7 @@ import { mulberry32 } from '../src/util/rng.js'
 import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
 // Procedural-level PURE modules (Decision 33/36): the generator + the SHARED reach predicate.
-import { generateLevel, TILE, TILE_SIZE, canReachPlatform, canReachStep, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS, bodyFits, bodyStandClear, CLEAR_COLS, CLEAR_ROWS, APEX_H } from '../src/world/LevelGenerator.js'
+import { generateLevel, TILE, TILE_SIZE, canReachPlatform, canReachStep, LAYOUT_TEMPLATES, isRemountRun, floorRecoveryGaps, RECOVERY_MIN_COLS, CORNER_OPEN_ROWS, MAX_GAP, bodyFits, bodyStandClear, CLEAR_COLS, CLEAR_ROWS, APEX_H } from '../src/world/LevelGenerator.js'
 import { PRISON, BIOME_ORDER, BIOMES, START_BIOME_ID, COLS_MIN, COLS_MAX, ROWS_MIN, ROWS_MAX } from '../src/config/biomes.js'
 // Run-structure PURE modules (§6.4, Decision 42/44/49): the depth curve + the RunState factory. A
 // SUCCESSFUL node import here RE-PROVES their purity (no Phaser) — the same convention the level
@@ -343,6 +343,28 @@ function checkDescription(desc, biome) {
   // full-level backtrack. RE-derived from the EMITTED tiles/platforms (independent of the generator's intent).
   const fr = checkFloorRecovery(desc)
   if (fr) return fr
+
+  // (g2) Wall-corner escape (wall-corner-escape fix) — both bottom corners must have a CLEAR_COLS-wide clear-sky
+  // channel in the low band [floorRow-CORNER_OPEN_ROWS, floorRow-1] so a knocked/fallen player jumps STRAIGHT out
+  // instead of bonking a platform edge that overhangs the corner. Re-derived from the EMITTED tiles (independent of
+  // the generator's openWallCorners pass). Gated to cols ≥ RECOVERY_MIN_COLS, mirroring the generator. The only
+  // allowed SOLID/ONEWAY there is a cell directly supporting the entrance/exit (the pass preserves that footing).
+  if (desc.cols >= RECOVERY_MIN_COLS) {
+    const floorRow = desc.rows - 1
+    const top = Math.max(1, floorRow - CORNER_OPEN_ROWS)
+    const EXIT_KEEPOUT = MAX_GAP + 2 // mirror openWallCorners: the exit's approach is left untrimmed (not asserted open).
+    for (const c of [1, 2, desc.cols - 3, desc.cols - 2]) {
+      if (c < 1 || c > desc.cols - 2) continue
+      if (Math.abs(c - desc.exit.col) <= EXIT_KEEPOUT) continue
+      for (let r = top; r < floorRow; r++) {
+        const isGoalSupport =
+          (c === desc.entrance.col && r === desc.entrance.row + 1) || (c === desc.exit.col && r === desc.exit.row + 1)
+        if (isGoalSupport) continue
+        if (desc.tiles[r][c] === TILE.SOLID || desc.tiles[r][c] === TILE.ONEWAY)
+          return `wall-corner not open: SOLID/ONEWAY at corner (col ${c}, row ${r}) blocks a straight-up escape`
+      }
+    }
+  }
 
   // (h) Body-aware clearance (body-aware-clearance design, AC1/AC2) — the STRONGEST proof, layered after the
   // point-mass BFS (a cheap first gate): the REAL 36×52 collision body (not a point mass) is body-clear at every

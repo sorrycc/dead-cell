@@ -44,7 +44,7 @@ export const EN: Dict = {
 
     // ── In-game (GameScene) ──
     'game.hint':
-      'MOVE arrows/WASD  JUMP Space  ATTACK J/click  DODGE Shift/K  SWAP R  [ESC] Title   |   ' +
+      'MOVE arrows/WASD  JUMP Space (again midair = double-jump · vs wall = wall-jump)  ATTACK J/click  DODGE Shift/K  SWAP R  [ESC] Title   |   ' +
       'DEPTH {depth} · {biome} {level}/{levels}  run 0x{runSeed}  level 0x{levelSeed}  →reach the yellow DOOR',
     'game.fastClear': 'FAST CLEAR  +{gold}g +{cells} cells',
 
