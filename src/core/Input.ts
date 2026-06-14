@@ -25,6 +25,10 @@ export interface InputSnapshot {
   mutePressed: boolean
   skill1Pressed: boolean
   skill2Pressed: boolean
+  // F1 onboarding & build UI §6.1 — the EDGE of the PAUSE key (P — the only new key this feature adds, outside
+  // the taken set). GameScene reads it on REAL dt (like mutePressed) so P toggles the read-only PAUSE/BUILD
+  // overlay even while paused (to close). Sole-owned JustDown here like every other edge.
+  pausePressed: boolean
 }
 
 // ── Input layer (design §6.1, Decisions 11/13/14 consumers) ──
@@ -87,6 +91,8 @@ export class Input {
       c: KC.C, // skills §6.2 (Decision 3) — USE SKILL slot 2.
       v: KC.V, // per-weapon-movesets §6.2 (Decision 5) — PARRY (the ONLY new key; outside the forbidden set:
       //          arrows/WASD/Space/J/Shift/K/Q/E/R/M/F/C are all taken, V collides with none of them).
+      p: KC.P, // F1 onboarding & build UI §6.1 — PAUSE / BUILD overlay (the only new key; outside the taken set:
+      //          arrows/WASD/Space/J/Shift/K/Q/E/R/M/F/C/V are all taken, P collides with none of them).
     }) as Record<string, Phaser.Input.Keyboard.Key>
 
     // Pointer edge state for the left-click attack (Decision 27). Seed from the CURRENT pointer
@@ -148,8 +154,14 @@ export class Input {
     // no-op (Player.tryUseSkill), so on a skill-less run these do nothing (the additive identity, AC8).
     const skill1Pressed = Phaser.Input.Keyboard.JustDown(keys.f)
     const skill2Pressed = Phaser.Input.Keyboard.JustDown(keys.c)
+    // F1 onboarding & build UI §6.1 — PAUSE TOGGLE (P): a one-shot EDGE (JustDown, sole-owned here like the
+    // others). GameScene reads it on REAL dt to OPEN the read-only PAUSE/BUILD overlay (gated like the other
+    // modals). The overlay owns its OWN keydown-P/keydown-ESC CLOSE handlers (the Phaser event bus, separate
+    // from this JustDown read), and _closePause() calls consumePause() to swallow the pending edge so the
+    // SAME physical close-press can't re-open pause on the next sample() (the close→reopen race).
+    const pausePressed = Phaser.Input.Keyboard.JustDown(keys.p)
 
-    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, attackHeld, parryPressed, downHeld, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed }
+    return { moveX, jumpPressed, jumpHeld, dodgePressed, attackPressed, attackHeld, parryPressed, downHeld, healPressed, interactPressed, swapPressed, mutePressed, skill1Pressed, skill2Pressed, pausePressed }
   }
 
   // Consume a PENDING interact (E) down-edge so the NEXT sample() does not read it. JustDown() mutates the key's
@@ -168,5 +180,16 @@ export class Input {
   // cancel). Jump is SPACE-only (see sample()), so this targets the one key the jump edge reads.
   consumeJump(): void {
     Phaser.Input.Keyboard.JustDown(this.keys.space)
+  }
+
+  // Consume a PENDING pause (P) down-edge so the NEXT sample() does not read it (mirrors consumeInteract /
+  // consumeJump — same sole-JustDown-owner invariant). F1 onboarding & build UI: the overlay's keydown-P CLOSE
+  // handler and Input's JustDown(p) read BOTH fire on the SAME physical press in the SAME frame (Phaser dispatches
+  // keyboard events before scene.update). On a close-press the overlay's keydown-P runs _closePause() → pauseOpen
+  // = false, THEN GameScene.update's sample() reads JustDown(p) still true → pausePressed → _togglePause() → would
+  // RE-OPEN (the identical close→reopen race consumeInteract/consumeJump fix for E/SPACE). _closePause() calls this
+  // to clear the pending P edge so a single close-press never re-opens pause. A no-op when no P edge is pending.
+  consumePause(): void {
+    Phaser.Input.Keyboard.JustDown(this.keys.p)
   }
 }

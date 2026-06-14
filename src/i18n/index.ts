@@ -87,3 +87,23 @@ export function tDesc(cat: Category, id: string, en: string): string {
   if (current === 'en') return en
   return LOCALES[current]?.[cat]?.[id]?.desc ?? en
 }
+
+// ── CONTROLS_ROWS (F1 onboarding & build UI §6.4, Decision 6) — the ONE shared, ordered controls list both
+// TitleScene and PauseOverlay render (DRY — adding/renaming a control touches one block). PURE data (keys only;
+// no Phaser): each row is [action-label key, keys-glyph key], resolved through t() at the render site. The actual
+// strings live in en.ts / zh-CN.ts (`controls.*`). Two fixed-x Text columns per row keep it CJK-pixel-anchored.
+export const CONTROLS_ROWS: readonly (readonly [string, string])[] = [
+  ['controls.move', 'controls.move.keys'],
+  ['controls.jump', 'controls.jump.keys'],
+  ['controls.attack', 'controls.attack.keys'],
+  ['controls.dodge', 'controls.dodge.keys'],
+  ['controls.parry', 'controls.parry.keys'],
+  ['controls.flask', 'controls.flask.keys'],
+  ['controls.skill1', 'controls.skill1.keys'],
+  ['controls.skill2', 'controls.skill2.keys'],
+  ['controls.swap', 'controls.swap.keys'],
+  ['controls.interact', 'controls.interact.keys'],
+  ['controls.pause', 'controls.pause.keys'],
+  ['controls.mute', 'controls.mute.keys'],
+  ['controls.quit', 'controls.quit.keys'],
+]

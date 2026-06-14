@@ -12,6 +12,8 @@ import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { ColorOverlay } from '../entities/ColorOverlay.js'
 import { QuitConfirmOverlay } from '../entities/QuitConfirmOverlay.js'
 import { BiomeChoiceOverlay } from '../entities/BiomeChoiceOverlay.js'
+import { PauseOverlay } from '../entities/PauseOverlay.js'
+import type { BuildSnapshot } from '../entities/PauseOverlay.js'
 import { HitboxPool } from '../combat/HitboxPool.js'
 import { resolveHit } from '../combat/damage.js'
 import { hasStatus } from '../combat/status.js'
@@ -253,6 +255,12 @@ export class GameScene extends Phaser.Scene {
   private quitConfirmOpen!: boolean
   private quitConfirmOverlay!: QuitConfirmOverlay | null
   private _onEsc!: () => void
+  // ── PAUSE / BUILD overlay state (F1 onboarding & build UI §6.5) — null/false until P opens the read-only
+  // PAUSE/BUILD modal. Mirrors quitConfirmOpen/quitConfirmOverlay (the SAME frozen-modal + update-gate idiom):
+  // pauseOpen gates update() (freezes gameplay/projectiles beneath the open overlay) + pauses the fast-clear
+  // timer; the SHUTDOWN hook force-closes a dangling handle so a quit-while-paused never leaks. ──
+  private pauseOpen!: boolean
+  private pauseOverlay!: PauseOverlay | null
   // ── Timed-clear bonus state (build-&-replay §6.4) — the wall-clock the CURRENT normal level was built at
   // (0 = an untimed level: boss/miniboss arena), used to grant a fast-clear bonus on the door-reach path. ──
   private levelStartedAt!: number
@@ -384,6 +392,14 @@ export class GameScene extends Phaser.Scene {
     this.registry.set('bossHp', null)
     this.registry.set('bossMaxHp', null)
     this.registry.set('bossName', '')
+    // F1 onboarding & build UI §6.5 — seed the off-screen Door edge-arrow keys to "no door" so the parallel HUD
+    // never flashes a stale prior-run arrow on a fresh run / boss room. _emitHud republishes them each frame; a
+    // boss level leaves this.door null → doorActive false → the HUD hides the arrow (AC8). Registry-only (decoupled).
+    this.registry.set('doorActive', false)
+    this.registry.set('doorX', 0)
+    this.registry.set('doorY', 0)
+    this.registry.set('camScrollX', 0)
+    this.registry.set('camScrollY', 0)
 
     // ── Effects + hit-stop (Decisions 23/24/26) ── the scene OWNS the hit-stop timer (it gates the
     // gameplay dt the whole world reads). Effects only REQUESTS a freeze via the callback (capped,
@@ -419,6 +435,9 @@ export class GameScene extends Phaser.Scene {
     // ── Quit-to-Title confirm state (esc-quit-confirm) — gates update() like shop/mutation; ESC toggles it. ──
     this.quitConfirmOpen = false // true while the confirm modal is up (gameplay is paused beneath it).
     this.quitConfirmOverlay = null // the live QuitConfirmOverlay UI while open, else null.
+    // ── PAUSE / BUILD overlay state (F1 onboarding & build UI §6.5) — gates update() like the other modals; P toggles it. ──
+    this.pauseOpen = false // true while the read-only PAUSE/BUILD overlay is up (gameplay is paused beneath it).
+    this.pauseOverlay = null // the live PauseOverlay UI while open, else null.
     // ── Timed-clear bonus state (build-&-replay §6.4) — stamped per normal level in _buildLevel (0 = untimed). ──
     this.levelStartedAt = 0
     this._modalPausedAt = 0 // wall-clock a modal was opened at (0 = none up); excludes frozen modal time from the timer.
@@ -604,6 +623,13 @@ export class GameScene extends Phaser.Scene {
         this.quitConfirmOverlay = null
       }
       this.quitConfirmOpen = false
+      // F1 onboarding & build UI §6.5 — force-close a dangling PAUSE/BUILD overlay + clear the flag so a
+      // quit-while-paused (or any teardown) never leaks the overlay's GameObjects / keyboard handlers.
+      if (this.pauseOverlay) {
+        this.pauseOverlay.close()
+        this.pauseOverlay = null
+      }
+      this.pauseOpen = false
     })
 
     // ESC → quit-to-Title CONFIRM toggle (esc-quit-confirm). PERSISTENT (.on) so it re-arms for the whole run,
@@ -2546,7 +2572,13 @@ export class GameScene extends Phaser.Scene {
       this._closeQuitConfirm()
       return
     }
-    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen) return
+    // F1 onboarding & build UI (review BLOCKER #2) — `this.pauseOpen` is in the guard set so an ESC press WHILE
+    // PAUSED only closes the pause overlay (its own keydown-ESC → _closePause) and CANNOT also pop the quit
+    // confirm. The overlay's keydown-ESC and this persistent _onEsc both fire on the SAME ESC press in the SAME
+    // frame; without pauseOpen here, this would see quitConfirmOpen=false (+ pauseOpen still true earlier OR
+    // already false after _closePause raced) and open the quit modal right after closing pause. Gating on
+    // pauseOpen makes ESC-while-paused a no-op for the quit toggle, matching the _togglePause gate in §6.5.
+    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen || this.pauseOpen) return
     this._openQuitConfirm()
   }
 
@@ -2581,6 +2613,75 @@ export class GameScene extends Phaser.Scene {
     this.input2.consumeJump() // no jump on resume when RESUME was confirmed via SPACE (AC8).
     this.input2.consumeInteract() // no shop-reopen when RESUME was confirmed via E (the close→reopen race, AC8).
     this._resumeLevelTimer()
+  }
+
+  // ── _togglePause() (F1 onboarding & build UI §6.5) ── the P-edge entry point read on REAL dt in update(). P
+  // CLOSES the overlay when it's already open (so P works while paused — gated update() can't), else OPENS it —
+  // but never STACK on another modal / a death / an in-flight transition (the same guard set _toggleQuitConfirm
+  // uses, plus quitConfirmOpen). KISS: ONE handler reading current state gives "second P closes" cleanly.
+  _togglePause(): void {
+    if (this.pauseOpen) {
+      this._closePause()
+      return
+    }
+    if (this.gameOver || this.transitioning || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen || this.quitConfirmOpen) return
+    this._openPause()
+  }
+
+  // ── _openPause() (F1 onboarding & build UI §6.5) ── freeze gameplay (pauseOpen gates update) + raise the
+  // read-only PAUSE/BUILD overlay. DECOUPLED (SOLID): the overlay only gets getBuild (→ _getBuildSnapshot, the
+  // live build) + onClose (→ _closePause). Zero the player velocity so it doesn't drift under the frozen overlay,
+  // and pause the fast-clear timer so reading the build isn't charged against the window (like the other modals).
+  // Guard mirrors _openQuitConfirm (flag OR live handle) so a desync can't stack two overlays.
+  _openPause(): void {
+    if (this.pauseOpen || this.pauseOverlay) return
+    this.pauseOpen = true
+    this._pauseLevelTimer()
+    this.player.body.setVelocity(0, 0)
+    this.pauseOverlay = new PauseOverlay(this, {
+      getBuild: () => this._getBuildSnapshot(),
+      onClose: () => this._closePause(),
+    })
+  }
+
+  // ── _closePause() (F1 onboarding & build UI §6.5) ── the RESUME path: drop the overlay + un-freeze gameplay +
+  // resume the timer. Reached two ways, both idempotent: the overlay's own keydown-P/keydown-ESC (onClose), and
+  // (defensively) SHUTDOWN. consumePause() swallows the PENDING P down-edge so the SAME physical close-press
+  // can't re-open pause on the next sample() (review BLOCKER #1 — the close→reopen race, mirroring the shop/quit
+  // consumeInteract/consumeJump resume paths). The overlay binds no SPACE/E/ENTER, so no other edge can leak.
+  _closePause(): void {
+    if (!this.pauseOpen) return
+    if (this.pauseOverlay) {
+      this.pauseOverlay.close()
+      this.pauseOverlay = null
+    }
+    this.pauseOpen = false
+    this.input2.consumePause() // no re-open when P closed it: swallow the pending P edge (the close→reopen race).
+    this._resumeLevelTimer()
+  }
+
+  // ── _getBuildSnapshot() (F1 onboarding & build UI §6.3) ── assemble the plain BuildSnapshot the PauseOverlay
+  // renders, from the scene's EXISTING label helpers + runState (no new logic, no new label format — DRY). ALL
+  // i18n (tName) resolution happens HERE (the scene boundary, matching _weaponLabel/_emitHud); the overlay only
+  // formats + lays out. Read once on open (the world is frozen — the build can't change while paused).
+  _getBuildSnapshot(): BuildSnapshot {
+    return {
+      weapon: this._weaponLabel(),
+      skill1: this._skillLabel(0),
+      skill2: this._skillLabel(1),
+      skill1Cd: this._skillCooldownFrac(0),
+      skill2Cd: this._skillCooldownFrac(1),
+      mutations: this.runState.mutations.map((id) => tName('mutation', id, MUTATIONS_BY_ID[id]?.name ?? id)).join(', '),
+      brutality: this.runState.brutalityLevel,
+      tactics: this.runState.tacticsLevel,
+      survival: this.runState.survivalLevel,
+      equippedColor: this.player.equippedWeapon.scaling,
+      flasks: this.runState.flasks,
+      maxFlasks: this.runState.maxFlasks,
+      depth: this.runState.depth,
+      biome: tName('biome', this.runState.biome().id, this.runState.biome().name),
+      runSeed: this.runSeed,
+    }
   }
 
   // ── _buyShopItem(item) (§6.10, Decision 74/76, AC63 — the GOLD SINK) ── attempt a purchase: if the run
@@ -2998,6 +3099,17 @@ export class GameScene extends Phaser.Scene {
     // §6.6.3 (AC56, review MINOR) — refresh the boss HP bar while the boss lives; it's cleared on death/
     // teardown (_clearBossHud), and bossActive gates the HUD so a stale bar never persists into a run.
     if (this.boss && !this.boss.dead) this.registry.set('bossHp', this.boss.hp)
+    // F1 onboarding & build UI §6.5/§6.7 — publish the Door world center + on/off state + the main camera scroll
+    // so the decoupled HUDScene can draw an off-screen edge arrow pointing at the exit. A boss room leaves
+    // this.door null → doorActive false → the HUD hides the arrow (AC8). Registry-only (cosmetic; no coupling).
+    this.registry.set('doorActive', !!this.door)
+    if (this.door) {
+      const r = (this.door as any).rect
+      this.registry.set('doorX', r.x)
+      this.registry.set('doorY', r.y)
+    }
+    this.registry.set('camScrollX', this.cameras.main.scrollX)
+    this.registry.set('camScrollY', this.cameras.main.scrollY)
   }
 
   // ── Per-frame tick (design §6.1/§6.3 — the dt boundary + hit-stop) ──
@@ -3008,18 +3120,23 @@ export class GameScene extends Phaser.Scene {
     // BIOME-CHOICE / QUIT-CONFIRM overlay is up (a modal pause) — so live hitboxes/projectiles/enemies all FREEZE
     // together while a modal is open (§6.10 / build-&-replay §6.5 / F4 branching-biome-map / esc-quit-confirm),
     // exactly as they freeze during a hit-stop. FX still tick on REAL dt so the overlay's flashes/pops play.
-    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen || this.quitConfirmOpen ? 0 : dt
+    const gdt = this.hitstopTimer > 0 || this.shopOpen || this.mutationOpen || this.colorPickOpen || this.biomeChoiceOpen || this.quitConfirmOpen || this.pauseOpen ? 0 : dt
 
     const inputState = this.input2.sample()
     // audio §6.5 (Decision 7) — M toggles global mute (flips Phaser's game.sound.mute via the façade
     // proxy). Read on REAL dt (NOT gated by gameOver/transition/shop) so mute always works, even on the
     // death/transition screens or under the shop overlay — the player can silence audio at any moment.
     if (inputState.mutePressed) this.sfx.mute = !this.sfx.mute
+    // F1 onboarding & build UI §6.5 — P toggles the read-only PAUSE/BUILD overlay. Read on REAL dt (NOT inside the
+    // gated block below — like the M toggle) so P OPENS when running AND CLOSES while paused (a gated update can't
+    // read input). _togglePause is gated like the other modals (never stacks on shop/mutation/colour/biome/quit/
+    // death/transition); the overlay owns its keydown-P/keydown-ESC CLOSE, and _closePause consumes the pending P.
+    if (inputState.pausePressed) this._togglePause()
     // Hazard contact cooldown decays on REAL dt (a wall-clock gate on the spike bite, not gameplay).
     if (this._hazardCooldown > 0) this._hazardCooldown = Math.max(0, this._hazardCooldown - dt)
     // Freeze gameplay during a death handoff OR a level transition (the rebuild is mid-flight) OR while the
     // shop / MUTATION / QUIT-CONFIRM overlay is up (a modal pause), but keep ticking FX so the flash/pop plays out.
-    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.colorPickOpen && !this.biomeChoiceOpen && !this.quitConfirmOpen) {
+    if (!this.gameOver && !this.transitioning && !this.shopOpen && !this.mutationOpen && !this.colorPickOpen && !this.biomeChoiceOpen && !this.quitConfirmOpen && !this.pauseOpen) {
       // Latch the attack edge BEFORE the player tick so update()'s step (1.5) resolves it this frame
       // (the Player's attack() only sets intent; update dispatches melee/ranged off the equipped weapon
       // — §6.3/§6.5 Decision 25/61). Sampled as an EDGE in Input (JustDown / pointer edge) so a held

@@ -53,6 +53,10 @@ export class HUDScene extends Phaser.Scene {
   private bossTrack!: Phaser.GameObjects.Rectangle
   private bossFill!: Phaser.GameObjects.Rectangle
   private bossLabel!: Phaser.GameObjects.Text
+  // ── Off-screen EXIT arrow (F1 onboarding & build UI §6.7, AC8) — a small camera-fixed triangle drawn at the
+  // nearest viewport edge pointing toward the Door when it is OFF-camera. Created hidden; update() shows it only
+  // when doorActive (a normal level, not a boss room) AND the Door is off-screen. Pure primitive (no asset).
+  private doorArrow!: Phaser.GameObjects.Triangle
 
   constructor() {
     super('HUD')
@@ -154,6 +158,15 @@ export class HUDScene extends Phaser.Scene {
       .text(DESIGN_WIDTH / 2, BOSS_BAR_Y - 6, '', { fontFamily: UI_FONT, fontSize: '20px', color: '#f5b041', fontStyle: 'bold' })
       .setOrigin(0.5, 1)
       .setScrollFactor(0)
+      .setVisible(false)
+
+    // ── Off-screen EXIT arrow (F1 onboarding & build UI §6.7, AC8) ── a small triangle (created pointing RIGHT,
+    // then ROTATED toward the Door each frame) at the nearest viewport edge when the Door is off-camera. Yellow
+    // to match the exit Door's colour cue. Created hidden; update() positions/rotates/shows it. Pure primitive.
+    this.doorArrow = this.add
+      .triangle(0, 0, 0, -11, 22, 0, 0, 11, 0xfbd000)
+      .setScrollFactor(0)
+      .setDepth(50)
       .setVisible(false)
 
     // A small overlay tag (kept from Phase 0) proving the parallel scene draws on top.
@@ -263,6 +276,43 @@ export class HUDScene extends Phaser.Scene {
       this.bossFill.width = BOSS_BAR_W * bfrac
       this.bossLabel.setText(this.registry.get('bossName') || t('hud.boss'))
     }
+
+    this._updateDoorArrow()
+  }
+
+  // ── _updateDoorArrow() (F1 onboarding & build UI §6.7, AC8) ── show a small edge arrow pointing toward the
+  // exit Door when it is OFF-camera; hide it when the Door is on-screen and in boss rooms (no Door). Decoupled
+  // (registry-only): GameScene publishes doorActive + the Door world center (doorX/doorY) + the main camera
+  // scroll (camScrollX/camScrollY) each frame; the HUD's own camera width/height equal the design size under
+  // Scale.FIT, so the screen-space math needs no GameScene coupling (invariant 7).
+  _updateDoorArrow() {
+    if (!this.doorArrow) return
+    const doorActive = this.registry.get('doorActive') === true
+    if (!doorActive) {
+      this.doorArrow.setVisible(false)
+      return
+    }
+    const doorX = this.registry.get('doorX') ?? 0
+    const doorY = this.registry.get('doorY') ?? 0
+    const scrollX = this.registry.get('camScrollX') ?? 0
+    const scrollY = this.registry.get('camScrollY') ?? 0
+    const W = this.cameras.main.width
+    const H = this.cameras.main.height
+    // The Door's position in SCREEN space (the world point minus the camera scroll — no zoom; the camera runs at 1×).
+    const sx = doorX - scrollX
+    const sy = doorY - scrollY
+    if (sx >= 0 && sx <= W && sy >= 0 && sy <= H) {
+      this.doorArrow.setVisible(false) // on-screen → no arrow needed.
+      return
+    }
+    // Off-screen: clamp the door's screen point to the viewport edge (with an inset) + point the arrow at it from
+    // the viewport CENTER. The angle is along (door − center) so the arrow tracks the true bearing to the exit.
+    const INSET = 28
+    const cxv = W / 2
+    const cyv = H / 2
+    this.doorArrow.setRotation(Math.atan2(sy - cyv, sx - cxv))
+    this.doorArrow.setPosition(Phaser.Math.Clamp(sx, INSET, W - INSET), Phaser.Math.Clamp(sy, INSET, H - INSET))
+    this.doorArrow.setVisible(true)
   }
 
   // ── _setSkillLabel(label, key, name, cdFrac) (skills slice, AC6) ── render a skill slot as "SKILL <key>:
