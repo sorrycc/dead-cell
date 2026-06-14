@@ -29,9 +29,11 @@ export const EN: Dict = {
     'hub.locked': 'LOCKED',
     'hub.seededRun': 'SEEDED RUN',
     'hub.seedRandom': 'RANDOM (each run varies)',
-    'hub.seedSet': '(SPACE to set)',
-    'hub.seedClear': '(SPACE to clear)',
-    'hub.seedPrompt': 'Enter a run seed to replay (decimal or 0x-hex). Blank = random:',
+    'hub.seedSet': '(SPACE: type seed / daily)',
+    'hub.seedClear': '(SPACE for daily)',
+    'hub.seedDaily': 'DAILY',
+    'hub.seedDailyHint': '(SPACE for random)',
+    'hub.seedPrompt': 'Enter a run seed to replay (decimal or 0x-hex). Blank = today’s daily:',
 
     // Blueprint kinds (the middle column of a Hub blueprint row).
     'kind.weapon': 'weapon',

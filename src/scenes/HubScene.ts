@@ -5,6 +5,7 @@ import type { MetaStateInstance } from '../core/MetaState.js'
 import { UPGRADES } from '../config/upgrades.js'
 import { MAX_TIER } from '../config/tiers.js'
 import { BLUEPRINTS } from '../config/blueprints.js'
+import { dailySeed } from '../util/rng.js'
 import { GameScene } from './GameScene.js'
 import { Sound } from '../audio/Sound.js'
 import { t, tName, tDesc, getLocale, setLocale } from '../i18n/index.js'
@@ -54,6 +55,10 @@ export class HubScene extends Phaser.Scene {
   // (which shares Phaser's ONE AudioContext, so this is cheap — just a master GainNode); no-op on NoAudio.
   private sfx!: Sound
   private pinnedSeed!: number | null
+  // ── DAILY seed state (F7 §2b, Decision 4) ── the calendar-day key (e.g. 'YYYY-MM-DD') when the SEEDED RUN
+  // row is in its DAILY state, else null (= not-daily). Mutually exclusive with pinnedSeed: picking DAILY
+  // clears pinnedSeed; pinning a typed seed or going RANDOM clears dailyKey (one resolved seed at START RUN).
+  private dailyKey!: string | null
   // ── Row index scheme (meta-progression §6.9, Decision 9) ── synthetic rows at fixed indices off
   // UPGRADES.length / BLUEPRINTS.length so the cursor math stays a single clamp (KISS). Layout (top→bottom):
   //   tierRowIndex (0) · upgrade rows (1..UPGRADES.length) · blueprint rows · SEEDED RUN · START RUN.
@@ -78,6 +83,7 @@ export class HubScene extends Phaser.Scene {
   private startRowText!: Phaser.GameObjects.Text
 
   static parseSeed: (raw: unknown) => number | null
+  static todayKey: () => string
 
   constructor() {
     super('Hub')
@@ -92,6 +98,7 @@ export class HubScene extends Phaser.Scene {
     // a PINNED shareable seed (typed via the SEEDED RUN row). Starts RANDOM so the default is "every run
     // varies" (the replayability fix) — a player opts INTO a fixed seed only to replay/share one.
     this.pinnedSeed = null
+    this.dailyKey = null // F7 §2b — start not-daily; the player opts INTO the daily challenge on the seed row.
 
     // Rows (meta-progression §6.9, Decision 9): a TIER selector row, then every upgrade, then one BLUEPRINT row
     // per BLUEPRINTS entry, then the synthetic SEEDED RUN + START RUN rows. All sit at fixed indices off
@@ -203,9 +210,16 @@ export class HubScene extends Phaser.Scene {
       return
     }
     if (this.cursor === this.startRowIndex) {
-      // START RUN (Decision 58/71): use the pinned seed if set, else mint a fresh entropy seed HERE so the
-      // run varies even from a Hub-launched start. Pass it to GameScene via scene-start data.
-      const seed = this.pinnedSeed != null ? this.pinnedSeed : GameScene.mintSeed()
+      // START RUN (Decision 58/71; F7 §2b Decision 4/8): resolve the ONE run seed in priority order —
+      // DAILY (today's deterministic date→seed, the daily-challenge contract) → a typed PINNED seed →
+      // a fresh entropy mint (RANDOM). The date is read HERE at the scene boundary (todayKey), never in
+      // the pure dailySeed helper. Pass the resolved seed to GameScene via scene-start data.
+      const seed =
+        this.dailyKey != null
+          ? dailySeed(HubScene.todayKey())
+          : this.pinnedSeed != null
+            ? this.pinnedSeed
+            : GameScene.mintSeed()
       this.scene.start('Game', { seed }) // GameScene re-loads + folds the meta, seeds the run (71).
       return
     }
@@ -232,27 +246,43 @@ export class HubScene extends Phaser.Scene {
     this._render() // reflect the new owned level + banked Cells + affordability.
   }
 
-  // ── _editSeed() (Decision 71) ── toggle the pinned seed. If one is already pinned, clear it (back to
-  // RANDOM). Otherwise prompt for a shareable seed string (decimal or 0x-hex — the RUN SEED the GameOver/
-  // Victory screen shows). A browser prompt is the KISS choice here: building a custom on-canvas text field
-  // under the primitives-only constraint is heavyweight YAGNI for a share/replay convenience. An empty/
-  // cancelled/invalid entry leaves the seed RANDOM (graceful — never throws, never starts a bad run).
+  // ── _editSeed() (Decision 71; F7 §2b Decision 4) ── the SEEDED RUN row confirm is a SINGLE-key 3-state
+  // cycle RANDOM → PINNED → DAILY → RANDOM (reuses the one confirm key — KISS, mirroring the tier-cycle
+  // idiom). The three states are mutually exclusive (one resolved seed at START RUN):
+  //   • From RANDOM (no pin, no daily): prompt for a shareable seed (decimal or 0x-hex — the RUN SEED the
+  //     GameOver/Victory screen shows). A VALID entry → PINNED; a blank/cancelled/invalid entry falls
+  //     THROUGH to DAILY so the player is never stuck (every state reachable by the one key).
+  //   • From PINNED (a typed seed set): clear the pin → DAILY (today's deterministic date→seed).
+  //   • From DAILY: clear daily → RANDOM (a fresh entropy seed each run).
+  // A browser prompt is the KISS choice (a custom on-canvas text field under the primitives-only art
+  // constraint is heavyweight YAGNI); it is guarded so the Hub never throws (mirrors save.js's discipline).
   _editSeed() {
-    if (this.pinnedSeed != null) {
-      this.pinnedSeed = null // un-pin → back to a fresh entropy seed each run.
+    if (this.dailyKey != null) {
+      this.dailyKey = null // DAILY → RANDOM.
       this._render()
       return
     }
+    if (this.pinnedSeed != null) {
+      this.pinnedSeed = null // PINNED → DAILY (today's daily-challenge seed).
+      this.dailyKey = HubScene.todayKey()
+      this._render()
+      return
+    }
+    // RANDOM → prompt: a valid entry lands on PINNED; a blank/cancel/invalid falls through to DAILY.
     let raw: string | null = null
     try {
-      // prompt is unavailable in some embeds — guard so the Hub never throws (mirrors save.js's discipline).
       if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
         raw = window.prompt(t('hub.seedPrompt'), '')
       }
     } catch {
       raw = null
     }
-    this.pinnedSeed = HubScene.parseSeed(raw)
+    const parsed = HubScene.parseSeed(raw)
+    if (parsed != null) {
+      this.pinnedSeed = parsed // valid typed seed → PINNED.
+    } else {
+      this.dailyKey = HubScene.todayKey() // blank/cancel/invalid → DAILY (never stuck on RANDOM).
+    }
     this._render()
   }
 
@@ -316,10 +346,21 @@ export class HubScene extends Phaser.Scene {
       fill(this.blueprintTexts[i], [bpName, t('kind.' + bp.kind), status, tDesc('blueprint', bp.id, bp.desc)], unlocked ? '#58d68d' : '#8b949e')
     }
 
-    // ── SEEDED RUN row (Decision 71) ── RANDOM (a fresh entropy seed each run) or the pinned hex run id.
-    const seedText =
-      this.pinnedSeed != null ? `0x${(this.pinnedSeed >>> 0).toString(16)}` : t('hub.seedRandom')
-    const seedHint = this.pinnedSeed != null ? t('hub.seedClear') : t('hub.seedSet')
+    // ── SEEDED RUN row (Decision 71; F7 §2b Decision 4) ── one of three states: DAILY (today's deterministic
+    // date→seed, shown as a DAILY-tagged hex id so it can be typed back later to replay), a typed PINNED hex
+    // run id, or RANDOM (a fresh entropy seed each run). The hint names the next cycle action for the state.
+    let seedText: string
+    let seedHint: string
+    if (this.dailyKey != null) {
+      seedText = `${t('hub.seedDaily')} 0x${(dailySeed(this.dailyKey) >>> 0).toString(16)}`
+      seedHint = t('hub.seedDailyHint') // DAILY → RANDOM.
+    } else if (this.pinnedSeed != null) {
+      seedText = `0x${(this.pinnedSeed >>> 0).toString(16)}`
+      seedHint = t('hub.seedClear') // PINNED → DAILY.
+    } else {
+      seedText = t('hub.seedRandom')
+      seedHint = t('hub.seedSet') // RANDOM → prompt (PINNED) or DAILY.
+    }
     fill(this.seedCells, [t('hub.seededRun'), seedText, seedHint], '#f4d03f')
 
     // Move the highlight bar behind the selected row. START RUN is the synthetic last (centered) row; the
@@ -339,4 +380,22 @@ HubScene.parseSeed = function parseSeed(raw: unknown): number | null {
   const n = s.toLowerCase().startsWith('0x') ? parseInt(s.slice(2), 16) : parseInt(s, 10)
   if (!Number.isFinite(n) || n < 0) return null
   return n >>> 0 // coerce to the unsigned 32-bit shape RunState's seed chain expects.
+}
+
+// ── todayKey() (F7 §2b, Decision 5) ── the LOCAL calendar-day key ('YYYY-MM-DD') from the browser clock —
+// the ONLY wall-clock read for the daily seed (the impure boundary). The pure dailySeed(dateKey) takes this
+// string IN, so the verifier's determinism story is intact (no pure module reads the clock; entropy/date
+// reads are confined to the scene seam, exactly like mintSeed). Guarded so a missing/throwing Date degrades
+// to a STABLE fallback key rather than throwing (mirrors _editSeed's prompt guard + save.js discipline);
+// the fallback is still deterministic per-string, so dailySeed stays total. Static on the class for testability.
+HubScene.todayKey = function todayKey(): string {
+  try {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  } catch {
+    return 'daily' // degenerate fallback — never throws; dailySeed('daily') is a finite unsigned int.
+  }
 }

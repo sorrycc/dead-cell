@@ -19,3 +19,20 @@ export function mulberry32(seed: number): RNG {
 export function range(rng: RNG, min: number, max: number): number {
   return min + (max - min) * rng()
 }
+
+// ── dailySeed(dateKey) (F7 endgame-bosscells-seeds §2b, Decision 6, AC7) ── hash a calendar-day string
+// (e.g. 'YYYY-MM-DD') to a STABLE unsigned-32-bit run seed: the daily-challenge contract — same date ⇒ same
+// run for every player, different dates ⇒ (overwhelmingly) different runs. PURE + total (never throws; reads
+// NO clock — the date is passed IN at the scene boundary), Phaser-free, node-importable (the verifier pins
+// it). An FNV-1a string hash >>> 0; a falsy/empty/junk key still yields a finite unsigned int, falling back
+// to 1 (never 0 — a degenerate seed, mirroring GameScene.mintSeed). It is NOT cryptographic (YAGNI — a daily
+// seed needs only determinism + distinctness, not unpredictability).
+export function dailySeed(dateKey: string): number {
+  const s = typeof dateKey === 'string' ? dateKey : String(dateKey ?? '')
+  let h = 0x811c9dc5 // FNV-1a 32-bit offset basis.
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) // FNV prime.
+  }
+  return (h >>> 0) || 1 // unsigned 32-bit; never 0 (1 is a fine fallback for an empty/degenerate key).
+}

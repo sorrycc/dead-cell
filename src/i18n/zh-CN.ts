@@ -34,9 +34,11 @@ export const ZH_CN: Dict = {
     'hub.locked': '未解锁',
     'hub.seededRun': '种子局',
     'hub.seedRandom': '随机（每局不同）',
-    'hub.seedSet': '(SPACE 设置)',
-    'hub.seedClear': '(SPACE 清除)',
-    'hub.seedPrompt': '输入要重玩的种子（十进制或 0x 十六进制）。留空 = 随机：',
+    'hub.seedSet': '(SPACE：输入种子 / 每日)',
+    'hub.seedClear': '(SPACE 切到每日)',
+    'hub.seedDaily': '每日',
+    'hub.seedDailyHint': '(SPACE 切到随机)',
+    'hub.seedPrompt': '输入要重玩的种子（十进制或 0x 十六进制）。留空 = 今日每日挑战：',
 
     'kind.weapon': '武器',
     'kind.skill': '技能',
@@ -300,6 +302,9 @@ export const ZH_CN: Dict = {
     '0': { name: '0 首领细胞', desc: '基础难度。' },
     '1': { name: '1 首领细胞', desc: '更强更密集的敌人；少一次药剂。' },
     '2': { name: '2 首领细胞', desc: '远为强大；少一次药剂。' },
+    '3': { name: '3 首领细胞', desc: '残酷；精英远更密集；少一次药剂。' },
+    '4': { name: '4 首领细胞', desc: '严酷；遍地精英；少一次药剂。' },
+    '5': { name: '5 首领细胞', desc: '最深的深渊；精英无休止；少一次药剂。' },
   },
 
   // ── 特殊房间 (config/roomTypes.ts) — only the tagged types ('normal' has no banner) ──

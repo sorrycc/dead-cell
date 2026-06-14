@@ -37,6 +37,14 @@ export const BOSS_CELL_TIERS: BossCellTier[] = [
   { index: 0, name: '0 Boss Cells', bossCellMult: 1.0, flaskDelta: 0, eliteChanceMult: 1, desc: 'Base difficulty.' },
   { index: 1, name: '1 Boss Cell', bossCellMult: 1.25, flaskDelta: -1, eliteChanceMult: 1, desc: 'Tougher, denser enemies; one fewer flask.' },
   { index: 2, name: '2 Boss Cells', bossCellMult: 1.55, flaskDelta: -1, eliteChanceMult: 1, desc: 'Far tougher; one fewer flask.' },
+  // ── F7 endgame rows (indices 3/4/5) ── the curve keeps lifting (bossCellMult continues the 1.0/1.25/1.55
+  // slope) AND the elite ramp finally turns on (eliteChanceMult > 1) so a deep run is visibly DENSER with
+  // elites, not merely tankier. flaskDelta is HELD at -1 (NOT -2): the §13b flask-floor sweep requires
+  // BASE_PLAYER_STATS.maxFlasks (2) + deepest flaskDelta >= 1, so -1 is the deepest sweep-safe delta — the
+  // extra bite comes from bossCellMult + the elite ramp, never from removing the last heal (degenerate).
+  { index: 3, name: '3 Boss Cells', bossCellMult: 1.85, flaskDelta: -1, eliteChanceMult: 1.5, desc: 'Brutal; far denser elites; one fewer flask.' },
+  { index: 4, name: '4 Boss Cells', bossCellMult: 2.2, flaskDelta: -1, eliteChanceMult: 2.0, desc: 'Punishing; elites everywhere; one fewer flask.' },
+  { index: 5, name: '5 Boss Cells', bossCellMult: 2.6, flaskDelta: -1, eliteChanceMult: 2.5, desc: 'The deepest descent; relentless elites; one fewer flask.' },
 ]
 
 // The deepest unlockable tier index (index === array position, so this is the last index).

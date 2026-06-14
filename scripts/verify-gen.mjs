@@ -30,7 +30,7 @@
 //      RunState.advance() chain the game walks; seed-chain + biome-sequence determinism.
 // Exits non-zero on ANY failure so `npm run verify` gates CI.
 
-import { mulberry32 } from '../src/util/rng.js'
+import { mulberry32, dailySeed } from '../src/util/rng.js'
 // Combat-phase PURE modules (Decision 28): importing them here proves they're node-importable.
 import { SWINGS, COMBO_LEN, swingRect } from '../src/combat/hitbox.js'
 import { resolveHit } from '../src/combat/damage.js'
@@ -165,6 +165,34 @@ const RNG_EXPECTED = [
     const v = r()
     if (v !== RNG_EXPECTED[i]) fail(`rng regression pin: draw ${i} = ${v}, expected ${RNG_EXPECTED[i]}`)
   }
+}
+
+// ── 1b) dailySeed: deterministic date→seed, unsigned-32 shape, total on junk, distinct across days (F7 §2b,
+// AC11) ── the daily-challenge contract: same calendar-day string ⇒ same run seed; different days ⇒
+// (overwhelmingly) different seeds. It is PURE + total (never throws/NaN; reads no clock — the date is passed
+// IN), node-importable here, so the verifier pins it like every other pure helper.
+{
+  // Determinism: identical input twice → equal (the same-day-same-run contract).
+  if (dailySeed('2026-06-14') !== dailySeed('2026-06-14')) fail('dailySeed determinism: same date must yield the same seed')
+  // Unsigned-32 shape: result === (result >>> 0), finite, >= 0, and never 0 (fallback 1 — a degenerate seed).
+  const sample = dailySeed('2026-06-14')
+  if (sample !== (sample >>> 0)) fail(`dailySeed must return an unsigned 32-bit int, got ${sample}`)
+  if (!Number.isFinite(sample) || sample < 0) fail(`dailySeed must be finite & >= 0, got ${sample}`)
+  if (sample === 0) fail('dailySeed must never return 0 (degenerate seed; fallback is 1)')
+  // Totality on junk: empty / non-date keys still return finite unsigned ints (never throw / NaN).
+  for (const junk of ['', 'not-a-date', '   ', '🙂🙂']) {
+    let v
+    try {
+      v = dailySeed(junk)
+    } catch (e) {
+      fail(`dailySeed(${JSON.stringify(junk)}) threw: ${e}`)
+    }
+    if (!Number.isFinite(v) || v < 0 || v !== (v >>> 0) || v === 0) fail(`dailySeed(${JSON.stringify(junk)}) must be a finite unsigned-32 int != 0, got ${v}`)
+  }
+  // Distinctness: a small fixed set of consecutive days maps to all-distinct seeds (catches a degenerate hash).
+  const days = ['2026-06-14', '2026-06-15', '2026-06-16', '2026-06-17', '2026-06-18']
+  const seeds = new Set(days.map((d) => dailySeed(d)))
+  if (seeds.size !== days.length) fail(`dailySeed must be distinct across ${days.length} consecutive days, got ${seeds.size} distinct`)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -2295,7 +2323,7 @@ const ALL_PATHS = enumeratePaths()
 }
 
 console.log(
-  `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
+  `verify-gen OK: rng deterministic+pinned; dailySeed (deterministic date→seed, unsigned-32, total, distinct/day); combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${Object.keys(BIOMES).length} biomes (full graph) → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
     `traversable(AC27) + body-clearance: 36×52 body fits every node + entrance→exit (body-aware BFS, AC1/AC2) + ` +
     `branch-treasure standable&reachable(AC67) + layout-template variety (${LAYOUT_TEMPLATES.length} shapes, round-2) + ` +
