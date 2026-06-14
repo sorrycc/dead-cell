@@ -34,9 +34,19 @@ interface ShopOverlayHandlers {
 // the player/interact/heal logic (gameplay frozen), so nothing in the world reacts to these keys.
 
 const PANEL_W = 560
-const PANEL_H = 360
 const ROW_H = 44
 const ROW_TOP_OFFSET = 96 // px below the panel top where the first item row sits.
+const BOTTOM_PAD = 48 // px between the close row and the panel's bottom border. The help line sits
+// INSIDE this band at `panelTop + PANEL_H - 20` (anchored to the border, NOT to BOTTOM_PAD), so
+// BOTTOM_PAD must stay ≥ ~40 for the help (border − 20) to clear the close row's cursor bar.
+// ── PANEL_H is DERIVED from the catalog, not a magic constant (the overflow root-cause fix) ── the
+// list draws one row per SHOP_ITEMS entry + a synthetic "离开"/Leave close row; sizing the panel to
+// that count means it grows/shrinks with the catalog and can never again spill past the border when
+// items are added (mirrors HubScene's data-driven list sizing, HubScene.ts:37-39). Every other Y
+// anchors off panelTop/cy, so this is the only height knob. Fits the 720p viewport up to ~13 rows;
+// a larger catalog would need density/scrolling (a separate slice — YAGNI here).
+const ROW_COUNT = SHOP_ITEMS.length + 1
+const PANEL_H = ROW_TOP_OFFSET + ROW_COUNT * ROW_H + BOTTOM_PAD
 // ── Column x-offsets from the panel's left edge (i18n alignment fix) ── each row cell is its own fixed-x
 // Text, so columns line up under the proportional CJK fallback font (char-count padEnd only aligns under
 // monospace). Name origin at +30 (unchanged); price at +210 (~18px gap past the longest 15ch name); desc
