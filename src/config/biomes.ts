@@ -153,10 +153,11 @@ export const SEWERS: BiomeConfig = {
   difficultyTier: 1,
   endsInBoss: false,
   miniboss: 'sewersMiniboss', // round-2 (§6.6.8) — The Drowned guards this biome's last normal level (a ranged zoner set-piece).
-  // F4 (Decision 1/5) — THE 2-way choice: CATACOMBS (the crypt) vs. OSSUARY (the new parallel mid biome). Both
-  // tier 2 → both Sewers-exit routes are tier-monotone. exits[0] === 'catacombs' so the DEFAULT path (auto-pick
-  // / headless / verifier) is Prison→Sewers→Catacombs→Ramparts === today's BIOME_ORDER (the additive-identity pin).
-  exits: ['catacombs', 'ossuary'],
+  // F4 (Decision 1/5) — THE 3-way choice now: CATACOMBS (the crypt) vs. OSSUARY (the rust galleries) vs.
+  // FROSTWORKS (the ice cavern). All three tier 2 → every Sewers-exit route is tier-monotone. 'frostworks'
+  // is APPENDED LAST so exits[0] === 'catacombs' is unchanged → the DEFAULT path (auto-pick / headless /
+  // verifier) is Prison→Sewers→Catacombs→Ramparts === today's BIOME_ORDER (the additive-identity pin).
+  exits: ['catacombs', 'ossuary', 'frostworks'],
   levels: 3,
   // Enemy pool (Decision 68/AC59) — Sewers adds ranged SHOOTERS to the grunt base (kiting pressure), plus a
   // LIGHT sprinkle of the CHARGER + FLYER (Enrichment round-3 front-loaded-variety fix). The old pool was
@@ -305,6 +306,59 @@ export const OSSUARY: BiomeConfig = {
   },
 }
 
+// ── FROSTWORKS — the THIRD alternate mid biome (F6 sixth-biome, Decision 1, tier 2) ── a SECOND parallel to
+// CATACOMBS/OSSUARY so the SEWERS boundary offers a real 3-way choice (Catacombs vs. Ossuary vs. Frostworks).
+// Same field SHAPE as the others (DRY — the generator reads identical keys). It MUST sit at the SAME
+// difficultyTier (2) as its siblings so EVERY Sewers-exit route is tier-monotone (Sewers t1 → {Catacombs t2 |
+// Ossuary t2 | Frostworks t2} → Ramparts t3 — the verifier proves EVERY path independently). The flavour
+// difference is the ENEMY/LAYOUT/palette mix (a FROST/ICE cavern — cold cyan/white), NOT the difficulty tier.
+// It ships its OWN cut-down miniboss (frostworksMiniboss — The Glacier Warden, config/bosses.ts) so a present
+// miniboss id resolves to a known boss. NOT added to BIOME_ORDER (the default path takes Catacombs) — it lives
+// only in the GRAPH (BIOMES below).
+export const FROSTWORKS: BiomeConfig = {
+  id: 'frostworks',
+  name: 'Frostworks', // en source (read via tName); zh override in zh-CN biome block.
+  difficultyTier: 2, // tier 2 (== Catacombs/Ossuary) so every Sewers-exit route is tier-monotone (Decision 1/§7.6).
+  endsInBoss: false,
+  miniboss: 'frostworksMiniboss', // The Glacier Warden (Decision 2) — a present id resolves to a known boss.
+  exits: ['ramparts'], // F4 (Decision 1) — converges on the boss biome (the third route rejoins at Ramparts).
+  levels: 3, // 3 generated rooms — SAME length as the sibling mid biomes (identical run length regardless of the choice).
+  // Enemy pool (Decision 1/68/AC59) — a DISTINCT mix from Catacombs (spitter/flyer crypt) and Ossuary (shooter/
+  // charger galleries): a SHIELDER + KAMIKAZE "frozen press" feel (slow frontal tanks + brittle rushers down icy
+  // halls) over a grunt base, with a light flyer + bomber. References ONLY known archetype ids with positive weights.
+  enemyPool: [
+    { id: 'grunt', w: 2 },
+    { id: 'shielder', w: 3 }, // the signature frozen-tank tilt (a wall of ice-guards).
+    { id: 'kamikaze', w: 2 }, // brittle rushers shatter into you (distinct from the siblings' pressure).
+    { id: 'flyer', w: 2 }, // an aerial sprinkle so the roster still varies.
+    { id: 'bomber', w: 1 }, // a light lobbed-splash zoner (kept distinct from the sibling mixes).
+  ],
+  // Layout mix (Decision 1) — a STAIRCASE-heavy descent (frozen terraces) so it reads spatially distinct from
+  // Ossuary's islands + Catacombs' shaft, with shaft + islands as alternates (≥2 templates across the sweep — verified).
+  layoutWeights: [
+    { id: 'staircase', w: 5 },
+    { id: 'shaft', w: 2 },
+    { id: 'islands', w: 2 },
+  ],
+  cols: 82, // like Catacombs/Ossuary (within [COLS_MIN, COLS_MAX]).
+  rows: 25,
+  minEnemies: 4,
+  maxEnemies: 7,
+  minPickups: 2,
+  maxPickups: 4,
+  oneWayLedges: 8,
+  hazardPatches: 8, // icy hazard patches (render-driven, in-band with the siblings).
+  platformLenRange: [3, 6],
+  colors: {
+    solid: 0x3b5a6e, // cold steel-blue stone.
+    oneWay: 0x7fb3c9, // frosted-ice ledges (pale cyan).
+    hazard: 0x5dade2, // ice-spike hazard (bright cyan — reads as "cold = danger").
+    bg: 0x0c1620, // deep frozen-night backdrop.
+    entrance: 0x2ecc71, // green (shared marker — the goal reads consistently across biomes).
+    exit: 0xf4d03f, // yellow exit slab (shared).
+  },
+}
+
 // ── RAMPARTS — the FIFTH / LAST biome (Decision 43, tier 3) ── tier bumped 2→3 with the Catacombs insert
 // so the chain stays monotone. Grey-stone fortress. Longest + densest. The boss biome.
 export const RAMPARTS: BiomeConfig = {
@@ -366,10 +420,11 @@ export const RAMPARTS: BiomeConfig = {
 // OSSUARY is NOT here (the default path takes Catacombs); it lives only in the GRAPH (BIOMES). Tiers 0/1/2/3.
 export const BIOME_ORDER: BiomeConfig[] = [PRISON, SEWERS, CATACOMBS, RAMPARTS]
 
-// ── BIOMES (F4 Decision 3.3) ── the authoritative GRAPH node set (id → config) — now INCLUDES `ossuary`.
-// RunState.biome() reads BIOMES[biomeId]; advance() rolls along `exits`; the verifier sweeps every node here
-// (generation/pool/clearance) so an off-the-default-path biome is still proven generable + well-formed.
-export const BIOMES: Record<string, BiomeConfig> = { prison: PRISON, sewers: SEWERS, catacombs: CATACOMBS, ossuary: OSSUARY, ramparts: RAMPARTS }
+// ── BIOMES (F4 Decision 3.3) ── the authoritative GRAPH node set (id → config) — now INCLUDES `ossuary` +
+// `frostworks` (F6 sixth-biome). RunState.biome() reads BIOMES[biomeId]; advance() rolls along `exits`; the
+// verifier sweeps every node here (generation/pool/clearance) so an off-the-default-path biome is still
+// proven generable + well-formed.
+export const BIOMES: Record<string, BiomeConfig> = { prison: PRISON, sewers: SEWERS, catacombs: CATACOMBS, ossuary: OSSUARY, frostworks: FROSTWORKS, ramparts: RAMPARTS }
 
 // ── START_BIOME_ID (F4 Decision 3.3) ── the graph ROOT, so RunState/verifier don't hard-code 'prison'.
 export const START_BIOME_ID = 'prison'

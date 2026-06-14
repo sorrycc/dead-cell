@@ -562,6 +562,71 @@ export const CATACOMBS_MINIBOSS: BossSpec = {
   },
 }
 
+// FROSTWORKS_MINIBOSS — "The Glacier Warden" (F6 sixth-biome, Decision 2): a frost zoner — a sweep-led ranged
+// rotation with a slam to punish + a dash to close; phase 2 tightens telegraphs, moves faster, and ADDS a
+// summon beat (it "calls the frozen guards") — a distinct pressure from the spitter/shooter-led sibling
+// minibosses. HP between Ossuary's reused Bone Warden (270) and lighter than a finale (a tier-2 mid set-piece).
+export const FROSTWORKS_MINIBOSS: BossSpec = {
+  id: 'frostworksMiniboss',
+  name: 'The Glacier Warden',
+  maxHp: 255,
+  bodyW: 66,
+  bodyH: 82,
+  color: 0x5499c7, // resting fill (glacier blue — the Frostworks palette).
+  colorTelegraph: 0xf5d76e, // pale-gold wind-up tell (AC56).
+  colorHurt: 0xffffff,
+  colorPhase: 0xe74c3c,
+  knockbackTakeMult: 0.26,
+  contactDamage: 13,
+  contactCooldown: 0.7,
+  hitstun: 0.0,
+  hurtIframe: 0.06,
+  phases: [
+    // Phase 1 (100%→50%): a sweep/dash/slam zoning rotation — readable telegraphs (the first MUST be 1.0).
+    { hpThreshold: 1.0, telegraphMult: 0.92, moveSpeed: 90, attacks: ['sweep', 'dash', 'slam'] },
+    // Phase 2 (≤50%): tightens telegraphs, moves faster, ADDS the summon beat (the back-half escalation, AC56).
+    { hpThreshold: 0.5, telegraphMult: 0.74, moveSpeed: 120, attacks: ['sweep', 'summon', 'slam', 'dash'] },
+  ],
+  attacks: {
+    slam: {
+      kind: 'slam',
+      telegraph: 0.66,
+      active: 0.16,
+      recovery: 0.55,
+      swing: { reach: 108, halfHeight: 56, forward: 28, damage: 18, knockback: 470 },
+    },
+    dash: {
+      kind: 'dash',
+      telegraph: 0.66,
+      active: 0.4,
+      recovery: 0.72,
+      speed: 720,
+      contactDamage: 21,
+      knockback: 520,
+    },
+    sweep: {
+      kind: 'sweep',
+      telegraph: 0.74,
+      active: 0.13,
+      recovery: 0.62,
+      count: 12,
+      projectile: { speed: 330, damage: 14, knockback: 200, lifetime: 2.3, w: 14, h: 14 },
+    },
+    // 'summon' — the Glacier Warden CALLS THE FROZEN GUARDS: spawn `count` grunt adds at telegraph end (a
+    // split-attention back-half beat). Routed to scene.spawnBossAdds (reuses _spawnEnemy + scaleSpec); maxAdds
+    // caps the live add count so the miniboss room can't snowball (matches the other minibosses' cap).
+    summon: {
+      kind: 'summon',
+      telegraph: 0.85,
+      active: 0.1,
+      recovery: 0.65,
+      count: 2,
+      spec: 'grunt',
+      maxAdds: 2,
+    },
+  },
+}
+
 // ── BOSSES (id → spec) ── the lookup GameScene reads (biome.boss → BOSSES[id], biome.miniboss → BOSSES[id]).
 // THREE finale bosses now (round-2); the boss biome's `boss` is an ARRAY of ids, and GameScene picks one off
 // the run seed so different runs face a different fight (the variety win). The three MINIBOSS specs join the
@@ -573,6 +638,7 @@ export const BOSSES: Record<string, BossSpec> = {
   prisonMiniboss: PRISON_MINIBOSS,
   sewersMiniboss: SEWERS_MINIBOSS,
   catacombsMiniboss: CATACOMBS_MINIBOSS,
+  frostworksMiniboss: FROSTWORKS_MINIBOSS,
 }
 
 // The ordered list (for the verifier's well-formedness sweep — ALL bosses + minibosses are checked, since
@@ -584,6 +650,7 @@ export const BOSS_ORDER: BossSpec[] = [
   PRISON_MINIBOSS,
   SEWERS_MINIBOSS,
   CATACOMBS_MINIBOSS,
+  FROSTWORKS_MINIBOSS,
 ]
 
 // ── Known attack kinds (the verifier asserts every phase's pattern references only these — AC56). The

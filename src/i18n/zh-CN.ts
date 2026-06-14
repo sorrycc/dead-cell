@@ -239,6 +239,7 @@ export const ZH_CN: Dict = {
     prisonMiniboss: { name: '狱卒' },
     sewersMiniboss: { name: '溺亡者' },
     catacombsMiniboss: { name: '白骨守望者' },
+    frostworksMiniboss: { name: '冰川守望者' }, // F6 sixth-biome — The Glacier Warden (the Frostworks set-piece).
   },
 
   // ── 生物群系 (config/biomes.ts) ──
@@ -247,6 +248,7 @@ export const ZH_CN: Dict = {
     sewers: { name: '下水道' },
     catacombs: { name: '地下墓穴' },
     ossuary: { name: '藏骸所' }, // F4 branching-biome-map — the new alternate mid biome (parallel to Catacombs).
+    frostworks: { name: '冰封工坊' }, // F6 sixth-biome — the third Sewers-fork alternate (an ice cavern).
     ramparts: { name: '城墙' },
   },
 
