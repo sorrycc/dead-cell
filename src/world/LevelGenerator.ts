@@ -183,6 +183,11 @@ export const TILE = { EMPTY: 0, SOLID: 1, ONEWAY: 2, HAZARD: 3 }
 // Tile size in world px (Decision 35). The grid is the source of truth; world coords = tile·SIZE.
 export const TILE_SIZE = 32
 
+// ── Boss-arena width in tiles (missing-boss fix) ── the flat boss arena is a FIXED ~one-screen-plus width
+// (50·32 = 1600px ≈ 1.25 viewports) instead of the biome's 88-col sprawl, so the boss (col ~36) is on screen
+// when you drop in (it used to spawn a full screen off the right edge). Within [COLS_MIN, COLS_MAX] (AC28).
+export const BOSS_ARENA_COLS = 50
+
 // ── Player physics, MIRRORED from Player.js + constants.js for the reach envelope (Decision 35). ──
 // These are the REAL controller numbers. They live here (next to the derivation) so re-tuning the
 // player is a one-line update AND the assertions below re-prove soundness at module load. If these
@@ -857,8 +862,11 @@ export function generateLevel(seed: number, biomeConfig: GeneratorBiomeConfig): 
 // hazard rect to a STATIC Arcade body so the player×hazards overlap can actually fire (a normal level
 // never calls it, so normal hazards stay render-only — the §6.4 balance is preserved).
 function generateBossArena(seed: number, biomeConfig: GeneratorBiomeConfig): LevelDescription {
-  // The arena uses the biome's cols/rows clamped to bounds (a wide, tall flat room reads as an arena).
-  const cols = clampInt(biomeConfig.cols, COLS_MIN, COLS_MAX)
+  // ── Arena WIDTH (missing-boss fix) ── a FIXED ~one-screen-plus width (BOSS_ARENA_COLS), NOT the biome's full
+  // 88-col sprawl. At 88 (2816px ≈ 2.2 screens) the boss spawned ~one full screen RIGHT of the entrance and read
+  // as "no boss" on entry; 50 (1600px) keeps the whole arena — incl. the boss at col ~36 — on screen when you
+  // drop in, while leaving room for the boss DASH. Clamped into the shared bounds (AC28). rows stay the biome's.
+  const cols = clampInt(BOSS_ARENA_COLS, COLS_MIN, COLS_MAX)
   const rows = clampInt(biomeConfig.rows, ROWS_MIN, ROWS_MAX)
 
   const tiles: number[][] = []

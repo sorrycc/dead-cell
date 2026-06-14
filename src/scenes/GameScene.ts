@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { GRAVITY, UI_FONT } from '../config/constants.js'
+import { GRAVITY, UI_FONT, DESIGN_HEIGHT } from '../config/constants.js'
 import { Input } from '../core/Input.js'
 import { Player } from '../entities/Player.js'
 import { Enemy } from '../entities/Enemy.js'
@@ -584,9 +584,10 @@ export class GameScene extends Phaser.Scene {
     // ── Build the first generated level (reads the CURRENT biome + seed from RunState) ──
     this._buildLevel()
 
-    // Dev hint label (camera-fixed): controls + the current level seed.
+    // Dev hint label (camera-fixed): controls + the current level seed. Anchored to the BOTTOM-LEFT so it no
+    // longer overlaps the parallel HUD overlay (HP bar / depth / counters) at the top-left (the garbled-text fix).
     this.hint = this.add
-      .text(16, 16, '', { fontFamily: UI_FONT, fontSize: '18px', color: '#8b949e' })
+      .text(16, DESIGN_HEIGHT - 26, '', { fontFamily: UI_FONT, fontSize: '16px', color: '#8b949e' })
       .setScrollFactor(0)
       .setDepth(100)
     this._updateHint()
@@ -853,9 +854,11 @@ export class GameScene extends Phaser.Scene {
     // meta-progression §6.7 (Decision 10) — tier-scale the miniboss too (tankier + harder-hitting at a higher tier).
     const bossSpec = scaleBossSpec(spec, scaleAtDepth(this.runState.depth, this.runState.bossCellMult))
     // Place it near the exit ledge (the guardian of the way out), feet on the exit platform. A miniboss is a
-    // big body, so spawn its center where the exit door sits — the floor/platform collider settles it.
+    // tall body, so rest its BASE on the platform top (the standable cell's solid below) — NOT the standRow
+    // CENTER, which would sink a 78–104px body ~a tile into the floor. Gravity can't settle it (it's frozen —
+    // see _freezeBossGravity / the free-fall fix), so we position the resting Y explicitly here.
     const spawnX = desc.exit.x
-    const spawnY = desc.exit.y
+    const spawnY = (desc.exit.row + 1) * TILE_SIZE - bossSpec.bodyH / 2
     this.boss = new Boss(this as any, spawnX, spawnY, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
       minX: TILE_SIZE * 1.5,
       maxX: desc.worldWidth - TILE_SIZE * 1.5,
@@ -869,6 +872,7 @@ export class GameScene extends Phaser.Scene {
       if (this.runState.curseStacks > 0) this.runState.curseStacks -= 1
     }
     this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the miniboss.
+    this._freezeBossGravity(this.boss) // MUST follow add() — the group re-enables gravity (the free-fall fix).
 
     // Show the boss HP bar for the miniboss (the set-piece reads). _emitHud refreshes it; _onMinibossDefeated /
     // teardown clear it so it never persists. NOTE: isBossRoom stays FALSE (the Door + normal-room path hold);
@@ -888,6 +892,19 @@ export class GameScene extends Phaser.Scene {
     this._clearBossHud()
     this.cameras.main.flash(220, 244, 208, 63) // a brief gold flash marks the set-piece clear.
     this.sfx.bossDefeat() // audio §6.3 (AC5) — the kill flourish (same as the finale's, DRY).
+  }
+
+  // ── _freezeBossGravity(boss) (missing-boss fix) ── a boss/miniboss is added to enemyHurtboxes, a physics
+  // group created with { allowGravity: true }. Phaser RE-APPLIES the group's body defaults on add(): it forces
+  // allowGravity=true AND resets collideWorldBounds=false, CLOBBERING the Boss ctor's setCollideWorldBounds(true).
+  // The boss then free-falls under GRAVITY (1500) through the 1-tile floor and out the world bottom (no backstop)
+  // — it was at y≈27709 in a 832px-tall arena, i.e. far off-screen = "no boss". The boss FSM is purely HORIZONTAL
+  // (onHit zeroes vy; it never jumps), so it needs NO gravity: disable it (the boss rests at its placed Y) and
+  // re-assert world bounds so a dash can't carry it out of the arena. MUST be called AFTER the group add(). DRY:
+  // the finale boss + every miniboss share this seam.
+  _freezeBossGravity(boss: Boss): void {
+    boss.body.setAllowGravity(false)
+    boss.body.setCollideWorldBounds(true)
   }
 
   // ── _enemyNotFlyer(enemyRect) ── the shared collider predicate (Decision 68/AC59): true for a normal
@@ -942,7 +959,11 @@ export class GameScene extends Phaser.Scene {
     // meta-progression §6.7 (Decision 10) — tier-scale the finale boss (the DEEPEST fight; a higher tier makes
     // it tankier + hits harder, exactly as the curve already makes a deep boss tankier — bossCellMult 1 = identity).
     const bossSpec = scaleBossSpec(BOSSES[bossId], scaleAtDepth(this.runState.depth, this.runState.bossCellMult))
-    this.boss = new Boss(this as any, desc.bossSpawn!.x, desc.bossSpawn!.y, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
+    // Rest the boss's BASE on the floor top (the standable cell's solid below). The generator's bossSpawn.y is the
+    // standRow CENTER, which sinks a tall 78–104px body ~a tile into the floor; gravity can't settle it (it's frozen
+    // — see _freezeBossGravity / the free-fall fix), so position the resting Y explicitly from the known bodyH.
+    const bossY = (desc.bossSpawn!.row + 1) * TILE_SIZE - bossSpec.bodyH / 2
+    this.boss = new Boss(this as any, desc.bossSpawn!.x, bossY, bossSpec, this.enemyHitboxes, this.enemyProjectilePool, {
       minX: TILE_SIZE * 1.5,
       maxX: desc.worldWidth - TILE_SIZE * 1.5,
     })
@@ -954,6 +975,7 @@ export class GameScene extends Phaser.Scene {
       if (this.runState.curseStacks > 0) this.runState.curseStacks -= 1
     }
     this.enemyHurtboxes.add(this.boss.collider) // the EXISTING player→enemy overlaps now hit the boss.
+    this._freezeBossGravity(this.boss) // MUST follow add() — the group re-enables gravity (the free-fall fix).
 
     // ── Arena hazard (AC57, review BLOCKER #1) ── promote the arena's HAZARD tiles to STATIC bodies
     // (boss room ONLY — enableHazardBodies) so the player×hazards overlap can actually fire, then wire
