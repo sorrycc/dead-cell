@@ -105,6 +105,13 @@ import { RARITY_IDS, RARITIES, DEPTH_BIAS, EXTRA_AFFIX_POWER, rollRarityId, fold
 // stacks + clamps at/below 0, the curse mult is monotone non-decreasing + every >= 1 (never-weaken), and the
 // loot tier is a known NON-common (guaranteed STRONG) rarity with positive loot gold.
 import { CURSE, LOOT_RARITY, LOOT_GOLD, CURSED_CHEST_CHANCE, effectiveCurseMult } from '../src/config/curses.js'
+// F5 environmental-combat PURE table: the destructible-barrel FLAVOURS (§17). Node-importable (config/props.js
+// imports NOTHING — pure data, Phaser-free + self-contained, the inline burn-status shape) — a successful import
+// re-proves its purity, and the §17 sweep below asserts each flavour is well-formed (positive radius/damage,
+// integer hp > 0, knockback >= 0, a numeric color) AND the flavour contract (oil carries a sane burn status,
+// explosive carries none). It feeds NO seeded run pool (not a weapon/skill/mutation), so the determinism pins
+// are untouched — the same well-formedness guardrail every pure table gets, nothing more.
+import { BARREL_FLAVOURS, BARREL_FLAVOUR_IDS } from '../src/config/props.js'
 
 function fail(msg) {
   console.error(`verify-gen FAILED: ${msg}`)
@@ -2245,6 +2252,48 @@ const ALL_PATHS = enumeratePaths()
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// 17) BARREL FLAVOURS — the destructible blast-prop table (F5 environmental-combat §3 AC1/AC10/§7, Decision 7).
+//     An INDEPENDENT proof of the PURE props table: BARREL_FLAVOUR_IDS is a non-empty list with no lookup drift
+//     (every id resolves in BARREL_FLAVOURS and the entry's id matches its key), every flavour is well-formed
+//     (radius > 0, damage > 0, knockback >= 0, hp an INTEGER > 0, a numeric color), and the flavour CONTRACT
+//     holds: oil HAS a burn status with sane DoT fields, explosive has NONE (pure damage). Flavours are SIBLINGS
+//     (not a tier), so NO monotonicity is required — a simple well-formedness sweep. A barrel feeds NO seeded run
+//     pool, so the determinism pins are untouched. Mirrors the §16 curse / §15 rarity well-formedness sweeps.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+{
+  // ── 17a) BARREL_FLAVOUR_IDS non-empty + id↔key consistency (no lookup drift). ──
+  if (!Array.isArray(BARREL_FLAVOUR_IDS) || BARREL_FLAVOUR_IDS.length === 0) {
+    fail(`BARREL_FLAVOUR_IDS must be a non-empty list, got ${JSON.stringify(BARREL_FLAVOUR_IDS)}`)
+  }
+  for (const id of BARREL_FLAVOUR_IDS) {
+    const f = BARREL_FLAVOURS[id]
+    if (!f) fail(`BARREL_FLAVOUR_IDS has "${id}" with no BARREL_FLAVOURS entry (lookup drift)`)
+    if (f.id !== id) fail(`BARREL_FLAVOURS["${id}"].id = "${f.id}", expected "${id}" (id↔key drift)`)
+  }
+
+  // ── 17b) Per-flavour well-formedness: radius > 0, damage > 0, knockback >= 0, hp an INTEGER > 0, color numeric. ──
+  for (const id of BARREL_FLAVOUR_IDS) {
+    const f = BARREL_FLAVOURS[id]
+    if (!(typeof f.radius === 'number' && f.radius > 0)) fail(`BARREL_FLAVOURS.${id}.radius must be > 0, got ${f.radius}`)
+    if (!(typeof f.damage === 'number' && f.damage > 0)) fail(`BARREL_FLAVOURS.${id}.damage must be > 0, got ${f.damage}`)
+    if (!(typeof f.knockback === 'number' && f.knockback >= 0)) fail(`BARREL_FLAVOURS.${id}.knockback must be >= 0, got ${f.knockback}`)
+    if (!(typeof f.hp === 'number' && Number.isInteger(f.hp) && f.hp > 0)) fail(`BARREL_FLAVOURS.${id}.hp must be an integer > 0, got ${f.hp}`)
+    if (typeof f.color !== 'number') fail(`BARREL_FLAVOURS.${id}.color must be a number, got ${f.color}`)
+  }
+
+  // ── 17c) Flavour contract: oil HAS a burn status (sane DoT fields); explosive has NONE (pure damage). ──
+  const oil = BARREL_FLAVOURS.oil
+  if (!oil) fail(`BARREL_FLAVOURS.oil is missing (the burn flavour — the contract)`)
+  if (!(oil.status && oil.status.kind === 'burn')) fail(`BARREL_FLAVOURS.oil.status must exist with kind 'burn', got ${JSON.stringify(oil.status)}`)
+  if (!(oil.status.duration > 0)) fail(`BARREL_FLAVOURS.oil.status.duration must be > 0, got ${oil.status.duration}`)
+  if (!(oil.status.tickInterval > 0)) fail(`BARREL_FLAVOURS.oil.status.tickInterval must be > 0, got ${oil.status.tickInterval}`)
+  if (!(oil.status.tickDmg > 0)) fail(`BARREL_FLAVOURS.oil.status.tickDmg must be > 0, got ${oil.status.tickDmg}`)
+  const explosive = BARREL_FLAVOURS.explosive
+  if (!explosive) fail(`BARREL_FLAVOURS.explosive is missing (the pure-damage flavour — the contract)`)
+  if (explosive.status != null) fail(`BARREL_FLAVOURS.explosive.status must be undefined/null (pure damage), got ${JSON.stringify(explosive.status)}`)
+}
+
 console.log(
   `verify-gen OK: rng deterministic+pinned; combat hitbox/damage pure+pinned; ` +
     `${N} seeds × ${Object.keys(BIOMES).length} biomes (full graph) → deterministic + bounds(AC28) + no-wall-spawn(AC28) + ` +
@@ -2267,6 +2316,7 @@ console.log(
     `${BLUEPRINTS.length} blueprints (catalog↔tags consistent + resolver identity@empty, AC11); ` +
     `${COLOR_IDS.length} colours (mult identity@0 + monotone, +HP@survival); every weapon+skill colour-tagged; ` +
     `${RARITY_IDS.length} rarity tiers (common identity + monotone damageMult, fold never-weaken + powerMult identity@1); ` +
-    `+ curse config (identity at 0 stacks + monotone damage mult, strong loot tier)`,
+    `+ curse config (identity at 0 stacks + monotone damage mult, strong loot tier); ` +
+    `${BARREL_FLAVOUR_IDS.length} barrel flavours (well-formed; oil burns, explosive pure damage)`,
 )
 process.exit(0)

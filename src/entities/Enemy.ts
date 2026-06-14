@@ -88,6 +88,7 @@ export class Enemy {
   idleTimer: number
   attackCooldownTimer: number
   contactCooldownTimer: number
+  hazardTickTimer: number
   telegraphTimer: number
   strikeTimer: number
   strikeRect: ReturnType<HitboxPool['acquire']>
@@ -199,6 +200,11 @@ export class Enemy {
     this.idleTimer = 0.4 + Math.random() * 0.4 // a short beat before patrolling.
     this.attackCooldownTimer = 0
     this.contactCooldownTimer = 0
+    // ── PER-ENEMY hazard tick gate (F5 environmental-combat, review BLOCKER — per-enemy, NOT a scene-global
+    // scalar) ── > 0 while THIS enemy's spike bite is on cooldown. A scene-global cooldown would starve a PACK
+    // on spikes (the first overlap each window ticks one enemy + locks out the rest); a per-enemy timer lets
+    // every overlapping enemy take damage on its own gate. Decayed on the GAMEPLAY dt below, like every timer.
+    this.hazardTickTimer = 0
     this.telegraphTimer = 0 // > 0 during the attack wind-up (the dodge window).
     this.strikeTimer = 0 // > 0 during the strike's active+recovery (after the telegraph).
     this.strikeRect = null // the pooled hitbox rect of OUR live strike (so we release only ours).
@@ -278,6 +284,7 @@ export class Enemy {
     // Decay shared timers every frame regardless of state.
     this.attackCooldownTimer = Math.max(0, this.attackCooldownTimer - dt)
     this.contactCooldownTimer = Math.max(0, this.contactCooldownTimer - dt)
+    this.hazardTickTimer = Math.max(0, this.hazardTickTimer - dt) // F5 — the per-enemy spike-bite gate.
     this.hurtIframeTimer = Math.max(0, this.hurtIframeTimer - dt)
 
     // ── Status tick (design §6.13, Decision 79, AC66) ── advance bleed/poison/stun on the gameplay dt:

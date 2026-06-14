@@ -7,6 +7,7 @@ import { Boss } from '../entities/Boss.js'
 import { Door } from '../entities/Door.js'
 import { Shop } from '../entities/Shop.js'
 import { CursedChest } from '../entities/CursedChest.js'
+import { Barrel } from '../entities/Prop.js'
 import { ShopOverlay } from '../entities/ShopOverlay.js'
 import { MutationOverlay } from '../entities/MutationOverlay.js'
 import { ColorOverlay } from '../entities/ColorOverlay.js'
@@ -44,6 +45,7 @@ import { BLUEPRINTS } from '../config/blueprints.js'
 import { SHOP_ITEMS } from '../config/shop.js'
 import { ROOM_TYPES, ROOM_NORMAL } from '../config/roomTypes.js'
 import { CURSE, LOOT_RARITY, LOOT_GOLD, CURSED_CHEST_CHANCE, effectiveCurseMult } from '../config/curses.js'
+import { BARREL_FLAVOURS, BARREL_FLAVOUR_IDS } from '../config/props.js'
 import { mulberry32 } from '../util/rng.js'
 import { t, tName } from '../i18n/index.js'
 import type { Input as InputType } from '../core/Input.js'
@@ -170,6 +172,16 @@ const SHOP_LEVEL_CHANCE = 0.55 // ~half-plus of normal levels carry a vendor (a 
 // it up is a real moment). A given run seed always places the same skills.
 const SKILL_PICKUP_CHANCE = 0.45
 
+// ── Destructible blast barrel placement (F5 environmental-combat design §3 AC3, Decision 8/9) ── a RARE
+// per-NORMAL-level chance to place blast barrels, rolled off a fresh seeded RNG with a DISTINCT mix constant
+// (off the generator's pinned draw — the same level-pin discipline as the weapon pickup / shop / chest, so the
+// regression pin + determinism deep-equal stay intact). NEVER on a boss/miniboss level. BARREL_CHANCE gates
+// whether ANY barrel appears (rare — environmental tools are a treat); BARREL_MAX_COUNT caps how many. The
+// per-flavour blast numbers (radius/damage/knockback/hp/status) live in config/props.ts (the verifier-swept
+// pure data). A given run seed always places the same barrels (deterministic replay).
+const BARREL_CHANCE = 0.3 // rare — only ~3-in-10 normal levels carry any barrel.
+const BARREL_MAX_COUNT = 2 // at most two barrels on a level that has any (KISS — a small count).
+
 // ── Timed-clear bonus (build-&-replay design §6.4, AC5 — the "timed door" speed incentive, no new door
 // entity) ── each NORMAL level starts a timer when it's built; reaching the exit Door before CLEAR_BONUS_TIME
 // grants a one-shot bonus (gold + cells) with an FX/HUD pop. Over the threshold → nothing (no penalty). The
@@ -241,6 +253,14 @@ export class GameScene extends Phaser.Scene {
   private chest!: CursedChest | null
   private _chestCollider!: Phaser.Physics.Arcade.Collider | null
   private _chestSeed!: number // the chest's placement seed (for the deterministic loot roll on open).
+  // ── Destructible barrel state (F5 environmental-combat §5) — empty/null until a NORMAL level rarely places
+  // barrels (_maybePlaceBarrels). `barrels` is the per-level list (torn down in _teardownLevel); barrelGroup
+  // holds the bodies for the three break overlaps (player melee / projectile / enemy-knocked-in); _barrelColliders
+  // are those overlaps (removed on teardown). _enemyHazardCollider is the NEW two-way enemy×hazard overlap. ──
+  private barrels!: Barrel[]
+  private barrelGroup!: Phaser.Physics.Arcade.Group | null
+  private _barrelColliders!: Phaser.Physics.Arcade.Collider[]
+  private _enemyHazardCollider!: Phaser.Physics.Arcade.Collider | null
   // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
   private mutationOpen!: boolean
   private mutationOverlay!: MutationOverlay | null
@@ -432,6 +452,13 @@ export class GameScene extends Phaser.Scene {
     this.chest = null // the live CursedChest entity for THIS level, or null (most levels + every boss/miniboss).
     this._chestCollider = null // the player×chest in-range overlap (removed on teardown).
     this._chestSeed = 0 // the chest's placement seed (set in _maybePlaceCursedChest; the deterministic loot roll).
+    // ── Destructible barrel state (F5 environmental-combat) — empty/null until a NORMAL level rarely places
+    // barrels (_maybePlaceBarrels); torn down + cleared by _teardownLevel. The two-way enemy×hazard overlap +
+    // the barrel break overlaps are all per-level (recreated in _buildLevel, removed in _teardownLevel). ──
+    this.barrels = [] // the live barrels for THIS level (most levels have none + every boss/miniboss).
+    this.barrelGroup = null // the per-level Arcade group holding the barrel bodies (for the break overlaps).
+    this._barrelColliders = [] // the player/projectile/enemy × barrelGroup break overlaps (removed on teardown).
+    this._enemyHazardCollider = null // the NEW two-way enemy×hazard overlap (removed on teardown).
     // ── Mutation picker state (build-&-replay §6.5) — null/false until a biome transition offers a choice. ──
     this.mutationOpen = false // true while the mutation overlay is up (gameplay is paused beneath it).
     this.mutationOverlay = null // the live MutationOverlay UI while open, else null.
@@ -876,6 +903,19 @@ export class GameScene extends Phaser.Scene {
       () => this._hazardCooldown <= 0 && this.player.isHittable() && !this.gameOver,
       this,
     )
+    // ── Two-way hazards (F5 environmental-combat §2(a)/AC7, Decision 1/2) ── a NEW enemy×hazard overlap, the
+    // enemy-side mirror of the player×hazard overlap above: an enemy standing on / knocked onto spikes takes
+    // damage on a PER-ENEMY cooldown (the enemy's own hazardTickTimer — NOT a scene scalar, review BLOCKER, so a
+    // PACK on spikes isn't starved) and eventually dies. FLYERS are exempt via _enemyNotFlyer (the noGravity
+    // hover never touches the floor spikes — the same predicate the solids collider uses). Only ever HELPS the
+    // player (an extra way to kill), so the difficulty curve stays monotone.
+    this._wireEnemyHazardCollider()
+
+    // ── Sparse destructible BLAST BARRELS (F5 environmental-combat §3 AC3, Decision 8) ── a RARE per-NORMAL-
+    // level chance to place blast barrels, sourced SCENE-SIDE off the level seed (NOT the generator — keeps the
+    // level pin intact, the off-the-pin discipline). NEVER on a boss/miniboss level (guarded inside). No-op on
+    // the common case (most levels carry none — the additive identity).
+    this._maybePlaceBarrels(desc)
 
     // ── MINIBOSS set-piece (Enrichment round-2, §6.6.8) ── on a non-boss biome's LAST normal level, spawn the
     // biome's declared miniboss INTO this room (it still has its exit Door — the miniboss guards the way out but
@@ -1036,6 +1076,13 @@ export class GameScene extends Phaser.Scene {
       () => this._hazardCooldown <= 0 && this.player.isHittable() && !this.gameOver,
       this,
     )
+    // ── Two-way hazards (F5 environmental-combat §2(a)/AC7, Decision 2 — boss arena) ── wire the SAME enemy×
+    // hazard overlap here too, but its process callback EXCLUDES the boss (review BLOCKER): the boss has a 'dash'
+    // attack that crosses the arena and IS in enemyHurtboxes with frozen gravity, so a dashing boss over a
+    // hazard tile would otherwise take free DoT + an upward-pop knockback on a gravity-frozen body. _isBoss()
+    // skips it (the AC's enemy-hazard death targets NORMAL-level enemies, not the set-piece boss). No barrels
+    // here (set-pieces — KISS); _maybePlaceBarrels is not called from _buildBossLevel.
+    this._wireEnemyHazardCollider()
 
     // ── NO Door (Decision 67) ── the boss IS the gate. We leave this.door / this.doorCollider null, so
     // _teardownLevel's guards skip them AND _onDoorOverlap/_nextLevel/_completeRun can never fire here.
@@ -1079,6 +1126,56 @@ export class GameScene extends Phaser.Scene {
     result.knockbackY = -260 // override: pop straight up off the spikes.
     this._hurtPlayer(result) // scales by the CURSED-room damage-taken mult before onHit (round-3, §6.15).
     this.effects.hit(this.player.body.center.x, this.player.body.center.y, { damage: result.damage })
+  }
+
+  // ── _wireEnemyHazardCollider() (F5 environmental-combat §2(a)/AC7, Decision 1/2) ── wire the NEW two-way
+  // enemy×hazard overlap (the enemy-side mirror of the player×hazard overlap). Shared by _buildLevel AND
+  // _buildBossLevel so the wiring (incl. the boss-exclusion gate) lives in ONE place (DRY). The COLLIDE callback
+  // ticks the overlapping enemy via _onEnemyHazardContact; the PROCESS callback gates on a LIVE, hittable,
+  // NON-FLYER, NON-BOSS enemy (flyers hover off the floor — _enemyNotFlyer; the boss dashes across the arena on
+  // a frozen body — _isBoss, review BLOCKER) AND a per-enemy cooldown (the enemy's hazardTickTimer — NOT a
+  // scene scalar, so a PACK on spikes isn't starved). Removed in _teardownLevel next to the player _hazardCollider.
+  _wireEnemyHazardCollider(): void {
+    if (!this.tileMap) return
+    this._enemyHazardCollider = this.physics.add.overlap(
+      this.enemyHurtboxes,
+      this.tileMap.hazardBodies,
+      (enemyRect: any) => this._onEnemyHazardContact(enemyRect),
+      (enemyRect: any) => {
+        if (this.gameOver) return false
+        if (!this._enemyNotFlyer(enemyRect)) return false // flyers hover off the floor (the noGravity exemption).
+        if (this._isBoss(enemyRect)) return false // the boss dashes across the arena on a frozen body — exclude it.
+        const e = enemyRect.enemyRef
+        return !!e && !e.dead && e.isHittable() && e.hazardTickTimer <= 0 // per-enemy cooldown (not a scene scalar).
+      },
+      this,
+    )
+  }
+
+  // ── _isBoss(enemyRect) (F5 environmental-combat, review BLOCKER) ── true when the overlapping body is the live
+  // boss/miniboss (it shares the enemyHurtboxes group). Used by the enemy×hazard process callback to EXCLUDE the
+  // boss from the spike tick (a dashing boss over a hazard must NOT take free DoT / an upward-pop on a frozen body).
+  _isBoss(enemyRect: any): boolean {
+    return !!this.boss && enemyRect.enemyRef === this.boss
+  }
+
+  // ── _onEnemyHazardContact(enemyRect) (F5 environmental-combat §2(a)/AC7) ── the enemy spike tick, shaped on
+  // _onHazardContact: a fixed bite of damage on the enemy's OWN cooldown (so standing on / knocked onto spikes
+  // hurts but isn't an instant kill). Resolves the enemy from enemyRect.enemyRef, builds a synthetic upward-pop
+  // resolveHit (the _onHazardContact shape, allowBackstab:false so a hazard never crits), calls enemy.onHit
+  // (subtracts HP, pops the enemy up off the spikes — and KILLS it via the existing death path at <= 0 HP), and
+  // pops the impact FX. The process callback already gated live/hittable/non-flyer/non-boss + the per-enemy cooldown.
+  _onEnemyHazardContact(enemyRect: any): void {
+    const enemy = enemyRect.enemyRef
+    if (!enemy || enemy.dead || !enemy.isHittable() || enemy.hazardTickTimer > 0) return
+    enemy.hazardTickTimer = 0.5 // s — the per-enemy gap between spike bites (don't shred HP every frame).
+    // A synthetic hit: a fixed damage + a pop straight up (origin below the enemy so it's shoved upward off the
+    // spikes). allowBackstab:false (a hazard never crits) — the SAME shape the player×hazard tick uses (DRY).
+    const swing = { damage: HAZARD_DAMAGE, knockback: 0 }
+    const result = resolveHit({ cx: enemy.body.center.x, facing: enemy.facing }, enemy.attackerShape, swing, { allowBackstab: false })
+    result.knockbackY = -260 // override: pop straight up off the spikes (mirrors _onHazardContact).
+    enemy.onHit(result) // subtracts HP + knockback; the existing death path fires at <= 0 HP (the environmental kill).
+    this.effects.hit(enemy.body.center.x, enemy.body.center.y, { damage: result.damage })
   }
 
   // ── _onBossDefeated() (design §6.6.3, Decision 67, AC58) ── the boss-kill run-end edge. Shares the
@@ -1367,6 +1464,22 @@ export class GameScene extends Phaser.Scene {
     if (this.chest) {
       this.chest.destroy()
       this.chest = null
+    }
+    // ── Two-way hazard + barrel teardown (F5 environmental-combat §3 AC9, Decision 5) ── remove the enemy×hazard
+    // overlap (mirror the player _hazardCollider block above), remove the per-level barrel break overlaps, destroy
+    // every barrel + clear the list, and destroy the barrel group. Nothing dangles across a rebuild (the Decision
+    // 40 discipline). A pending _breakBarrel delayedCall is harmless on the destroyed entity (its active guards no-op).
+    if (this._enemyHazardCollider) {
+      this.physics.world.removeCollider(this._enemyHazardCollider)
+      this._enemyHazardCollider = null
+    }
+    for (const c of this._barrelColliders) if (c) this.physics.world.removeCollider(c)
+    this._barrelColliders = []
+    for (const b of this.barrels) if (b) b.destroy()
+    this.barrels = []
+    if (this.barrelGroup) {
+      this.barrelGroup.destroy(true) // destroy the group + any remaining children (defensive — barrels already destroyed).
+      this.barrelGroup = null
     }
     if (this.tileMap) {
       this.tileMap.destroy()
@@ -2078,6 +2191,156 @@ export class GameScene extends Phaser.Scene {
       () => !!this.chest && !this.chest.opened && !this.shopOpen && !this.transitioning && !this.gameOver,
       this,
     )
+  }
+
+  // ── _maybePlaceBarrels(desc) (F5 environmental-combat §3 AC3, Decision 4/8) ── deterministically (off the
+  // level seed) maybe place blast barrels on a NORMAL level. Off a fresh mulberry32 with a DISTINCT mix constant
+  // (uncorrelated with the weapon/shop/blueprint/room/chest/skill rolls) — NOT on the generator's pinned draw,
+  // so the level pin + the determinism deep-equal stay intact (the _maybePlaceShop discipline). A LOW chance
+  // (BARREL_CHANCE — rare). NEVER on a boss/miniboss level (a boss level never calls this; a miniboss level
+  // early-returns). Builds the per-level barrelGroup + wires the THREE break overlaps (player melee / projectile /
+  // enemy-knocked-in × barrelGroup), each at a distinct standable spot with a flavour picked off the SAME RNG.
+  _maybePlaceBarrels(desc: LevelDescription): void {
+    // Defensive: never on a boss/miniboss level (a boss level never reaches here; a miniboss level guards here).
+    if (this.runState.isBossLevel() || this.runState.isMinibossLevel()) return
+    const rng = mulberry32((desc.seed ^ 0xba22e1) >>> 0) // a distinct mix constant (uncorrelated with the others).
+    if (rng() >= BARREL_CHANCE) return // RARE — most normal levels carry no barrel (the additive identity).
+    if (!desc.spawnCandidates.length) return // no standable off-the-ends spot → nothing to place.
+
+    // 1..BARREL_MAX_COUNT barrels, each at a DISTINCT spawn-candidate spot (off the entrance/exit ends), each a
+    // flavour picked off the SAME RNG. The group holds the bodies; allowGravity:false (a barrel sits on its tile).
+    const count = 1 + Math.floor(rng() * BARREL_MAX_COUNT) // 1..BARREL_MAX_COUNT (BARREL_CHANCE already gated ANY).
+    this.barrelGroup = this.physics.add.group({ allowGravity: false })
+    const usedSpots = new Set<number>()
+    for (let i = 0; i < count; i++) {
+      // Pick a distinct spawn-candidate index (a few tries; bail if the pool is exhausted — small candidate sets).
+      let idx = -1
+      for (let tries = 0; tries < 6; tries++) {
+        const cand = Math.floor(rng() * desc.spawnCandidates.length)
+        if (!usedSpots.has(cand)) { idx = cand; break }
+      }
+      if (idx < 0) break
+      usedSpots.add(idx)
+      const spot = desc.spawnCandidates[idx]
+      const flavour = BARREL_FLAVOURS[BARREL_FLAVOUR_IDS[Math.floor(rng() * BARREL_FLAVOUR_IDS.length)]]
+      const barrel = new Barrel(this, spot, flavour)
+      this.barrelGroup.add(barrel.rect)
+      this.barrels.push(barrel)
+    }
+    if (!this.barrels.length) {
+      // No barrel actually placed (candidate pool exhausted) — drop the empty group so nothing dangles.
+      this.barrelGroup.destroy(true)
+      this.barrelGroup = null
+      return
+    }
+
+    // ── The THREE break overlaps (Decision 4) ── a barrel is NOT in enemyHurtboxes (it must not count as an
+    // enemy / be folded into kill counts) — instead a dedicated group + three overlaps break it: the player's
+    // melee hitboxes, the player's projectiles (a hit-to-break), and enemyHurtboxes (an enemy knocked/walked in
+    // breaks it on contact). Each resolves the Barrel from rect.barrelRef and routes to _breakBarrel (one-shot
+    // on `broken`). The player knockback that shoves enemies already exists (enemy.onHit → setVelocity), so a
+    // hammer hit that launches an enemy into a barrel triggers the enemy overlap with NO new knockback code.
+    const grp = this.barrelGroup
+    // Player melee × barrels — a synthetic per-swing hit (the hitbox's swing damage breaks the fragile barrel).
+    this._barrelColliders.push(
+      this.physics.add.overlap(
+        (this.playerHitboxes as any).group,
+        grp,
+        (hitboxRect: any, barrelRect: any) => this._onPlayerHitBarrel(hitboxRect, barrelRect),
+        (hitboxRect: any, barrelRect: any) => hitboxRect.hb.active && !!barrelRect.barrelRef && !barrelRect.barrelRef.broken,
+        this,
+      ),
+    )
+    // Player projectiles × barrels — a shot also breaks a barrel (the ranged hit-to-break path).
+    this._barrelColliders.push(
+      this.physics.add.overlap(
+        this.projectilePool.group,
+        grp,
+        (projRect: any, barrelRect: any) => this._onProjectileHitBarrel(projRect, barrelRect),
+        (projRect: any, barrelRect: any) => projRect.pj.active && !!barrelRect.barrelRef && !barrelRect.barrelRef.broken,
+        this,
+      ),
+    )
+    // Enemy × barrels — an enemy bumped/knocked into a barrel breaks it on CONTACT (KISS — the barrel is fragile;
+    // no enemy-damage accounting). Excludes the boss (a set-piece shouldn't pop level dressing it walks past).
+    this._barrelColliders.push(
+      this.physics.add.overlap(
+        this.enemyHurtboxes,
+        grp,
+        (enemyRect: any, barrelRect: any) => this._onEnemyHitBarrel(enemyRect, barrelRect),
+        (enemyRect: any, barrelRect: any) => {
+          const e = enemyRect.enemyRef
+          return !!e && !e.dead && !this._isBoss(enemyRect) && !!barrelRect.barrelRef && !barrelRect.barrelRef.broken
+        },
+        this,
+      ),
+    )
+  }
+
+  // ── _onPlayerHitBarrel / _onProjectileHitBarrel / _onEnemyHitBarrel ── the three break-path callbacks (the
+  // hit-to-break + the enemy-contact-break). Each resolves the Barrel from rect.barrelRef, applies the break,
+  // and (if now broken) detonates via _breakBarrel. The `broken` one-shot guard + the process-callback filter
+  // keep a multi-frame overlap from re-firing.
+  _onPlayerHitBarrel(hitboxRect: any, barrelRect: any): void {
+    const hb = hitboxRect.hb
+    const barrel = barrelRect.barrelRef
+    if (!hb.active || !barrel || barrel.broken) return
+    // A synthetic result carrying the swing's damage (a HitResult-shaped object — only `damage` is read by onHit).
+    barrel.onHit({ damage: hb.swing.damage, knockbackX: 0, knockbackY: 0, isBackstab: false } as HitResult)
+    if (barrel.broken) this._breakBarrel(barrel)
+  }
+
+  _onProjectileHitBarrel(projRect: any, barrelRect: any): void {
+    const pj = projRect.pj
+    const barrel = barrelRect.barrelRef
+    if (!pj.active || !barrel || barrel.broken) return
+    barrel.onHit({ damage: pj.spec.damage, knockbackX: 0, knockbackY: 0, isBackstab: false } as HitResult)
+    if (barrel.broken) this._breakBarrel(barrel)
+  }
+
+  _onEnemyHitBarrel(enemyRect: any, barrelRect: any): void {
+    const enemy = enemyRect.enemyRef
+    const barrel = barrelRect.barrelRef
+    if (!enemy || enemy.dead || !barrel || barrel.broken) return
+    barrel.markBroken() // contact = break (KISS — the fragile barrel; no enemy-damage accounting).
+    this._breakBarrel(barrel)
+  }
+
+  // ── _breakBarrel(barrel) (F5 environmental-combat §3 AC6, Decision 3/5) ── the radial blast (the AC target).
+  // Fires EXACTLY ONCE per barrel: the caller already flipped `broken`, and disableBody() drops the body so the
+  // overlap can't re-enter. REVIEW BLOCKER (the in-callback body-destruction footgun): this fires from INSIDE an
+  // Arcade overlap callback, so it does NOT destroy the body synchronously — it disables the body + runs the
+  // blast/FX, then DEFERS barrel.destroy() + the group-removal to time.delayedCall(0) (the door-transition
+  // discipline). Reuses BOTH radial helpers (NO new combat math): _radialDamage hits enemies+boss (oil passes its
+  // burn status → the existing DoT path), _enemyRadialDamage hurts the player if too close (routed through
+  // _hurtPlayer + isHittable so dodge i-frames negate it). NEVER breaks other barrels (Decision 5 — the radial
+  // helpers don't see barrels, so no chain / no re-entrancy on the barrel list).
+  _breakBarrel(barrel: Barrel): void {
+    if (!barrel || !barrel.body || !barrel.body.enable) return // already broken+disabled → a defensive no-op.
+    const f = barrel.flavour
+    const x = barrel.body.center.x
+    const y = barrel.body.center.y
+    // Disable the body NOW (still inside the callback) so a multi-frame overlap can't re-fire the blast; the
+    // actual destroy is deferred below (never destroy a body while Arcade iterates world.step — the footgun).
+    barrel.disableBody()
+    // Enemy side: damage every live enemy + boss in range, shoving them out; oil applies its burn status.
+    // f.status (oil's burn) is structurally a WeaponStatus (kind/duration/tickInterval/tickDmg); explosive → undefined.
+    this._radialDamage(x, y, f.radius, f.damage, f.knockback, f.status)
+    // Player side: hurt the player if within the blast radius (the risk — don't stand too close). Routed through
+    // _hurtPlayer + isHittable() so dodge negates it and the cursed mults apply (DRY — the existing funnel).
+    this._enemyRadialDamage(x, y, { radius: f.radius, damage: f.damage, knockback: f.knockback })
+    // FEEDBACK — a spark pop + a flavour-tinted camera flash (programmer-art only; reuses the blast-ring FX shape).
+    this.effects.hit(x, y, { damage: 0 })
+    this.cameras.main.flash(140, (f.color >> 16) & 0xff, (f.color >> 8) & 0xff, f.color & 0xff)
+    this.sfx.hit({ damage: f.damage }) // the impact cue (a no-op-safe façade call).
+    // DEFER the destroy + delist off the physics step (footgun guard — door-transition discipline). delayedCall(0)
+    // runs next frame, after world.step is done. Idempotent if a teardown destroyed it first (active guard).
+    this.time.delayedCall(0, () => {
+      const i = this.barrels.indexOf(barrel)
+      if (i >= 0) this.barrels.splice(i, 1)
+      if (this.barrelGroup && barrel.rect && barrel.rect.active) this.barrelGroup.remove(barrel.rect, false, false)
+      barrel.destroy()
+    })
   }
 
   // ── _placeBranchReward(desc) (§6.14, Decision 80, AC67) ── place a GUARANTEED reward on the optional
